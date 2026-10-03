@@ -13,6 +13,17 @@ log = logging.getLogger(__name__)
 
 BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
 SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/summary"
+SCOREPANEL_URL = "https://site.web.api.espn.com/apis/site/v2/sports/{path}/scorepanel"
+
+
+@dataclass(frozen=True)
+class Innings:
+    """One cricket innings: runs, wickets and overs bowled."""
+
+    runs: int
+    wickets: int
+    overs: float
+    batting: bool
 
 
 @dataclass(frozen=True)
@@ -22,6 +33,12 @@ class Team:
     abbrev: str
     score: int
     logo: str | None = None
+    score_text: str = ""  # cricket, e.g. "161/5 (18/20 ov, target 156)"
+    innings: tuple[Innings, ...] = ()
+
+    @property
+    def wickets(self) -> int:
+        return sum(i.wickets for i in self.innings)
 
 
 @dataclass(frozen=True)
@@ -41,15 +58,15 @@ class Goal:
 
 @dataclass(frozen=True)
 class ScoringPlay:
-    """An NFL scoring play, e.g. a touchdown with its yardage and kick."""
+    """An NFL or MLB scoring play, e.g. a touchdown with its yardage and kick."""
 
     id: str
-    kind: str  # e.g. "Passing Touchdown", "Field Goal Good"
-    category: str  # e.g. "Touchdown", "Field Goal", "Safety"
+    kind: str  # e.g. "Passing Touchdown", "Field Goal Good"; empty for MLB
+    category: str  # e.g. "Touchdown", "Field Goal", "Home Run", "Run Scored"
     text: str  # e.g. "Roman Wilson 12 Yd pass from Aaron Rodgers (Chris Boswell Kick)"
+    team_id: str
     team_abbrev: str
-    period: int
-    clock: str
+    when: str  # e.g. "Q1 2:59" or "Bottom 1st"
     away_score: int
     home_score: int
 
@@ -60,9 +77,9 @@ class ScoringPlay:
 
 @dataclass(frozen=True)
 class Leader:
-    """A statistical game leader, e.g. PASS: A. Rodgers 22/40, 299 YDS, 3 TD."""
+    """A standout player, e.g. PASS: A. Rodgers 22/40, 299 YDS, 3 TD."""
 
-    category: str
+    category: str  # stat category ("PASS") or team abbreviation ("NY")
     athlete: str
     stats: str
 
@@ -80,12 +97,17 @@ class Game:
     last_play: str | None = None
     goals: tuple[Goal, ...] = field(default_factory=tuple)
     leaders: tuple[Leader, ...] = field(default_factory=tuple)
+    period: int = 0
+    summary: str = ""  # cricket, e.g. "India won toss & batted", "RCB won by 5 wkts"
+
+    @property
+    def league(self) -> League:
+        return LEAGUES[self.league_key]
 
     @property
     def teams(self) -> tuple[Team, Team]:
-        """Both teams in display order: home first for soccer, away first (US style) otherwise."""
-        league = LEAGUES.get(self.league_key)
-        if league is not None and league.sport == "soccer":
+        """Both teams in display order: home first for soccer and cricket, away first (US style) otherwise."""
+        if self.league.sport in ("soccer", "cricket"):
             return (self.home, self.away)
         return (self.away, self.home)
 
@@ -97,6 +119,8 @@ class Game:
 
     def scoreline(self) -> str:
         first, second = self.teams
+        if self.league.sport == "cricket":
+            return " · ".join(f"{t.name} {t.score_text}".strip() for t in self.teams)
         return f"{first.name} {first.score} - {second.score} {second.name}"
 
 
@@ -107,14 +131,38 @@ def _int(value) -> int:
         return 0
 
 
-def _parse_team(competitor: dict) -> Team:
+def _float(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def period_label(n: int) -> str:
+    """Football/basketball period name: Q1-Q4, then OT, 2OT..."""
+    return f"Q{n}" if n <= 4 else "OT" if n == 5 else f"{n - 4}OT"
+
+
+def _parse_team(competitor: dict, sport: str) -> Team:
     team = competitor.get("team", {})
+    innings: tuple[Innings, ...] = ()
+    score_text = ""
+    score = _int(competitor.get("score"))
+    if sport == "cricket":
+        score_text = competitor.get("score") or ""
+        innings = tuple(
+            Innings(_int(l.get("runs")), _int(l.get("wickets")), _float(l.get("overs")), bool(l.get("isBatting")))
+            for l in competitor.get("linescores") or []
+        )
+        score = sum(i.runs for i in innings)
     return Team(
         id=str(team.get("id", competitor.get("id", ""))),
         name=team.get("displayName") or team.get("name", "?"),
         abbrev=team.get("abbreviation", "?"),
-        score=_int(competitor.get("score")),
+        score=score,
         logo=team.get("logo"),
+        score_text=score_text,
+        innings=innings,
     )
 
 
@@ -136,35 +184,61 @@ def _parse_goals(details: list[dict]) -> tuple[Goal, ...]:
     return tuple(goals)
 
 
+# NFL lists game-wide leaders per stat category.
 LEADER_CATEGORIES = {"passingYards": "PASS", "rushingYards": "RUSH", "receivingYards": "REC"}
+# NBA and MLB list leaders per team; their overall "rating" leader has the
+# fullest stat line (e.g. "36 PTS, 7 AST, 3 STL").
+TEAM_RATING_CATEGORIES = ("rating", "MLBRating")
 
 
-def _parse_leaders(categories: list[dict]) -> tuple[Leader, ...]:
+def _list(value) -> list[dict]:
+    """ESPN sometimes sends a link object where other leagues send a list."""
+    return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
+
+
+def _top(cat: dict) -> tuple[str, str] | None:
+    top = (_list(cat.get("leaders")) or [None])[0]
+    if not top:
+        return None
+    athlete = top.get("athlete") or {}
+    return athlete.get("shortName") or athlete.get("displayName", "?"), top.get("displayValue", "")
+
+
+def _parse_leaders(comp: dict, competitors: list[dict]) -> tuple[Leader, ...]:
     leaders = []
-    for cat in categories:
+    for cat in _list(comp.get("leaders")):
         label = LEADER_CATEGORIES.get(cat.get("name", ""))
-        top = (cat.get("leaders") or [None])[0]
-        if label is None or not top:
-            continue
-        athlete = top.get("athlete") or {}
-        leaders.append(
-            Leader(label, athlete.get("shortName") or athlete.get("displayName", "?"), top.get("displayValue", ""))
-        )
+        top = _top(cat)
+        if label and top:
+            leaders.append(Leader(label, *top))
+    if leaders:
+        return tuple(leaders)
+    for c in competitors:
+        cats = {cat.get("name"): cat for cat in _list(c.get("leaders"))}
+        cat = next((cats[n] for n in TEAM_RATING_CATEGORIES if n in cats), None)
+        top = _top(cat) if cat else None
+        if top:
+            leaders.append(Leader((c.get("team") or {}).get("abbreviation", "?"), *top))
     return tuple(leaders)
 
 
-def parse_scoring_plays(summary: dict) -> list[ScoringPlay]:
+def parse_scoring_plays(summary: dict, sport: str = "football") -> list[ScoringPlay]:
+    if sport == "baseball":
+        return _parse_baseball_plays(summary)
     plays = []
     for p in summary.get("scoringPlays") or []:
+        team = p.get("team") or {}
+        period = _int((p.get("period") or {}).get("number"))
+        clock = (p.get("clock") or {}).get("displayValue", "")
         plays.append(
             ScoringPlay(
                 id=str(p.get("id", "")),
                 kind=(p.get("type") or {}).get("text", ""),
                 category=(p.get("scoringType") or {}).get("displayName", ""),
                 text=(p.get("text") or "").strip(),
-                team_abbrev=(p.get("team") or {}).get("abbreviation", ""),
-                period=_int((p.get("period") or {}).get("number")),
-                clock=(p.get("clock") or {}).get("displayValue", ""),
+                team_id=str(team.get("id", "")),
+                team_abbrev=team.get("abbreviation", ""),
+                when=f"{period_label(period)} {clock}".strip() if period else clock,
                 away_score=_int(p.get("awayScore")),
                 home_score=_int(p.get("homeScore")),
             )
@@ -172,37 +246,89 @@ def parse_scoring_plays(summary: dict) -> list[ScoringPlay]:
     return plays
 
 
+def _parse_baseball_plays(summary: dict) -> list[ScoringPlay]:
+    plays = []
+    for p in summary.get("plays") or []:
+        if not p.get("scoringPlay"):
+            continue
+        text = (p.get("text") or "").strip()
+        runs = _int(p.get("scoreValue"))
+        if "homered" in text.lower():
+            category = "Grand Slam" if runs == 4 else "Home Run"
+        else:
+            category = "Runs Scored" if runs > 1 else "Run Scored"
+        period = p.get("period") or {}
+        inning = (period.get("displayValue") or "").replace(" Inning", "")
+        plays.append(
+            ScoringPlay(
+                id=str(p.get("id", "")),
+                kind="",
+                category=category,
+                text=text,
+                team_id=str((p.get("team") or {}).get("id", "")),
+                team_abbrev="",
+                when=f"{period.get('type', '')} {inning}".strip(),
+                away_score=_int(p.get("awayScore")),
+                home_score=_int(p.get("homeScore")),
+            )
+        )
+    return plays
+
+
+def _parse_event(event: dict, league: League) -> Game | None:
+    comps = event.get("competitions") or []
+    if not comps:
+        return None
+    comp = comps[0]
+    competitors = comp.get("competitors", [])
+    home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+    away = next((c for c in competitors if c.get("homeAway") == "away"), None)
+    if home is None or away is None:
+        return None
+    status = comp.get("status") or event.get("status") or {}
+    stype = status.get("type", {})
+    situation = comp.get("situation") or {}
+    return Game(
+        id=str(event.get("id")),
+        league_key=league.key,
+        home=_parse_team(home, league.sport),
+        away=_parse_team(away, league.sport),
+        state=stype.get("state", "pre"),
+        status_name=stype.get("name", ""),
+        detail=stype.get("shortDetail") or stype.get("detail", ""),
+        start=event.get("date", ""),
+        last_play=(situation.get("lastPlay") or {}).get("text"),
+        goals=_parse_goals(comp.get("details") or []),
+        leaders=_parse_leaders(comp, competitors),
+        period=_int(status.get("period")),
+        summary=status.get("summary") or "",
+    )
+
+
 def parse_scoreboard(data: dict, league: League) -> list[Game]:
     games = []
     for event in data.get("events", []):
-        comps = event.get("competitions") or []
-        if not comps:
+        try:
+            game = _parse_event(event, league)
+        except Exception:
+            # One oddly shaped game shouldn't stop updates for the whole league.
+            log.exception("Skipping unreadable %s event %s", league.key, event.get("id"))
             continue
-        comp = comps[0]
-        competitors = comp.get("competitors", [])
-        home = next((c for c in competitors if c.get("homeAway") == "home"), None)
-        away = next((c for c in competitors if c.get("homeAway") == "away"), None)
-        if home is None or away is None:
-            continue
-        status = comp.get("status") or event.get("status") or {}
-        stype = status.get("type", {})
-        situation = comp.get("situation") or {}
-        games.append(
-            Game(
-                id=str(event.get("id")),
-                league_key=league.key,
-                home=_parse_team(home),
-                away=_parse_team(away),
-                state=stype.get("state", "pre"),
-                status_name=stype.get("name", ""),
-                detail=stype.get("shortDetail") or stype.get("detail", ""),
-                start=event.get("date", ""),
-                last_play=(situation.get("lastPlay") or {}).get("text"),
-                goals=_parse_goals(comp.get("details") or []),
-                leaders=_parse_leaders(comp.get("leaders") or []),
-            )
-        )
+        if game is not None:
+            games.append(game)
     return games
+
+
+def is_international(event: dict) -> bool:
+    """True for Tests, ODIs and T20Is (men's and women's)."""
+    comp = (event.get("competitions") or [{}])[0]
+    return str((comp.get("class") or {}).get("internationalClassId", "0")) not in ("", "0")
+
+
+def parse_scorepanel(data: dict, league: League) -> list[Game]:
+    """Every current international cricket match, across all series."""
+    events = [e for block in data.get("scores", []) for e in block.get("events", []) if is_international(e)]
+    return parse_scoreboard({"events": events}, league)
 
 
 class ESPNClient:
@@ -226,12 +352,15 @@ class ESPNClient:
             return await resp.json(content_type=None)
 
     async def scoreboard(self, league: League) -> list[Game]:
+        if league.feed == "scorepanel":
+            data = await self._get_json(SCOREPANEL_URL.format(path=league.path))
+            return parse_scorepanel(data, league)
         data = await self._get_json(BASE_URL.format(path=league.path))
         return parse_scoreboard(data, league)
 
     async def scoring_plays(self, league: League, event_id: str) -> list[ScoringPlay]:
         data = await self._get_json(SUMMARY_URL.format(path=league.path), {"event": event_id})
-        return parse_scoring_plays(data)
+        return parse_scoring_plays(data, league.sport)
 
     async def close(self) -> None:
         if self._owns_session and self._session and not self._session.closed:

@@ -8,8 +8,15 @@ from .espn import Game, Goal, ScoringPlay
 
 KICKOFF = "kickoff"
 SCORE = "score"
+PERIOD = "period"  # basketball: end of a quarter
 HALFTIME = "halftime"
+WICKET = "wicket"
+INNINGS = "innings"  # cricket: innings break
 FINAL = "final"
+
+# Sports where every change in score is posted. Basketball scores change too
+# often (posted per quarter instead) and cricket posts wickets, not runs.
+PER_SCORE_SPORTS = ("football", "soccer", "baseball")
 
 
 @dataclass(frozen=True)
@@ -19,18 +26,36 @@ class Update:
     new_goals: tuple[Goal, ...] = ()
     score_decreased: bool = False  # e.g. a goal overturned by VAR
     prev_total: int = 0  # combined score before this update
-    play: ScoringPlay | None = None  # NFL scoring play details, when known
+    play: ScoringPlay | None = None  # NFL/MLB scoring play details, when known
+    count: int = 1  # wickets that fell since the last snapshot
+
+
+def _batting(game: Game) -> str | None:
+    """ID of the team currently batting in a cricket match."""
+    for team in game.teams:
+        if team.innings and team.innings[-1].batting:
+            return team.id
+    return None
 
 
 def diff_game(prev: Game, cur: Game) -> list[Update]:
+    sport = cur.league.sport
     updates: list[Update] = []
     if prev.state == "pre" and cur.state == "in":
         updates.append(Update(KICKOFF, cur))
-    if (prev.home.score, prev.away.score) != (cur.home.score, cur.away.score):
-        decreased = cur.home.score + cur.away.score < prev.home.score + prev.away.score
-        new_goals = () if decreased else cur.goals[len(prev.goals):]
+    if sport in PER_SCORE_SPORTS and (prev.home.score, prev.away.score) != (cur.home.score, cur.away.score):
         prev_total = prev.home.score + prev.away.score
+        decreased = cur.home.score + cur.away.score < prev_total
+        new_goals = () if decreased else cur.goals[len(prev.goals):]
         updates.append(Update(SCORE, cur, new_goals, decreased, prev_total))
+    if sport == "cricket" and cur.state == "in":
+        fallen = (cur.home.wickets + cur.away.wickets) - (prev.home.wickets + prev.away.wickets)
+        if fallen > 0:
+            updates.append(Update(WICKET, cur, count=fallen))
+        if _batting(prev) is not None and _batting(cur) not in (None, _batting(prev)):
+            updates.append(Update(INNINGS, cur))
+    if sport == "basketball" and cur.status_name == "STATUS_END_PERIOD" and prev.status_name != "STATUS_END_PERIOD":
+        updates.append(Update(PERIOD, cur))
     if cur.status_name == "STATUS_HALFTIME" and prev.status_name != "STATUS_HALFTIME":
         updates.append(Update(HALFTIME, cur))
     if prev.state != "post" and cur.state == "post":
