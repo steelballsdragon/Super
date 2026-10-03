@@ -221,3 +221,34 @@ def ball_messages(game: Game, balls: list[Ball]) -> list[str]:
     if current != header:
         messages.append(current)
     return messages
+
+
+BOARD_UPCOMING = 6
+BOARD_FINISHED = 6
+EMBED_LIMIT = 4000
+
+
+def board_embed(sections: list[tuple[str, list[Game]]]) -> discord.Embed:
+    """The always-on live scoreboard: one section per followed league."""
+    blocks = []
+    for key, games in sections:
+        league = LEAGUES[key]
+        live = sorted((g for g in games if g.state == "in"), key=lambda g: g.start)
+        upcoming = sorted((g for g in games if g.state == "pre"), key=lambda g: g.start)[:BOARD_UPCOMING]
+        done = sorted((g for g in games if g.state == "post"), key=lambda g: g.start, reverse=True)[:BOARD_FINISHED]
+        lines = [game_line(g) for g in live + upcoming + done]
+        if lines:
+            blocks.append(f"**{league.emoji} {league.name}**\n" + "\n".join(lines))
+    desc = ""
+    for block in blocks:
+        if len(desc) + len(block) + 2 > EMBED_LIMIT:
+            desc += "\n…more games not shown"
+            break
+        desc += ("\n\n" if desc else "") + block
+    embed = discord.Embed(
+        title="📺 Live scoreboard",
+        description=desc or "No games on the scoreboard right now.",
+        color=discord.Color.red() if any(g.state == "in" for _, gs in sections for g in gs) else discord.Color.blurple(),
+    )
+    embed.set_footer(text="Updates automatically · 🔴 live · 🕒 upcoming · ✅ final")
+    return embed

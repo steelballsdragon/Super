@@ -16,11 +16,12 @@ from discord.ext import tasks
 
 from .balls import BallFeed
 from .espn import ESPNClient
-from .formatting import ball_messages, scoreboard_embed, update_embed
+from .formatting import ball_messages, board_embed, scoreboard_embed, update_embed
 from .leagues import LEAGUES
 from .plays import AssistResolver, PlayResolver
+from .settings import SettingsStore, StateStore
 from .storage import SubscriptionStore
-from .tracker import OVERS, WICKET, Tracker
+from .tracker import CALLED_OFF, FINAL, KICKOFF, OVERS, WICKET, Tracker
 
 log = logging.getLogger("sportsbot")
 
@@ -35,6 +36,11 @@ MIN_POLL_SECONDS = 5
 LEGACY_DEFAULT_POLL = "30"
 
 TEAM_LIST_TTL = 6 * 3600
+
+# Game threads: the start and the result go in the channel, everything else in
+# the game's thread. Threads are forgotten a few days after they're made.
+CHANNEL_KINDS = (KICKOFF, FINAL, CALLED_OFF)
+THREAD_KEEP_SECONDS = 4 * 86400
 
 
 @dataclass
@@ -59,10 +65,22 @@ LEAGUE_CHOICES = [app_commands.Choice(name=l.name, value=l.key) for l in LEAGUES
 
 
 class SportsBot(discord.Client):
-    def __init__(self, store: SubscriptionStore, poll_interval: float, dev_guild: int | None):
+    def __init__(
+        self,
+        store: SubscriptionStore,
+        poll_interval: float,
+        dev_guild: int | None,
+        settings: SettingsStore | None = None,
+        state: StateStore | None = None,
+    ):
         super().__init__(intents=discord.Intents.default())
         self.tree = app_commands.CommandTree(self)
         self.store = store
+        # Settings and state live next to the subscriptions file.
+        self.settings = settings or SettingsStore(Path(store.path).with_name("settings.json"))
+        self.state = state or StateStore(Path(store.path).with_name("state.json"))
+        self.latest: dict[str, list] = {}  # latest games per league, for scoreboards
+        self._boards_shown: dict[int, dict] = {}
         self.espn = ESPNClient()
         self.tracker = Tracker()
         # NFL, MLB and NHL scores are posted as the actual scoring plays.
@@ -106,6 +124,7 @@ class SportsBot(discord.Client):
         return lambda event_id: self.espn.goal_details(league, event_id)
 
     async def setup_hook(self) -> None:
+        self._prune_threads()
         register_commands(self)
         if self.dev_guild:
             guild = discord.Object(id=self.dev_guild)
@@ -130,6 +149,7 @@ class SportsBot(discord.Client):
             if key not in active:
                 self.tracker.forget(key)
         await asyncio.gather(*(self._poll_league(key) for key in active if key in LEAGUES))
+        await self._refresh_boards()
 
     @poll.before_loop
     async def _before_poll(self) -> None:
@@ -144,6 +164,7 @@ class SportsBot(discord.Client):
             health.error, health.error_at = f"{type(exc).__name__}: {exc}"[:200], time.time()
             return
         health.checked_at, health.live_games = time.time(), sum(g.state == "in" for g in games)
+        self.latest[key] = games
         updates = self.tracker.update(key, games)
         resolver = self.play_resolvers.get(key)
         if resolver is not None:
@@ -163,7 +184,7 @@ class SportsBot(discord.Client):
                 continue
             embed = update_embed(update)
             for channel_id in channels:
-                await self._send(channel_id, embed)
+                await self._deliver(channel_id, update.game, update.kind, embed=embed)
 
     async def _post_balls(self, feed: BallFeed, games, subs) -> None:
         live = [g for g in games if g.state == "in"]
@@ -175,19 +196,108 @@ class SportsBot(discord.Client):
             balls = await feed.new_balls(game)
             for message in ball_messages(game, balls):
                 for channel_id in channels:
-                    await self._send(channel_id, content=message)
+                    await self._deliver(channel_id, game, "ball", content=message)
 
-    async def _send(self, channel_id: int, embed: discord.Embed | None = None, content: str | None = None) -> None:
-        channel = self.get_channel(channel_id)
+    async def _channel(self, channel_id: int):
+        return self.get_channel(channel_id) or await self.fetch_channel(channel_id)
+
+    async def _send(self, channel_id: int, embed: discord.Embed | None = None, content: str | None = None):
+        """Posts to a channel or thread; returns the message, or None if it failed."""
         try:
-            if channel is None:
-                channel = await self.fetch_channel(channel_id)
-            await channel.send(content=content, embed=embed)
+            channel = await self._channel(channel_id)
+            return await channel.send(content=content, embed=embed)
         except discord.NotFound:
             log.warning("Channel %s no longer exists; dropping its subscriptions", channel_id)
             self.store.remove_channel(channel_id)
         except discord.HTTPException:
             log.exception("Failed to post update to channel %s", channel_id)
+        return None
+
+    # ----- game threads -----
+
+    def _thread_key(self, channel_id: int, game) -> str:
+        return f"{channel_id}:{game.league_key}:{game.id}"
+
+    async def _deliver(self, channel_id: int, game, kind: str, embed=None, content=None) -> None:
+        """Sends an update, into the game's thread when the channel uses threads."""
+        if not self.settings.get(channel_id).threads:
+            await self._send(channel_id, embed, content)
+            return
+        key = self._thread_key(channel_id, game)
+        if kind in CHANNEL_KINDS:
+            message = await self._send(channel_id, embed, content)
+            if kind == KICKOFF and message is not None:
+                await self._open_thread(key, game, message)
+            elif kind != KICKOFF and (thread_id := self._thread_id(key)):
+                await self._send_to_thread(thread_id, embed, content)  # keep the thread complete
+                self.state.delete("threads", key)
+            return
+        thread_id = self._thread_id(key)
+        if thread_id is None:
+            # We didn't see the start (e.g. followed mid-game): post a header to hang the thread on.
+            header = discord.Embed(description=f"🔴 **{game.scoreline()}**\nLive updates in the thread below.")
+            message = await self._send(channel_id, header)
+            thread_id = await self._open_thread(key, game, message) if message else None
+        if thread_id is None or not await self._send_to_thread(thread_id, embed, content):
+            await self._send(channel_id, embed, content)  # no thread permissions: fall back
+
+    def _thread_id(self, key: str) -> int | None:
+        entry = self.state.get("threads", key)
+        return entry["id"] if entry else None
+
+    async def _open_thread(self, key: str, game, message) -> int | None:
+        a, b = game.teams
+        name = f"{game.league.emoji} {a.abbrev} v {b.abbrev} · {game.league.name}"[:100]
+        try:
+            thread = await message.create_thread(name=name, auto_archive_duration=1440)
+        except discord.HTTPException:
+            log.warning("Couldn't create a thread for %s (missing Create Public Threads?)", key, exc_info=True)
+            return None
+        self.state.set("threads", key, {"id": thread.id, "at": time.time()})
+        return thread.id
+
+    async def _send_to_thread(self, thread_id: int, embed=None, content=None) -> bool:
+        try:
+            thread = await self._channel(thread_id)
+            await thread.send(content=content, embed=embed)
+            return True
+        except discord.HTTPException:
+            log.warning("Couldn't post in thread %s", thread_id, exc_info=True)
+            return False
+
+    def _prune_threads(self) -> None:
+        cutoff = time.time() - THREAD_KEEP_SECONDS
+        for key, entry in self.state.items("threads"):
+            if entry.get("at", 0) < cutoff:
+                self.state.delete("threads", key)
+
+    # ----- live scoreboards -----
+
+    def _board_sections(self, channel_id: int) -> list[tuple[str, list]]:
+        sections = []
+        subs = self.store.for_channel(channel_id)
+        for key in [k for k in LEAGUES if any(s.league == k for s in subs)]:
+            teams = [s.team for s in subs if s.league == key]
+            games = self.latest.get(key, [])
+            if None not in teams:
+                games = [g for g in games if any(g.involves(t) for t in teams)]
+            sections.append((key, games))
+        return sections
+
+    async def _refresh_boards(self) -> None:
+        for channel_id, settings in self.settings.channels_with(lambda s: s.board_message_id):
+            embed = board_embed(self._board_sections(channel_id))
+            if self._boards_shown.get(channel_id) == embed.to_dict():
+                continue  # nothing changed, so don't edit
+            try:
+                channel = await self._channel(channel_id)
+                await channel.get_partial_message(settings.board_message_id).edit(embed=embed)
+                self._boards_shown[channel_id] = embed.to_dict()
+            except discord.NotFound:
+                log.info("Scoreboard in channel %s was deleted; turning it off", channel_id)
+                self.settings.update(channel_id, board_message_id=None)
+            except discord.HTTPException:
+                log.exception("Failed to update the scoreboard in channel %s", channel_id)
 
 
 def _ago(ts: float | None) -> str:
@@ -280,6 +390,54 @@ def register_commands(bot: SportsBot) -> None:
         await interaction.response.send_message(msg, ephemeral=True)
 
     unfollow.autocomplete("team")(followed_team_suggestions)
+
+    @tree.command(name="scoreboard", description="Post a live scoreboard here that keeps itself up to date")
+    @app_commands.describe(enabled="Turn the live scoreboard on (default) or off")
+    @app_commands.default_permissions(manage_channels=True)
+    @app_commands.guild_only()
+    async def scoreboard(interaction: discord.Interaction, enabled: bool = True):
+        # Posting and pinning can take longer than Discord's 3-second reply window.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        reply = interaction.followup.send
+        cid = interaction.channel_id
+        old = bot.settings.get(cid).board_message_id
+        if old:
+            try:
+                await (await bot._channel(cid)).get_partial_message(old).delete()
+            except discord.HTTPException:
+                pass  # already gone
+            bot.settings.update(cid, board_message_id=None)
+            bot._boards_shown.pop(cid, None)
+        if not enabled:
+            await reply("🛑 Live scoreboard removed.", ephemeral=True)
+            return
+        embed = board_embed(bot._board_sections(cid))
+        message = await bot._send(cid, embed)
+        if message is None:
+            await reply("I couldn't post in this channel.", ephemeral=True)
+            return
+        bot.settings.update(cid, board_message_id=message.id)
+        bot._boards_shown[cid] = embed.to_dict()
+        note = ""
+        try:
+            await message.pin()
+        except discord.HTTPException:
+            note = " I couldn't pin it; give my role **Manage Messages** if you'd like it pinned."
+        follows = "" if bot.store.for_channel(cid) else " This channel doesn't follow anything yet, so use `/follow` first."
+        await reply(f"📺 Live scoreboard posted.{note}{follows}", ephemeral=True)
+
+    @tree.command(name="threads", description="Put each game's updates in its own thread")
+    @app_commands.describe(enabled="On: the start and result stay in the channel, everything else goes in the game's thread")
+    @app_commands.default_permissions(manage_channels=True)
+    @app_commands.guild_only()
+    async def threads(interaction: discord.Interaction, enabled: bool):
+        bot.settings.update(interaction.channel_id, threads=enabled)
+        if enabled:
+            msg = ("🧵 Game threads on. Each game's start and result will post here, with everything in between in "
+                   "the game's thread. My role needs **Create Public Threads** and **Send Messages in Threads**.")
+        else:
+            msg = "Game threads off. Updates will post straight in this channel."
+        await interaction.response.send_message(msg, ephemeral=True)
 
     @tree.command(name="status", description="Show whether the bot is checking scores and when it last succeeded")
     async def status(interaction: discord.Interaction):
