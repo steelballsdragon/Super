@@ -199,7 +199,7 @@ def test_goalscorer_and_assist_bets():
     # Scored in 4 of the last 10, assisted in 3: long shots, but real ones.
     games = soccer_games([1, 0, 1, 0, 0, 1, 0, 0, 1, 0], [0, 1, 0, 0, 1, 0, 0, 1, 0, 0])
     picks = {t.pick: t for t in best_trends("Erling Haaland", "9", "MNC", "ARS", games, "soccer", scorers=True)}
-    assert set(picks) == {"Erling Haaland Anytime Goalscorer", "Erling Haaland To Record an Assist", "Erling Haaland To Score or Assist"}
+    assert set(picks) == {"Erling Haaland Anytime Goalscorer", "Erling Haaland Anytime Assist", "Erling Haaland To Score or Assist"}
     assert 0.3 < picks["Erling Haaland Anytime Goalscorer"].probability < 0.45
     # The regular trends skip these: they never reach the usual 75% bar.
     assert [t.pick for t in best_trends("Erling Haaland", "9", "MNC", "ARS", games, "soccer")] == [
@@ -230,7 +230,7 @@ def test_goal_and_assist_slip_like_fanduel():
         return Leg(f"{name} Anytime Goalscorer", p, "", "", game, name, "prop", "totalGoals", 1)
 
     def a(name, p, game):
-        return Leg(f"{name} To Record an Assist", p, "", "", game, name + "-a", "prop", "goalAssists", 1)
+        return Leg(f"{name} Anytime Assist", p, "", "", game, name + "-a", "prop", "goalAssists", 1)
     legs = [g("Erling Haaland", 0.55, "1"), g("Gonçalo Ramos", 0.45, "2"), g("Alexander Isak", 0.44, "3"),
             g("Kai Havertz", 0.42, "4"), a("Bruno Fernandes", 0.33, "5"), a("Martin Ødegaard", 0.3, "4"),
             a("Kevin De Bruyne", 0.28, "6")]
@@ -238,7 +238,7 @@ def test_goal_and_assist_slip_like_fanduel():
     kinds = [leg.stat for leg in chosen]
     assert kinds.count("totalGoals") == kinds.count("goalAssists") == 2  # not four goalscorers
     assert 3000 <= int(american(combined(chosen))) <= 20000
-    assert chosen[1].pick == "Bruno Fernandes To Record an Assist"  # the likeliest assister, right after the top scorer
+    assert chosen[1].pick == "Bruno Fernandes Anytime Assist"  # the likeliest assister, right after the top scorer
 
 
 def arsenal_leeds():
@@ -301,7 +301,7 @@ def test_a_cold_spell_is_not_taken_as_the_teams_level():
 def test_never_two_assists_or_two_goalscorers_from_one_team():
     """The slip that prompted this: Messi and De Paul (both Inter Miami) to assist."""
     def leg_(name, team, stat, p, game):
-        wording = "To Record an Assist" if stat == "goalAssists" else "Anytime Goalscorer"
+        wording = "Anytime Assist" if stat == "goalAssists" else "Anytime Goalscorer"
         return Leg(f"{name} {wording}", p, "", "", game, f"{name}-{stat}", "prop", stat, 1, None, "mls", "", name, team)
     legs = [leg_("Wessam Abou Ali", "CLB", "totalGoals", 0.45, "1"), leg_("Lionel Messi", "MIA", "goalAssists", 0.42, "2"),
             leg_("Rodrigo De Paul", "MIA", "goalAssists", 0.40, "2"), leg_("Luis Suárez", "MIA", "totalGoals", 0.38, "2"),
@@ -314,3 +314,38 @@ def test_never_two_assists_or_two_goalscorers_from_one_team():
     assert all(len(players) == 1 for players in by_team.values()), by_team
     assert len({leg.player_id for leg in chosen}) == len(chosen)
     assert ("MIA", "goalAssists") in by_team and by_team[("MIA", "goalAssists")] == ["Lionel Messi"]
+
+
+def test_round_robin_maths():
+    from sportsbot.props import chance_at_least
+    assert round(chance_at_least([0.5, 0.5, 0.5], 2), 3) == 0.5
+    assert round(chance_at_least([0.2, 0.2, 0.2], 2), 3) == 0.104
+    assert round(chance_at_least([0.3, 0.4], 0), 9) == 1.0
+
+
+def test_assist_round_robin_picks_one_per_team_and_spreads_games():
+    from sportsbot.props import pick_round_robin
+    def a(name, team, p, game):
+        return Leg(f"{name} Anytime Assist", p, "", f"G{game}", game, name, "prop", "goalAssists", 1, None, "epl", "", name, team)
+    legs = [a("Ugarte", "MUN", 0.20, "1"), a("Bruno Fernandes", "MUN", 0.30, "1"), a("Kayode", "BRE", 0.18, "1"),
+            a("Aaron Martin", "GEN", 0.17, "2"), a("Tyrick Mitchell", "CRY", 0.16, "3"), a("Laborda", "VAN", 0.12, "4")]
+    across = pick_round_robin(legs, 3, per_game=1)
+    assert [l.player for l in across] == ["Bruno Fernandes", "Aaron Martin", "Tyrick Mitchell"]  # one per game
+    same = pick_round_robin([l for l in legs if l.game_id == "1"], 2, per_game=2)
+    assert sorted(l.team for l in same) == ["BRE", "MUN"]  # never two Man Utd assists
+
+
+def test_round_robin_post_and_long_shot_lines():
+    from sportsbot.props import LONGSHOTS, round_robin_embed
+    shot = LONGSHOTS["rr-threes"]
+    games = [PlayerGame(f"2026-03-{28 - i:02d}", "2025-26", "LAL", {"threesMade": t}) for i, t in
+             enumerate([4, 1, 5, 2, 3, 0, 4, 2, 1, 3, 2, 4, 1, 0, 3, 2])]
+    [t] = best_trends("Brandin Podziemski", "1", "GS", "LAL", games, "basketball", props=[shot.prop],
+                      bar=0.15, ceiling=0.40, min_l10=0.05)
+    assert t.pick == "Brandin Podziemski 4+ Made Threes"  # FanDuel's wording, at the longest line in range
+    legs = [Leg(f"P{i} 3+ Made Threes", p, "", f"G{i}", str(i), f"p{i}", "prop", "threesMade", 3) for i, p in
+            enumerate((0.3, 0.25, 0.2))]
+    embed, slip = round_robin_embed("NBA", "🏀", legs, shot)
+    text = embed.description + "".join(f.name + f.value for f in embed.fields)
+    assert "Round robin (2's): 3 bets" in text and "fair +233" in text and "At least one pair cashes" in text
+    assert slip.count("Made Threes") == 3

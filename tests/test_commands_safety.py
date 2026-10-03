@@ -287,7 +287,7 @@ def test_pick_a_game_for_a_same_game_lotto_of_goalscorers(tmp_path):
         names = {"CHE": ("Cole Palmer", "João Pedro", "Enzo Fernández"), "BOU": ("Antoine Semenyo", "Justin Kluivert", "Evanilson")}
         legs = [(f"{n} {wording}", p, f"{g.id}-{n}-{stat}", stat, n, team)
                 for team, players in names.items() for n, p in zip(players, (0.45, 0.4, 0.3))
-                for stat, wording in (("totalGoals", "Anytime Goalscorer"), ("goalAssists", "To Record an Assist"))]
+                for stat, wording in (("totalGoals", "Anytime Goalscorer"), ("goalAssists", "Anytime Assist"))]
         return [SimpleNamespace(pick=pick, probability=p, evidence="", player_id=pid, prop=SimpleNamespace(stat=stat),
                                 line=1, player=n, team=team) for pick, p, pid, stat, n, team in legs], None
     bot.game_props = game_props

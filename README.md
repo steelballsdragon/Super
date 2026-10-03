@@ -61,6 +61,8 @@ Everything is one command, `/research [league] [team] [parlay]` (the league can 
 | `/research league:NFL parlay:Lotto` | A 4–10 leg parlay built to between **+3000 and +20000** |
 | `/research league:NFL team:Chiefs parlay:Safe` | A same-game parlay from the Chiefs' next game |
 | `/research game:Bournemouth @ Chelsea parlay:Lotto` | A same-game Lotto from the game you pick (suggestions list the week's games) |
+| `/research bets:Assists round robin` | 3 long-shot assist picks (full-backs, set-piece takers) from different games, as a round robin of 2's (`parlay:Lotto` for +450 to +1500 picks, `picks:4` for more) |
+| `/research league:NBA bets:3-pointers round robin` | 3 role-player 3+ / 4+ made threes picks as a round robin of 2's |
 | `/research bets:Goalscorers & assists` | A goalscorer/assist slip: anytime goalscorers and assisters, taking turns (soccer, NHL); a Lotto unless you pick another payout |
 
 `/record` shows how the leans and parlays have done.
@@ -115,6 +117,21 @@ pass, the assist goes to the player who:
 
 Goal posts show these as e.g. *⚽ 61' Bruno Fernandes (pen) · 🅰️ FanDuel assist: Matheus Cunha (won the penalty)*. Hit
 rates use official assists, so assist legs hit a little more often than shown.
+
+### Round robins: long-shot assists and 3-pointers
+
+`bets:Assists round robin` (soccer) and `bets:3-pointers round robin` (NBA) build the kind of round robin that pays big
+on long shots:
+
+- **Deeper player pool.** Assists look at each team's top 8 assisters and best passers (full-backs, wing-backs and
+  set-piece takers, not just the stars); 3-pointers at each team's top 6 shooters by threes per game.
+- **Long-shot lines.** Each player at the longest line inside the price band: by default about +200 to +700, Big payout
+  +300 to +900, Lotto +450 to +1500 (pick it with `parlay:`), Safe +100 to +300. A pick must have happened at least once
+  in the player's last 10 games, and assists are adjusted for the matchup.
+- **Spread out.** One pick per game (two for the NBA), one per player, and never two assists from the same team.
+- **Fair prices, every pair and the chances.** Each pick shows its fair price from its record: back it only if your
+  book pays more. The post lists every 2-leg combination with its price and the chance at least one pair cashes.
+- **Graded as a round robin.** After the games the result shows how many picks hit and how many of the bets cashed.
 
 ### Player trends and parlays (Linemate-style)
 
