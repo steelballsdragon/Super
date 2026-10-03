@@ -29,6 +29,10 @@ def _read_json(path: Path, default):
 class ChannelSettings:
     threads: bool = False  # put each game's updates in its own thread
     board_message_id: int | None = None  # the live scoreboard message, if any
+    odds: bool = True  # show the betting line at the start and grade it at the final
+    daily_hour: int | None = None  # post today's schedule at this hour (local), or never
+    timezone: str = "America/Toronto"  # for the daily schedule
+    reminders: bool = False  # post a heads-up 15 minutes before followed games
 
 
 class SettingsStore:

@@ -8,7 +8,9 @@ import os
 import subprocess
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import discord
 from discord import app_commands
@@ -16,8 +18,11 @@ from discord.ext import tasks
 
 from .balls import BallFeed
 from .espn import ESPNClient
-from .formatting import ball_messages, board_embed, scoreboard_embed, update_embed
+from .espn import start_time
+from .formatting import ball_messages, board_embed, reminder_text, schedule_embed, scoreboard_embed, update_embed
 from .leagues import LEAGUES
+from .odds import OddsBook, grade_text, line_text
+from .schedule import COMMON_TIMEZONES, games_on, today
 from .plays import AssistResolver, PlayResolver
 from .settings import SettingsStore, StateStore
 from .storage import SubscriptionStore
@@ -41,6 +46,11 @@ TEAM_LIST_TTL = 6 * 3600
 # the game's thread. Threads are forgotten a few days after they're made.
 CHANNEL_KINDS = (KICKOFF, FINAL, CALLED_OFF)
 THREAD_KEEP_SECONDS = 4 * 86400
+
+REMINDER_SECONDS = 15 * 60
+# The daily schedule goes out once a day, at the chosen hour or within the next
+# two hours if the bot was restarting right then.
+DAILY_WINDOW_HOURS = 2
 
 
 @dataclass
@@ -80,6 +90,7 @@ class SportsBot(discord.Client):
         self.settings = settings or SettingsStore(Path(store.path).with_name("settings.json"))
         self.state = state or StateStore(Path(store.path).with_name("state.json"))
         self.latest: dict[str, list] = {}  # latest games per league, for scoreboards
+        self.odds = OddsBook(self.state)
         self._boards_shown: dict[int, dict] = {}
         self.espn = ESPNClient()
         self.tracker = Tracker()
@@ -125,6 +136,8 @@ class SportsBot(discord.Client):
 
     async def setup_hook(self) -> None:
         self._prune_threads()
+        self._prune_reminders()
+        self.odds.prune()
         register_commands(self)
         if self.dev_guild:
             guild = discord.Object(id=self.dev_guild)
@@ -150,6 +163,8 @@ class SportsBot(discord.Client):
                 self.tracker.forget(key)
         await asyncio.gather(*(self._poll_league(key) for key in active if key in LEAGUES))
         await self._refresh_boards()
+        await self._send_reminders()
+        await self._post_daily_schedules()
 
     @poll.before_loop
     async def _before_poll(self) -> None:
@@ -165,6 +180,7 @@ class SportsBot(discord.Client):
             return
         health.checked_at, health.live_games = time.time(), sum(g.state == "in" for g in games)
         self.latest[key] = games
+        self.odds.remember(games)
         updates = self.tracker.update(key, games)
         resolver = self.play_resolvers.get(key)
         if resolver is not None:
@@ -182,8 +198,10 @@ class SportsBot(discord.Client):
             }
             if not channels:
                 continue
-            embed = update_embed(update)
+            plain = update_embed(update)
+            with_odds = self._with_odds(update)
             for channel_id in channels:
+                embed = with_odds if with_odds and self.settings.get(channel_id).odds else plain
                 await self._deliver(channel_id, update.game, update.kind, embed=embed)
 
     async def _post_balls(self, feed: BallFeed, games, subs) -> None:
@@ -197,6 +215,21 @@ class SportsBot(discord.Client):
             for message in ball_messages(game, balls):
                 for channel_id in channels:
                     await self._deliver(channel_id, game, "ball", content=message)
+
+    def _with_odds(self, update):
+        """The update's embed plus the betting line (start) or how it settled (final)."""
+        if update.kind not in (KICKOFF, FINAL):
+            return None
+        odds = self.odds.get(update.game)
+        if odds is None:
+            return None
+        text = line_text(update.game, odds) if update.kind == KICKOFF else grade_text(update.game, odds)
+        if not text:
+            return None
+        embed = update_embed(update)
+        name = f"📊 Line ({odds.provider})" if update.kind == KICKOFF else f"📊 Bets ({odds.provider} closing line)"
+        embed.add_field(name=name, value=text, inline=False)
+        return embed
 
     async def _channel(self, channel_id: int):
         return self.get_channel(channel_id) or await self.fetch_channel(channel_id)
@@ -270,6 +303,70 @@ class SportsBot(discord.Client):
         for key, entry in self.state.items("threads"):
             if entry.get("at", 0) < cutoff:
                 self.state.delete("threads", key)
+
+    # ----- schedule and reminders -----
+
+    def _followed_games(self, channel_id: int, key: str, games: list) -> list:
+        teams = [s.team for s in self.store.for_channel(channel_id) if s.league == key]
+        if not teams:
+            return []
+        return games if None in teams else [g for g in games if any(g.involves(t) for t in teams)]
+
+    async def _send_reminders(self, now: float | None = None) -> None:
+        now = now or time.time()
+        for channel_id, settings in self.settings.channels_with(lambda s: s.reminders):
+            for key, games in self.latest.items():
+                for game in self._followed_games(channel_id, key, games):
+                    start = start_time(game)
+                    if game.state != "pre" or start is None or not 0 < start.timestamp() - now <= REMINDER_SECONDS:
+                        continue
+                    rkey = f"{channel_id}:{key}:{game.id}"
+                    if self.state.get("reminded", rkey):
+                        continue
+                    self.state.set("reminded", rkey, now)
+                    text = reminder_text(game)
+                    odds = self.odds.get(game) if settings.odds else None
+                    if odds and (line := line_text(game, odds)):
+                        text += "\n" + line.replace("\n", " · ")
+                    await self._send(channel_id, content=text)
+
+    def _prune_reminders(self) -> None:
+        cutoff = time.time() - 3 * 86400
+        for key, at in self.state.items("reminded"):
+            if at < cutoff:
+                self.state.delete("reminded", key)
+
+    def _zone(self, settings) -> ZoneInfo:
+        try:
+            return ZoneInfo(settings.timezone)
+        except (ZoneInfoNotFoundError, ValueError):
+            return ZoneInfo("America/Toronto")
+
+    async def schedule_for(self, channel_id: int, tz: ZoneInfo):
+        day = today(tz)
+        keys = [k for k in LEAGUES if any(s.league == k for s in self.store.for_channel(channel_id))]
+        sections = []
+        for key in keys:
+            try:
+                games = await games_on(self.espn, key, day, tz)
+            except Exception:
+                log.exception("Couldn't load today's %s schedule", key)
+                games = []
+            sections.append((key, self._followed_games(channel_id, key, games)))
+        return schedule_embed(f"{day:%a %b} {day.day}", sections)
+
+    async def _post_daily_schedules(self, now: datetime | None = None) -> None:
+        for channel_id, settings in self.settings.channels_with(lambda s: s.daily_hour is not None):
+            tz = self._zone(settings)
+            local = (now or datetime.now(timezone.utc)).astimezone(tz)
+            if not settings.daily_hour <= local.hour < settings.daily_hour + DAILY_WINDOW_HOURS:
+                continue
+            if self.state.get("daily", str(channel_id)) == local.date().isoformat():
+                continue
+            self.state.set("daily", str(channel_id), local.date().isoformat())
+            embed = await self.schedule_for(channel_id, tz)
+            if embed is not None:  # nothing on today: stay quiet
+                await self._send(channel_id, embed)
 
     # ----- live scoreboards -----
 
@@ -437,6 +534,73 @@ def register_commands(bot: SportsBot) -> None:
                    "the game's thread. My role needs **Create Public Threads** and **Send Messages in Threads**.")
         else:
             msg = "Game threads off. Updates will post straight in this channel."
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    @tree.command(name="odds", description="Show the betting line at each game's start and how bets settled at the final")
+    @app_commands.describe(enabled="On (default) or off for this channel")
+    @app_commands.default_permissions(manage_channels=True)
+    @app_commands.guild_only()
+    async def odds(interaction: discord.Interaction, enabled: bool):
+        bot.settings.update(interaction.channel_id, odds=enabled)
+        msg = ("📊 Odds on: game starts show the line, and finals show how the spread, total and moneyline settled."
+               if enabled else "Odds off for this channel.")
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    @tree.command(name="schedule", description="Today's games for everything this channel follows")
+    async def schedule(interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True)
+        embed = await bot.schedule_for(interaction.channel_id, bot._zone(bot.settings.get(interaction.channel_id)))
+        if embed is None:
+            await interaction.followup.send("No games today for what this channel follows.")
+        else:
+            await interaction.followup.send(embed=embed)
+
+    @tree.command(name="daily", description="Post today's games here every morning")
+    @app_commands.describe(
+        enabled="Turn the daily schedule on or off",
+        hour="Hour to post it, 0-23 (default 9)",
+        timezone="Your time zone, e.g. America/Toronto (default)",
+    )
+    @app_commands.default_permissions(manage_channels=True)
+    @app_commands.guild_only()
+    async def daily(
+        interaction: discord.Interaction,
+        enabled: bool,
+        hour: app_commands.Range[int, 0, 23] = 9,
+        timezone: str = "America/Toronto",
+    ):
+        if not enabled:
+            bot.settings.update(interaction.channel_id, daily_hour=None)
+            await interaction.response.send_message("Daily schedule off.", ephemeral=True)
+            return
+        try:
+            ZoneInfo(timezone)
+        except (ZoneInfoNotFoundError, ValueError):
+            await interaction.response.send_message(
+                f"I don't recognise the time zone `{timezone}`. Pick one from the list, e.g. `America/Toronto`.",
+                ephemeral=True,
+            )
+            return
+        bot.settings.update(interaction.channel_id, daily_hour=hour, timezone=timezone)
+        await interaction.response.send_message(
+            f"📅 Every day at {hour:02d}:00 ({timezone}) I'll post today's games for what this channel follows. "
+            "Use `/schedule` to see today's now.",
+            ephemeral=True,
+        )
+
+    @daily.autocomplete("timezone")
+    async def timezone_suggestions(interaction: discord.Interaction, current: str):
+        q = current.lower()
+        return [app_commands.Choice(name=z, value=z) for z in COMMON_TIMEZONES if q in z.lower()][:25]
+
+    @tree.command(name="reminders", description="Post a heads-up 15 minutes before each followed game")
+    @app_commands.describe(enabled="Turn reminders on or off for this channel")
+    @app_commands.default_permissions(manage_channels=True)
+    @app_commands.guild_only()
+    async def reminders(interaction: discord.Interaction, enabled: bool):
+        bot.settings.update(interaction.channel_id, reminders=enabled)
+        msg = ("⏰ Reminders on: I'll post 15 minutes before each game this channel follows."
+               if enabled else "Reminders off.")
         await interaction.response.send_message(msg, ephemeral=True)
 
     @tree.command(name="status", description="Show whether the bot is checking scores and when it last succeeded")
