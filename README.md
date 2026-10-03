@@ -61,7 +61,7 @@ Everything is one command, `/research [league] [team] [parlay]` (the league can 
 | `/research league:NFL parlay:Lotto` | A 4–10 leg parlay built to between **+3000 and +20000** |
 | `/research league:NFL team:Chiefs parlay:Safe` | A same-game parlay from the Chiefs' next game |
 | `/research game:Bournemouth @ Chelsea parlay:Lotto` | A same-game Lotto from the game you pick (suggestions list the week's games) |
-| `/research parlay:Lotto bets:Goalscorers & assists` | A parlay of only anytime goal, to assist and goal-or-assist bets (soccer, NHL) |
+| `/research bets:Goalscorers & assists` | A goalscorer/assist slip: anytime goalscorers and assisters, taking turns (soccer, NHL); a Lotto unless you pick another payout |
 
 `/record` shows how the leans and parlays have done.
 
@@ -83,8 +83,26 @@ leans by this record, not by how convincing they sound. It's research, not advic
 
 ### Goalscorers and assists (soccer)
 
-Pick `bets:Goalscorers & assists` to build parlays only from **anytime goal**, **to assist** and **goal or assist** legs,
-or add them to any Lotto automatically. These are long shots by nature (a top striker scores in about 40–50% of games),
+Pick `bets:Goalscorers & assists` for a slip like a typical FanDuel goal/assist bet: **Anytime Goalscorer** and **To
+Record an Assist** legs (named as FanDuel lists them), taking turns so it's a mix of scorers and assisters, e.g.
+
+```
+Morgan Rogers Anytime Goalscorer
+John McGinn To Record an Assist
+João Pedro Anytime Goalscorer
+Keane Lewis-Potter To Record an Assist
+```
+
+It's a Lotto (+3000 to +20000) unless you pick another payout, and works for one game too (`game:`). Lottos also use
+these legs automatically.
+
+**Who's most likely to score depends on the matchup too.** Each player's record (last 10, this season, last season) is
+scaled by how many goals his team is expected to score in this game compared with what it usually scores. The
+expectation comes from the betting line (the over/under split by the win chances, e.g. Arsenal -260 with the total at 2.5
+means about 1.9 goals for Arsenal) or, without a line, from the team's scoring against what the opponent concedes. A
+striker facing a leaky defence moves up and one facing a tight one moves down, and each leg says why, e.g.
+*~55% Bryan Mbeumo Anytime Goalscorer · L10 2/5 · Manchester United expected 2.3 goals (betting line), 1.8 a game lately*.
+Recent scoring is blended with a typical team's so a short hot or cold run doesn't swing it too far. These are long shots by nature (a top striker scores in about 40–50% of games),
 so they're held to their own bar: about a 22% chance and at least 2 of the last 10 games. A game's report
 (`/research game:` or `team:`) lists every key player's goal and assist chances with estimated odds.
 

@@ -25,8 +25,8 @@ from .limits import MESSAGE, clip, fit_embed
 from .odds import OddsBook, grade_text, line_text
 from .cricket_props import CricketHistory
 from .parlays import ParlayBook, record_field, settle
-from .props import (MAX_LEGS, MAX_LEGS_PER_GAME, TARGETS, PropsClient, build_to_target, injured_names, moneyline_leg,
-                    parlay_embed, scorer_lines, trend_legs, trends_embed)
+from .props import (MAX_LEGS, MAX_LEGS_PER_GAME, TARGETS, PropsClient, apply_matchup, build_to_target, expected_goals,
+                    injured_names, moneyline_leg, parlay_embed, scorer_lines, trend_legs, trends_embed)
 from .research import LeanBook, leans, market_chances, parse_research, picks_embed, record_embed, report_embed
 from .schedule import COMMON_TIMEZONES, games_on, today
 from .plays import AssistResolver, PlayResolver
@@ -460,6 +460,9 @@ class SportsBot(discord.Client):
             trends = await self.cricket.trends(game, bigger)
         else:
             trends = await self.props.game_trends(game, injured_names(summary), bigger, scorers)
+            if scorers:  # who's likely to score depends on the matchup, not just the player's record
+                matchup = expected_goals(game, market_chances(r), r.odds.total if r.odds else None, r.form)
+                trends = apply_matchup(trends, game, matchup)
         return trends, moneyline_leg(game, market_chances(r), r.odds, underdog)
 
     async def research(self, game):
@@ -900,8 +903,9 @@ def register_commands(bot: SportsBot) -> None:
     async def _parlay(interaction, lg, target, games, one_game: bool, scorers: bool = False):
         async def one(g):
             try:
-                if scorers:
-                    return trend_legs(g, (await bot.game_props(g, scorers=True))[0])
+                if scorers:  # anytime goalscorers and assists, like a FanDuel goal/assist slip
+                    return [leg for leg in trend_legs(g, (await bot.game_props(g, scorers=True))[0])
+                            if leg.stat != "goalOrAssist"]
                 trends, ml = await bot.game_props(g, target.bigger)
                 legs = trend_legs(g, trends) + ([ml] if ml else [])
                 if target.bigger:  # the near-certain lines too, to finish near the target
@@ -919,7 +923,8 @@ def register_commands(bot: SportsBot) -> None:
                       for leg in found}
         # One game (picked, a team's, or the only one coming up): every leg comes from it.
         same_game = one_game or len(games) == 1
-        chosen = build_to_target(list(candidates.values()), target, per_game=MAX_LEGS if same_game else MAX_LEGS_PER_GAME)
+        chosen = build_to_target(list(candidates.values()), target, per_game=MAX_LEGS if same_game else MAX_LEGS_PER_GAME,
+                                 balance=scorers)
         if len(chosen) < max(2, target.min_legs):
             if same_game:
                 where = f"{games[0].away.name} @ {games[0].home.name}"
@@ -997,7 +1002,8 @@ def register_commands(bot: SportsBot) -> None:
                     await interaction.followup.send(f"No {lg.name} game for **{team}** in the next week on ESPN.")
                     return
             if parlay or scorers:
-                target = TARGETS[parlay.value if parlay else "safe"]
+                # Goalscorer/assist slips are long shots (4 legs is usually +3000 or more), so they default to a Lotto.
+                target = TARGETS[parlay.value if parlay else "lotto" if scorers else "safe"]
                 if picked is not None:
                     if picked.state != "pre":
                         await interaction.followup.send("That game has already started, so there's no parlay to build.")

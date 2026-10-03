@@ -224,7 +224,9 @@ async def _extra_fanduel_assists(bot, leg: dict) -> int:
     """Assists FanDuel counts on top of the official ones (penalties or free kicks won, rebounds,
     forced own goals), from the match commentary. Assist bets are settled the FanDuel way."""
     from .espn import fanduel_assists, name_key
-    name = leg.get("player") or leg["pick"].rsplit(" To Assist", 1)[0].rsplit(" Goal or Assist", 1)[0]
+    name = leg.get("player") or leg["pick"]
+    for wording in (" To Record an Assist", " To Score or Assist", " To Assist", " Goal or Assist"):  # older wording too
+        name = name.rsplit(wording, 1)[0]
     summary = await bot.espn.summary(leg.get("path") or LEAGUES[leg["league"]].path, leg["game_id"])
     return sum(1 for f in fanduel_assists(summary) if f.how != "assist" and name_key(f.assist) == name_key(name))
 
