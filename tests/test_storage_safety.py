@@ -34,3 +34,26 @@ def test_saves_leave_no_temp_files(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json", "subscriptions.json"]
     assert SubscriptionStore(tmp_path / "subscriptions.json").leagues() == {"nba"}
     assert StateStore(tmp_path / "state.json").get("finals", "4") == 4
+
+
+def test_a_batch_saves_once_and_still_saves_if_it_fails(tmp_path, monkeypatch):
+    import sportsbot.settings as settings
+    saves = []
+    real = settings.write_json
+    monkeypatch.setattr(settings, "write_json", lambda path, data: (saves.append(1), real(path, data)))
+    state = StateStore(tmp_path / "state.json")
+    with state.batch():
+        for i in range(50):
+            state.set("odds", str(i), i)
+        with state.batch():  # nested batches save once, at the outermost end
+            state.delete("odds", "0")
+    assert len(saves) == 1 and StateStore(tmp_path / "state.json").get("odds", "49") == 49
+    try:
+        with state.batch():
+            state.set("odds", "x", 1)
+            raise RuntimeError("cycle failed")
+    except RuntimeError:
+        pass
+    assert len(saves) == 2 and StateStore(tmp_path / "state.json").get("odds", "x") == 1
+    state.set("odds", "y", 2)  # outside a batch: saved straight away
+    assert len(saves) == 3

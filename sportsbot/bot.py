@@ -55,6 +55,7 @@ THREAD_KEEP_SECONDS = 4 * 86400
 
 REMINDER_SECONDS = 15 * 60
 WEEK_CACHE_SECONDS = 600
+GAME_INFO_SECONDS = 120
 PARLAY_GAMES = 8  # parlays look ahead (up to a week) until there are at least this many games to build from
 SETTLE_SECONDS = 60  # how often finished parlay legs are graded
 PRUNE_SECONDS = 3600  # how often old state entries are cleaned out
@@ -70,6 +71,16 @@ class LeagueHealth:
     live_games: int = 0
     error: str | None = None
     error_at: float | None = None
+
+
+def release_memory() -> None:
+    """Hands memory freed after a big job (e.g. a parlay over a week of games) back to the server.
+    Without it Python keeps the peak's memory reserved; the server has only 1 GB."""
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass  # not Linux/glibc: nothing to do
 
 
 def code_version() -> str:
@@ -133,10 +144,10 @@ class SportsBot(discord.Client):
         )
         # One ball-by-ball feed per cricket league (IPL, internationals); where each
         # match is up to is saved in its own small file so restarts carry on from it.
-        balls_state = StateStore(self.state.path.with_name("balls.json"))
+        self.ball_state = StateStore(self.state.path.with_name("balls.json"))
         self.ball_feeds = {
             league.key: BallFeed(lambda path, event_id, page: self.espn.balls(path, event_id, page),
-                                 balls_state, league.key)
+                                 self.ball_state, league.key)
             for league in LEAGUES.values()
             if league.sport == "cricket"
         }
@@ -233,6 +244,11 @@ class SportsBot(discord.Client):
             log.exception("Update cycle failed; trying again next cycle")
 
     async def _poll_once(self) -> None:
+        # One save of the state at the end of the cycle, not one per change (dozens when lines move).
+        with self.state.batch(), self.ball_state.batch():
+            await self._poll_cycle()
+
+    async def _poll_cycle(self) -> None:
         # Leagues with research leans or parlay legs still to grade are checked even if no channel follows them.
         active = (self.store.leagues() | self.leans.pending_leagues() | self.parlays.pending_leagues()) & LEAGUES.keys()
         for key in list(LEAGUES):
@@ -254,6 +270,7 @@ class SportsBot(discord.Client):
 
     def _prune_state(self) -> None:
         """Drops old entries so state.json stays small however long the bot runs."""
+        release_memory()
         self._prune_threads()
         self._prune_reminders()
         self.odds.prune()
@@ -454,21 +471,27 @@ class SportsBot(discord.Client):
     async def game_props(self, game, bigger: bool = False, underdog: bool = False, scorers: bool = False):
         """Player trends and a moneyline leg (the favorite's, or with underdog=True the underdog's) for one game.
         With scorers=True, the trends are goalscorer and assist bets only."""
-        summary = await self.espn.summary(game.path or LEAGUES[game.league_key].path, game.id)
-        r = parse_research(summary, game)
+        r, injured = await self._game_info(game)
         if game.league.sport == "cricket":
             trends = await self.cricket.trends(game, bigger)
         else:
-            trends = await self.props.game_trends(game, injured_names(summary), bigger, scorers)
+            trends = await self.props.game_trends(game, injured, bigger, scorers)
             if scorers:  # who's likely to score depends on the matchup, not just the player's record
                 matchup = expected_goals(game, market_chances(r), r.odds.total if r.odds else None, r.form)
                 trends = apply_matchup(trends, game, matchup)
         return trends, moneyline_leg(game, market_chances(r), r.odds, underdog)
 
+    async def _game_info(self, game):
+        """A game's ESPN summary, boiled down to the research data and who's injured. Kept for a couple of
+        minutes: one parlay or report looks at each game several times (normal, longer and goalscorer lines)."""
+        async def fetch():
+            summary = await self.espn.summary(game.path or LEAGUES[game.league_key].path, game.id)
+            return parse_research(summary, game), frozenset(injured_names(summary))
+        return await self.props.cached(f"game-info:{game.league_key}:{game.id}", GAME_INFO_SECONDS, fetch)
+
     async def research(self, game):
         """The research report and leans for a game; pre-game leans are recorded for grading."""
-        summary = await self.espn.summary(game.path or LEAGUES[game.league_key].path, game.id)
-        r = parse_research(summary, game)
+        r, _ = await self._game_info(game)
         found = leans(r) if game.state == "pre" else []
         self.leans.record(game, found)
         return r, found
@@ -585,9 +608,9 @@ def register_commands(bot: SportsBot) -> None:
         q = team.strip().lower()
         return any(q == a.lower() or q in n.lower() for n, a in teams)
 
-    async def pick_league(interaction: discord.Interaction, league, team: str | None = None):
+    async def pick_league(interaction: discord.Interaction, league, team: str | None = None, game: str | None = None):
         """The league asked for or, when left out, the one this channel follows. With several followed,
-        the team decides (e.g. "Chiefs" in a channel following NFL and MLB). Returns (key, problem)."""
+        the team or picked game decides (e.g. "Chiefs" in a channel following NFL and MLB). Returns (key, problem)."""
         if league is not None:
             return league.value, None
         keys = channel_leagues(interaction.channel_id)
@@ -595,6 +618,13 @@ def register_commands(bot: SportsBot) -> None:
             return keys[0], None
         if not keys:
             return None, "Pick a league: this channel doesn't follow one yet (or `/follow` one to skip this next time)."
+        if game:  # a game picked from the suggestions: the league whose week has it
+            for key in keys:
+                try:
+                    if any(g.id == game for g in await bot.week_games(key)):
+                        return key, None
+                except Exception:
+                    log.warning("Couldn't load %s games", key, exc_info=True)
         if team:
             found = []
             for key in keys:
@@ -848,30 +878,27 @@ def register_commands(bot: SportsBot) -> None:
         mine = [g for g in games if g.involves(team) and g.state != "post"]
         return min(mine, key=lambda g: (g.state != "in", g.start), default=None)
 
-    async def _upcoming(lg, want: int = 1, days_ahead: int = 3):
-        """Games that haven't started: today's, then the following days' until there are at least `want`
-        (soccer can have a single midweek game before a full weekend), soonest first."""
-        games = [g for g in await bot.espn.scoreboard(lg) if g.state == "pre"]
-        if len(games) < want and lg.feed == "scoreboard":
-            from datetime import date, timedelta
-            for ahead in range(0, days_ahead + 1):
-                day = (date.today() + timedelta(days=ahead)).strftime("%Y%m%d")
-                known = {g.id for g in games}
-                games += [g for g in await bot.espn.scoreboard(lg, day) if g.state == "pre" and g.id not in known]
-                if len(games) >= want:
-                    break
-        return sorted(games, key=lambda g: g.start)[:16]
+    async def _week(lg) -> list:
+        """The week's games that haven't started yet (from the cached week, so started ones drop out)."""
+        now = time.time()
+        return [g for g in await bot.week_games(lg.key) if (st := start_time(g)) is None or st.timestamp() > now]
+
+    async def _upcoming(lg, want: int = 1):
+        """Games that haven't started: the soonest day's, then the following days' until there are at least
+        `want` (soccer can have a single midweek game before a full weekend), soonest first."""
+        games, day = [], None
+        for g in await _week(lg):
+            start = start_time(g)
+            g_day = start.astimezone(EASTERN).date() if start else None
+            if len(games) >= want and g_day != day:
+                break  # enough games, and this one starts a new day
+            games.append(g)
+            day = g_day
+        return games[:16]
 
     async def _next_game(lg, team):
-        """The team's live or next game: today's scoreboard, then up to a week ahead."""
-        game = _find_game(await bot.espn.scoreboard(lg), team)
-        if game is None and lg.feed == "scoreboard":
-            from datetime import date, timedelta
-            for ahead in range(1, 8):
-                day = (date.today() + timedelta(days=ahead)).strftime("%Y%m%d")
-                if (game := _find_game(await bot.espn.scoreboard(lg, day), team)) is not None:
-                    break
-        return game
+        """The team's live or next game: today's scoreboard (live games first), then the rest of the week."""
+        return _find_game(await bot.espn.scoreboard(lg), team) or _find_game(await _week(lg), team)
 
     def _when(game) -> str:
         start = start_time(game)
@@ -959,7 +986,7 @@ def register_commands(bot: SportsBot) -> None:
                 if field := record_field(bot.parlays.summary()):
                     embed.add_field(name=field[0], value=field[1], inline=False)
                 await interaction.followup.send(embed=fit_embed(embed))
-        if games := await _upcoming(lg, want=PARLAY_GAMES, days_ahead=7):
+        if games := await _upcoming(lg, want=PARLAY_GAMES):
             await _parlay(interaction, lg, TARGETS["safe"], games, one_game=False)
 
     BETS = [app_commands.Choice(name="All bets", value="all"),
@@ -979,7 +1006,7 @@ def register_commands(bot: SportsBot) -> None:
                        team: TeamName | None = None, game: app_commands.Range[str, 1, 100] | None = None,
                        parlay: app_commands.Choice[str] | None = None, bets: app_commands.Choice[str] | None = None):
         await interaction.response.defer(thinking=True)
-        key, problem = await pick_league(interaction, league, team)
+        key, problem = await pick_league(interaction, league, team, game)
         if key is None:
             await interaction.followup.send(problem)
             return
@@ -1009,7 +1036,7 @@ def register_commands(bot: SportsBot) -> None:
                         await interaction.followup.send("That game has already started, so there's no parlay to build.")
                         return
                     await _parlay(interaction, lg, target, [picked], one_game=True, scorers=scorers)
-                elif games := await _upcoming(lg, want=PARLAY_GAMES, days_ahead=7):
+                elif games := await _upcoming(lg, want=PARLAY_GAMES):
                     await _parlay(interaction, lg, target, games, one_game=False, scorers=scorers)
                 else:
                     await interaction.followup.send(f"No {lg.name} games in the next week on ESPN.")
@@ -1020,6 +1047,8 @@ def register_commands(bot: SportsBot) -> None:
         except Exception:
             log.exception("Research failed for %s %s %s", key, team, game)
             await interaction.followup.send("Couldn't load ESPN's data for that, try again shortly.")
+        finally:
+            release_memory()
 
     research.autocomplete("team")(team_suggestions)
 
@@ -1027,17 +1056,21 @@ def register_commands(bot: SportsBot) -> None:
     async def game_suggestions(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
         key = getattr(interaction.namespace, "league", None)
         keys = [key] if key in LEAGUES else channel_leagues(interaction.channel_id)
-        if len(keys) != 1:
+        if not keys:
             return []
         try:
-            week = await asyncio.wait_for(bot.week_games(keys[0]), timeout=2.5)
+            weeks = await asyncio.wait_for(asyncio.gather(*(bot.week_games(k) for k in keys)), timeout=2.5)
         except Exception:
-            log.warning("Couldn't load %s games for suggestions", keys[0], exc_info=True)
+            log.warning("Couldn't load %s games for suggestions", keys, exc_info=True)
             return []
         q = current.strip().lower()
+        now = time.time()
         out = []
-        for g in week:
-            label = f"{g.away.name} @ {g.home.name} · {_when(g)}"[:100]
+        for g in sorted((g for week in weeks for g in week), key=lambda g: g.start):
+            if (st := start_time(g)) is not None and st.timestamp() <= now:
+                continue  # started since the week was cached
+            emoji = f"{g.league.emoji} " if len(keys) > 1 else ""  # several leagues: show whose game it is
+            label = f"{emoji}{g.away.name} @ {g.home.name} · {_when(g)}"[:100]
             if not q or q in label.lower():
                 out.append(app_commands.Choice(name=label, value=g.id))
         return out[:25]

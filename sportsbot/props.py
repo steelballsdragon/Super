@@ -43,6 +43,7 @@ CACHE_SECONDS = 6 * 3600
 # The server has 1 GB of memory, so only small, processed results are cached (never raw
 # ESPN responses), the cache is capped, and expired entries are dropped.
 CACHE_MAX_ENTRIES = 4000
+PLAYERS_AT_ONCE = 6  # game logs fetched at the same time
 SKIP_STATUSES = ("Out", "Doubtful", "Injured Reserve", "Suspension")
 
 
@@ -358,20 +359,25 @@ class PropsClient:
     def __init__(self, espn) -> None:
         self.espn = espn
         self._cache: dict[str, tuple[float, float, object]] = {}  # key -> (stored at, ttl, value)
+        self._leader_season: dict[str, int] = {}  # league -> the season its team leaders were found under
         self._limit = asyncio.Semaphore(8)
+        self._players = asyncio.Semaphore(PLAYERS_AT_ONCE)
 
     async def _json(self, url: str, params: dict | None = None):
         """Fetches from ESPN (at most 8 at a time). Not cached: callers cache what they keep."""
         async with self._limit:
             return await self.espn._get_json(url, params)
 
-    async def cached(self, key: str, ttl: float, make):
-        """make()'s result, reused for ttl seconds. Keep results small: this lives in memory."""
+    async def cached(self, key: str, ttl: float, make, keep=None):
+        """make()'s result, reused for ttl seconds (only if keep(result), when given, so an empty result
+        from a temporary problem is tried again). Keep results small: this lives in memory."""
         now = time.monotonic()
         hit = self._cache.get(key)
         if hit and now - hit[0] < hit[1]:
             return hit[2]
         value = await make()
+        if keep is not None and not keep(value):
+            return value
         self._cache[key] = (now, ttl, value)
         if len(self._cache) > CACHE_MAX_ENTRIES:
             self._trim(now)
@@ -386,13 +392,22 @@ class PropsClient:
                 del self._cache[key]
 
     async def key_players(self, league_key: str, team_id: str) -> list[tuple[str, str, str]]:
-        """(athlete id, name, position) of a team's key players, from ESPN's team leaders."""
+        """(athlete id, name, position) of a team's key players, from ESPN's team leaders. Worked out once
+        every few hours per team: finding the current season's leaders can take several requests."""
+        return await self.cached(f"key-players:{league_key}:{team_id}", CACHE_SECONDS,
+                                 lambda: self._find_key_players(league_key, team_id), keep=bool)
+
+    async def _find_key_players(self, league_key: str, team_id: str) -> list[tuple[str, str, str]]:
         league = LEAGUES[league_key]
         sport_path, league_slug = league.path.split("/")
         picks = LEADER_PICKS[league.sport]
         ids: list[str] = []
         year = date.today().year
-        for season in (year + 1, year, year - 1):  # newest season that has leaders yet
+        seasons = [year + 1, year, year - 1]  # the newest season that has leaders yet
+        if (known := self._leader_season.get(league_key)) in seasons:  # the season that worked for this league
+            seasons.remove(known)
+            seasons.insert(0, known)
+        for season in seasons:
             for kind in LEADER_TYPES:
                 url = LEADERS_URL.format(sport=sport_path, league=league_slug, season=season, type=kind, team=team_id)
                 try:
@@ -403,6 +418,7 @@ class PropsClient:
                 if ids:
                     break
             if ids:
+                self._leader_season[league_key] = season
                 break
         roster = await self._roster(league.path, team_id)
         players = [(aid, *roster[aid]) for aid in ids if aid in roster]
@@ -445,17 +461,23 @@ class PropsClient:
         return await self.cached(url, CACHE_SECONDS, lambda: self._both_seasons(url, path))
 
     async def _both_seasons(self, url: str, path: str) -> tuple[list[PlayerGame], bool]:
-        latest = await self._json(url)
-        games, pitcher = parse_gamelog(latest)
-        seasons = seasons_from(latest)
-        if len(seasons) > 1:
-            try:
-                older, _ = parse_gamelog(await self._json(url, {"season": seasons[1]}))
-                games += [g for g in older if g.season not in {x.season for x in games}]
-            except Exception:
-                pass
+        # A game log is ~1 MB of JSON. Only a few players are fetched at once, and each log is cut down to the
+        # stats used straight away, so a parlay over a week of games doesn't hold a hundred of them in memory.
+        async with self._players:
+            games, pitcher, seasons = await self._season(url)
+            if len(seasons) > 1:
+                try:
+                    older, _, _ = await self._season(url, {"season": seasons[1]})
+                    games += [g for g in older if g.season not in {x.season for x in games}]
+                except Exception:
+                    pass
         games.sort(key=lambda g: g.when, reverse=True)
-        return _slim((games, pitcher), url)
+        return games, pitcher
+
+    async def _season(self, url: str, params: dict | None = None):
+        data = await self._json(url, params)
+        games, pitcher = _slim(parse_gamelog(data), url)
+        return games, pitcher, seasons_from(data)
 
     async def game_trends(self, game: Game, injured: set[str] = frozenset(), bigger: bool = False,
                           scorers: bool = False) -> list[Trend]:
