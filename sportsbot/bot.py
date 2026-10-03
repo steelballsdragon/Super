@@ -14,12 +14,13 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
+from .balls import BallFeed
 from .espn import ESPNClient
-from .formatting import scoreboard_embed, update_embed
+from .formatting import ball_messages, scoreboard_embed, update_embed
 from .leagues import LEAGUES
 from .plays import AssistResolver, PlayResolver
 from .storage import SubscriptionStore
-from .tracker import Tracker
+from .tracker import OVERS, WICKET, Tracker
 
 log = logging.getLogger("sportsbot")
 
@@ -76,6 +77,12 @@ class SportsBot(discord.Client):
             for league in LEAGUES.values()
             if league.sport == "soccer"
         )
+        # One ball-by-ball feed per cricket league (IPL, internationals).
+        self.ball_feeds = {
+            league.key: BallFeed(lambda path, event_id, page: self.espn.balls(path, event_id, page))
+            for league in LEAGUES.values()
+            if league.sport == "cricket"
+        }
         self.dev_guild = dev_guild
         self.poll_interval = poll_interval
         self.poll.change_interval(seconds=poll_interval)
@@ -141,14 +148,16 @@ class SportsBot(discord.Client):
         resolver = self.play_resolvers.get(key)
         if resolver is not None:
             updates = await resolver.resolve(games, updates)
-        if not updates:
-            return
         subs = self.store.for_league(key)
+        if LEAGUES[key].sport == "cricket":
+            await self._post_balls(self.ball_feeds[key], games, [s for s in subs if s.ball_by_ball])
         for update in updates:
             channels = {
                 s.channel_id
                 for s in subs
-                if s.team is None or update.game.involves(s.team)
+                if (s.team is None or update.game.involves(s.team))
+                # Ball-by-ball channels already see every wicket and over.
+                and not (s.ball_by_ball and update.kind in (WICKET, OVERS))
             }
             if not channels:
                 continue
@@ -156,12 +165,24 @@ class SportsBot(discord.Client):
             for channel_id in channels:
                 await self._send(channel_id, embed)
 
-    async def _send(self, channel_id: int, embed: discord.Embed) -> None:
+    async def _post_balls(self, feed: BallFeed, games, subs) -> None:
+        live = [g for g in games if g.state == "in"]
+        feed.forget_except({g.id for g in live})
+        for game in live:
+            channels = {s.channel_id for s in subs if s.team is None or game.involves(s.team)}
+            if not channels:
+                continue
+            balls = await feed.new_balls(game)
+            for message in ball_messages(game, balls):
+                for channel_id in channels:
+                    await self._send(channel_id, content=message)
+
+    async def _send(self, channel_id: int, embed: discord.Embed | None = None, content: str | None = None) -> None:
         channel = self.get_channel(channel_id)
         try:
             if channel is None:
                 channel = await self.fetch_channel(channel_id)
-            await channel.send(embed=embed)
+            await channel.send(content=content, embed=embed)
         except discord.NotFound:
             log.warning("Channel %s no longer exists; dropping its subscriptions", channel_id)
             self.store.remove_channel(channel_id)
@@ -217,13 +238,27 @@ def register_commands(bot: SportsBot) -> None:
     scores.autocomplete("team")(team_suggestions)
 
     @tree.command(name="follow", description="Post live updates for a league (or one team) in this channel")
-    @app_commands.describe(league="League to follow", team="Only follow this team (name or abbreviation)")
+    @app_commands.describe(
+        league="League to follow",
+        team="Only follow this team (name or abbreviation)",
+        ball_by_ball="Cricket only: post every ball (about 240 messages a T20, 600 an ODI)",
+    )
     @app_commands.choices(league=LEAGUE_CHOICES)
     @app_commands.default_permissions(manage_channels=True)
     @app_commands.guild_only()
-    async def follow(interaction: discord.Interaction, league: app_commands.Choice[str], team: str | None = None):
+    async def follow(
+        interaction: discord.Interaction,
+        league: app_commands.Choice[str],
+        team: str | None = None,
+        ball_by_ball: bool = False,
+    ):
+        if ball_by_ball and LEAGUES[league.value].sport != "cricket":
+            await interaction.response.send_message("Ball-by-ball is only available for cricket.", ephemeral=True)
+            return
         target = f"**{team}** in {league.name}" if team else f"all **{league.name}** games"
-        if bot.store.add(interaction.channel_id, league.value, team):
+        if ball_by_ball:
+            target += ", ball by ball"
+        if bot.store.add(interaction.channel_id, league.value, team, ball_by_ball):
             msg = f"✅ This channel will now get live updates for {target}."
         else:
             msg = f"This channel already follows {target}."
@@ -273,7 +308,9 @@ def register_commands(bot: SportsBot) -> None:
             )
             return
         lines = [
-            f"{LEAGUES[s.league].emoji} {LEAGUES[s.league].name}" + (f" — {s.team}" if s.team else " — all games")
+            f"{LEAGUES[s.league].emoji} {LEAGUES[s.league].name}"
+            + (f" — {s.team}" if s.team else " — all games")
+            + (" (ball by ball)" if s.ball_by_ball else "")
             for s in subs
             if s.league in LEAGUES
         ]

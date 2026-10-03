@@ -6,7 +6,7 @@ from datetime import datetime
 
 import discord
 
-from .espn import Game, Goal, ScoringPlay, Team, period_label
+from .espn import Ball, Game, Goal, ScoringPlay, Team, period_label
 from .leagues import LEAGUES
 from .tracker import CALLED_OFF, FINAL, HALFTIME, INNINGS, KICKOFF, OVERS, PERIOD, SCORE, WICKET, Update
 
@@ -190,3 +190,34 @@ def scoreboard_embed(league_key: str, games: list[Game], team: str | None = None
                 break
             desc += line + "\n"
     return discord.Embed(title=title, description=desc, color=discord.Color.blurple())
+
+
+BALL_ICONS = {"four": "4️⃣ **FOUR!**", "six": "6️⃣ **SIX!**", "out": "🔴 **OUT!**"}
+DISCORD_LIMIT = 2000
+
+
+def _ball_line(ball: Ball) -> str:
+    bowler_batter, _, result = ball.short.rpartition(", ")
+    shout = BALL_ICONS.get(ball.kind)
+    line = f"`{ball.over}` {bowler_batter}, {shout or result} · **{ball.team} {ball.runs}/{ball.wickets}**"
+    if ball.dismissal:
+        line += f"\n> {ball.dismissal}"
+    elif shout and ball.text:
+        line += f"\n> {ball.text[:150]}"
+    if ball.over_complete:
+        line += f"\n*End of over {ball.over_number}: {ball.over_runs} run{'s' if ball.over_runs != 1 else ''}*"
+    return line
+
+
+def ball_messages(game: Game, balls: list[Ball]) -> list[str]:
+    """Ball-by-ball lines for one check, split to fit Discord's message limit."""
+    header = f"🏏 **{' v '.join(t.abbrev for t in game.teams)}**"
+    messages, current = [], header
+    for line in (_ball_line(b) for b in balls):
+        if len(current) + len(line) + 1 > DISCORD_LIMIT:
+            messages.append(current)
+            current = header
+        current += "\n" + line
+    if current != header:
+        messages.append(current)
+    return messages

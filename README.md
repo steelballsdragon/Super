@@ -21,7 +21,7 @@ Each sport posts the moments that matter for it:
 | ⚾ **MLB** | First pitch, every run with the play (e.g. *Albies homered to right center (419 feet), Riley scored.*), and the final with each team's top performer |
 | 🏒 **NHL** | Puck drop, every goal with the scorer, shot type and assists (on their own line; marked as power-play, shorthanded or empty-net), the score at the end of each period, and the final with each team's top scorer |
 | 🏀 **NBA** | Tip-off, the score at the end of each quarter, half-time and the final with each team's top performer. It doesn't post every basket. |
-| 🏏 **Cricket** | Match start with the toss, every wicket, the score every 5 overs (T20) or 10 overs (ODI and Test) with the chase equation, the innings break, and the result (e.g. *RCB won by 5 wkts (12b rem)*). It doesn't post every run. |
+| 🏏 **Cricket** | Match start with the toss, every wicket, the score every 5 overs (T20) or 10 overs (ODI and Test) with the chase equation, the innings break, and the result (e.g. *RCB won by 5 wkts (12b rem)*). Optional **ball-by-ball** mode posts every delivery (see below). |
 
 Supported leagues: NFL, NBA, MLB, NHL, Premier League, La Liga, Serie A, Bundesliga, Ligue 1, MLS, Champions League,
 Europa League, FIFA World Cup, IPL, and international cricket (every current Test, ODI and T20I, men's and women's).
@@ -30,6 +30,23 @@ To add more, edit `sportsbot/leagues.py` with any ESPN path, for example `soccer
 Results are reported correctly in tricky cases too: penalty shootouts (*Paraguay win 4-3 on penalties*),
 extra time, NHL shootouts, and postponed, suspended or cancelled games (posted as **Postponed** etc., never as a result).
 When a game ends on a score, such as a walk-off home run, the winning play is posted before the final result.
+
+### Cricket ball by ball
+
+`/follow` → a cricket league → `ball_by_ball: True` posts every delivery from ESPNcricinfo's commentary, e.g.
+
+```
+🏏 IND v WI
+`2.3` Seales to Shubman Gill, 🔴 OUT! · IND 3/1
+> Shubman Gill c †Hope b Seales 1 (6b 0x4 0x6)
+`2.4` Seales to Kohli, 4️⃣ FOUR! · IND 7/1
+`2.6` Seales to Kohli, 1 run · IND 8/1
+End of over 3: 6 runs
+```
+
+Balls bowled between two checks are combined into one message. That's still a message every ball or two, so a
+dedicated channel works best. Following mid-match starts from the current ball. Ball-by-ball channels still get the
+match start, innings break and result, but not the separate wicket and every-5/10-overs posts.
 
 ## Setup
 

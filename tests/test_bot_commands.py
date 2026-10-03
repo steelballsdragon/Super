@@ -83,3 +83,39 @@ def test_t20_posts_every_five_overs():
         "competitors": [{"homeAway": "home", "score": "30/0 (3/20 ov)", "team": {"id": "a"}, "linescores": [{"runs": 30, "overs": 3, "isBatting": True}]},
                         {"homeAway": "away", "score": "", "team": {"id": "b"}, "linescores": []}]}]}]}]}, CRICKET)
     assert over_interval(t20[0]) == 5
+
+
+def test_ball_by_ball_channels_skip_wicket_posts_but_get_the_result():
+    bot = make_bot()
+    bot.store.add(1, "cricket", "India")                      # normal updates
+    bot.store.add(2, "cricket", "India", ball_by_ball=True)   # every ball
+    sent = []
+
+    async def send(channel_id, embed=None, content=None):
+        sent.append((channel_id, embed.title if embed else content.splitlines()[0]))
+    bot._send = send
+
+    async def no_balls(game):
+        return []
+    bot.ball_feeds["cricket"].new_balls = no_balls
+    snapshots = iter([cricket((40, 2, 8.3, True)), cricket((41, 3, 8.4, True)),
+                      cricket((150, 10, 45.0, False), summary="India won by 40 runs", state="post")])
+
+    async def scoreboard(league):
+        return next(snapshots)
+    bot.espn.scoreboard = scoreboard
+    for _ in range(3):
+        asyncio.run(bot._poll_league("cricket"))
+    assert sent == [(1, "🏏 WICKET!"), (1, "🏏 Result"), (2, "🏏 Result")]
+
+
+def test_follow_rejects_ball_by_ball_outside_cricket():
+    bot = make_bot()
+    replies = []
+
+    async def send_message(msg, ephemeral=False):
+        replies.append(msg)
+    inter = SimpleNamespace(channel_id=1, response=SimpleNamespace(send_message=send_message))
+    league = SimpleNamespace(value="nfl", name="NFL")
+    asyncio.run(bot.tree.get_command("follow").callback(inter, league, None, True))
+    assert replies == ["Ball-by-ball is only available for cricket."] and bot.store.for_channel(1) == []
