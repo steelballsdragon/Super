@@ -60,6 +60,8 @@ Everything is one command, `/research [league] [team] [parlay]` (the league can 
 | `/research league:NFL parlay:Big payout` | A parlay built to between **+1000 and +10000** |
 | `/research league:NFL parlay:Lotto` | A 4–10 leg parlay built to between **+3000 and +20000** |
 | `/research league:NFL team:Chiefs parlay:Safe` | A same-game parlay from the Chiefs' next game |
+| `/research game:Bournemouth @ Chelsea parlay:Lotto` | A same-game Lotto from the game you pick (suggestions list the week's games) |
+| `/research parlay:Lotto bets:Goalscorers & assists` | A parlay of only anytime goal, to assist and goal-or-assist bets (soccer, NHL) |
 
 `/record` shows how the leans and parlays have done.
 
@@ -78,6 +80,23 @@ A team's report labels every number by source:
 Every pre-game lean is saved and graded at the final (win/loss/push, units at the recorded price), and `/record`
 breaks the results down by market and by confidence. Break-even at standard -110 prices is about 52.4%, so judge the
 leans by this record, not by how convincing they sound. It's research, not advice, and it can't guarantee winners.
+
+### Goalscorers and assists (soccer)
+
+Pick `bets:Goalscorers & assists` to build parlays only from **anytime goal**, **to assist** and **goal or assist** legs,
+or add them to any Lotto automatically. These are long shots by nature (a top striker scores in about 40–50% of games),
+so they're held to their own bar: about a 22% chance and at least 2 of the last 10 games. A game's report
+(`/research game:` or `team:`) lists every key player's goal and assist chances with estimated odds.
+
+**Assists follow FanDuel's rules** (Opta data), both in live goal posts and when assist legs are graded. Besides the final
+pass, the assist goes to the player who:
+
+- won a penalty or free kick that was scored directly (unless they took it),
+- had a shot saved, blocked or hit the woodwork, with a team-mate scoring the rebound,
+- forced an own goal with a shot or pass.
+
+Goal posts show these as e.g. *⚽ 61' Bruno Fernandes (pen) · 🅰️ FanDuel assist: Matheus Cunha (won the penalty)*. Hit
+rates use official assists, so assist legs hit a little more often than shown.
 
 ### Player trends and parlays (Linemate-style)
 

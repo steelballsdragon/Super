@@ -8,7 +8,7 @@ import os
 import subprocess
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -26,7 +26,7 @@ from .odds import OddsBook, grade_text, line_text
 from .cricket_props import CricketHistory
 from .parlays import ParlayBook, record_field, settle
 from .props import (MAX_LEGS, MAX_LEGS_PER_GAME, TARGETS, PropsClient, build_to_target, injured_names, moneyline_leg,
-                    parlay_embed, trend_legs, trends_embed)
+                    parlay_embed, scorer_lines, trend_legs, trends_embed)
 from .research import LeanBook, leans, market_chances, parse_research, picks_embed, record_embed, report_embed
 from .schedule import COMMON_TIMEZONES, games_on, today
 from .plays import AssistResolver, PlayResolver
@@ -54,6 +54,7 @@ CHANNEL_KINDS = (KICKOFF, FINAL, CALLED_OFF)
 THREAD_KEEP_SECONDS = 4 * 86400
 
 REMINDER_SECONDS = 15 * 60
+WEEK_CACHE_SECONDS = 600
 PARLAY_GAMES = 8  # parlays look ahead (up to a week) until there are at least this many games to build from
 SETTLE_SECONDS = 60  # how often finished parlay legs are graded
 PRUNE_SECONDS = 3600  # how often old state entries are cleaned out
@@ -115,7 +116,8 @@ class SportsBot(discord.Client):
         self._last_prune = time.monotonic()
         self._last_settle = 0.0
         self._cleaned_guilds = False
-        self.result_lookups: dict[str, float] = {}  # when to next ask ESPN how an off-scoreboard game ended
+        self.result_lookups: dict[str, float] = {}
+        self._week: dict[str, tuple[float, list]] = {}  # league -> (fetched at, the week's upcoming games)  # when to next ask ESPN how an off-scoreboard game ended
         self.tracker = Tracker()
         # NFL, MLB and NHL scores are posted as the actual scoring plays.
         self.play_resolvers = {
@@ -144,6 +146,26 @@ class SportsBot(discord.Client):
         self.health: dict[str, LeagueHealth] = {}
         self.version = code_version()
         self._team_lists: dict[str, tuple[float, list[tuple[str, str]]]] = {}
+
+    async def week_games(self, key: str) -> list:
+        """The league's games that haven't started, over the next week, soonest first (cached for 10 minutes,
+        so game suggestions answer within Discord's 3 seconds)."""
+        cached = self._week.get(key)
+        if cached and time.monotonic() - cached[0] < WEEK_CACHE_SECONDS:
+            return cached[1]
+        league = LEAGUES[key]
+        boards = [self.espn.scoreboard(league)]
+        if league.feed == "scoreboard":
+            today = datetime.now(EASTERN).date()
+            boards += [self.espn.scoreboard(league, f"{today + timedelta(days=d):%Y%m%d}") for d in range(8)]
+        games = {}
+        for found in await asyncio.gather(*boards, return_exceptions=True):
+            if isinstance(found, BaseException):
+                continue
+            games.update((g.id, g) for g in found if g.state == "pre")
+        week = sorted(games.values(), key=lambda g: g.start)
+        self._week[key] = (time.monotonic(), week)
+        return week
 
     async def team_list(self, key: str) -> list[tuple[str, str]]:
         """(name, abbreviation) of the league's teams, cached for a few hours."""
@@ -429,14 +451,15 @@ class SportsBot(discord.Client):
 
     # ----- betting research -----
 
-    async def game_props(self, game, bigger: bool = False, underdog: bool = False):
-        """Player trends and a moneyline leg (the favorite's, or with underdog=True the underdog's) for one game."""
+    async def game_props(self, game, bigger: bool = False, underdog: bool = False, scorers: bool = False):
+        """Player trends and a moneyline leg (the favorite's, or with underdog=True the underdog's) for one game.
+        With scorers=True, the trends are goalscorer and assist bets only."""
         summary = await self.espn.summary(game.path or LEAGUES[game.league_key].path, game.id)
         r = parse_research(summary, game)
         if game.league.sport == "cricket":
             trends = await self.cricket.trends(game, bigger)
         else:
-            trends = await self.props.game_trends(game, injured_names(summary), bigger)
+            trends = await self.props.game_trends(game, injured_names(summary), bigger, scorers)
         return trends, moneyline_leg(game, market_chances(r), r.odds, underdog)
 
     async def research(self, game):
@@ -847,52 +870,66 @@ def register_commands(bot: SportsBot) -> None:
                     break
         return game
 
-    async def _team_report(interaction, lg, team):
-        """Everything on one team's next game: market, model, form, injuries, leans and player trends."""
-        game = await _next_game(lg, team)
-        if game is None:
-            await interaction.followup.send(f"No {lg.name} game for **{team}** in the next week on ESPN.")
-            return
-        if lg.sport != "cricket":  # ESPN has no lines or model for cricket
+    def _when(game) -> str:
+        start = start_time(game)
+        return f"{start.astimezone(EASTERN):%a %b} {start.astimezone(EASTERN).day}" if start else ""
+
+    async def _find_picked_game(lg, picked: str):
+        """The game picked from the suggestions (its ESPN id), or one typed by team name."""
+        week = await bot.week_games(lg.key)
+        game = next((g for g in week if g.id == picked), None)
+        if game is None:  # typed rather than picked: "Chelsea" or "Bournemouth @ Chelsea"
+            names = [part.strip() for part in picked.replace(" vs ", " @ ").split(" @ ") if part.strip()]
+            game = next((g for g in week if names and all(g.involves(n) for n in names)), None)
+        return game
+
+    async def _report(interaction, game):
+        """Everything on one game: market, model, form, injuries, leans and player trends."""
+        if game.league.sport != "cricket":  # ESPN has no lines or model for cricket
             r, found = await bot.research(game)
             await interaction.followup.send(embed=report_embed(r, found))
         trends, ml = await bot.game_props(game)
-        await interaction.followup.send(embed=trends_embed(game, trends, ml))
+        embed = trends_embed(game, trends, ml)
+        if game.league.sport in ("soccer", "hockey"):
+            scorers = (await bot.game_props(game, scorers=True))[0]
+            if text := scorer_lines(scorers):
+                embed.add_field(name="⚽ Goals and assists" if game.league.sport == "soccer" else "🏒 Goals and assists",
+                                value=text, inline=False)
+        await interaction.followup.send(embed=fit_embed(embed))
 
-    async def _parlay(interaction, lg, target, team=None):
-        if team:
-            game = await _next_game(lg, team)
-            games = [game] if game and game.state == "pre" else []
-            if not games:
-                await interaction.followup.send(f"No upcoming {lg.name} game for **{team}** to build a parlay from.")
-                return
-        elif not (games := await _upcoming(lg, want=PARLAY_GAMES, days_ahead=7)):
-            await interaction.followup.send(f"No {lg.name} games in the next week on ESPN.")
-            return
-
+    async def _parlay(interaction, lg, target, games, one_game: bool, scorers: bool = False):
         async def one(g):
             try:
+                if scorers:
+                    return trend_legs(g, (await bot.game_props(g, scorers=True))[0])
                 trends, ml = await bot.game_props(g, target.bigger)
                 legs = trend_legs(g, trends) + ([ml] if ml else [])
                 if target.bigger:  # the near-certain lines too, to finish near the target
                     legs += trend_legs(g, (await bot.game_props(g))[0])
-                if target.key == "lotto":  # underdogs pay more per leg
+                if target.key == "lotto":  # long shots pay more per leg: underdogs, goalscorers
                     if dog := (await bot.game_props(g, underdog=True))[1]:
                         legs.append(dog)
+                    if lg.sport in ("soccer", "hockey"):
+                        legs += trend_legs(g, (await bot.game_props(g, scorers=True))[0])
                 return legs
             except Exception:
                 log.warning("Parlay research failed for %s", g.id, exc_info=True)
                 return []
         candidates = {(leg.pick, leg.game_id): leg for found in await asyncio.gather(*(one(g) for g in games))
                       for leg in found}
-        chosen = build_to_target(list(candidates.values()), target, per_game=MAX_LEGS if team else MAX_LEGS_PER_GAME)
+        # One game (picked, a team's, or the only one coming up): every leg comes from it.
+        same_game = one_game or len(games) == 1
+        chosen = build_to_target(list(candidates.values()), target, per_game=MAX_LEGS if same_game else MAX_LEGS_PER_GAME)
         if len(chosen) < max(2, target.min_legs):
-            count = f"{len(games)} game" + ("" if len(games) == 1 else "s")
-            await interaction.followup.send(
-                f"Not enough strong legs for a {target.name} parlay: {lg.name} has only {count} coming up in the "
-                f"next week{' for that team' if team else ''}. Try a smaller payout, or another league.")
+            if same_game:
+                where = f"{games[0].away.name} @ {games[0].home.name}"
+            else:
+                where = f"the {len(games)} {lg.name} games coming up in the next week"
+            kind = "goalscorer and assist legs" if scorers else "strong legs"
+            await interaction.followup.send(f"Not enough {kind} in {where} for a {target.name} parlay. "
+                                            "Try a smaller payout, or another game.")
             return
-        embed, slip = parlay_embed(lg.name, lg.emoji, chosen, target)
+        embed, slip = parlay_embed(lg.name, lg.emoji, chosen, target, same_game=same_game)
         bot.parlays.record(interaction.channel_id, lg.key, target.name, chosen)
         await interaction.followup.send(embed=embed)
         await interaction.followup.send(f"📋 Copy or screenshot for your odds bot:\n{slip}\n"
@@ -917,36 +954,87 @@ def register_commands(bot: SportsBot) -> None:
                 if field := record_field(bot.parlays.summary()):
                     embed.add_field(name=field[0], value=field[1], inline=False)
                 await interaction.followup.send(embed=fit_embed(embed))
-        await _parlay(interaction, lg, TARGETS["safe"])
+        if games := await _upcoming(lg, want=PARLAY_GAMES, days_ahead=7):
+            await _parlay(interaction, lg, TARGETS["safe"], games, one_game=False)
+
+    BETS = [app_commands.Choice(name="All bets", value="all"),
+            app_commands.Choice(name="Goalscorers & assists", value="scorers")]
 
     @tree.command(name="research", description="Betting research: a league's best picks, a team's game, or a parlay")
     @app_commands.describe(
         league="League (leave out to use the one this channel follows)",
         team="A team: everything on its next game (with a parlay: legs from that game only)",
+        game="A specific game: everything on it (with a parlay: a same-game parlay)",
         parlay="Safe (around +100), Big payout (+1000 to +10000) or Lotto (4-10 legs, +3000 to +20000)",
+        bets="Goalscorers & assists: only anytime goal, to assist and goal-or-assist legs (soccer, NHL)",
     )
-    @app_commands.choices(league=LEAGUE_CHOICES, parlay=[app_commands.Choice(name=t.name, value=t.key)
-                                                         for t in TARGETS.values()])
+    @app_commands.choices(league=LEAGUE_CHOICES, bets=BETS,
+                          parlay=[app_commands.Choice(name=t.name, value=t.key) for t in TARGETS.values()])
     async def research(interaction: discord.Interaction, league: app_commands.Choice[str] | None = None,
-                       team: TeamName | None = None, parlay: app_commands.Choice[str] | None = None):
+                       team: TeamName | None = None, game: app_commands.Range[str, 1, 100] | None = None,
+                       parlay: app_commands.Choice[str] | None = None, bets: app_commands.Choice[str] | None = None):
         await interaction.response.defer(thinking=True)
         key, problem = await pick_league(interaction, league, team)
         if key is None:
             await interaction.followup.send(problem)
             return
         lg = LEAGUES[key]
+        scorers = bets is not None and bets.value == "scorers"
+        if scorers and lg.sport not in ("soccer", "hockey"):
+            await interaction.followup.send("Goalscorer and assist bets are for soccer and the NHL.")
+            return
         try:
-            if parlay:
-                await _parlay(interaction, lg, TARGETS[parlay.value], team)
+            picked = None
+            if game:
+                picked = await _find_picked_game(lg, game)
+                if picked is None:
+                    await interaction.followup.send(f"Couldn't find that {lg.name} game in the next week. "
+                                                    "Pick one from the suggestions.")
+                    return
             elif team:
-                await _team_report(interaction, lg, team)
+                picked = await _next_game(lg, team)
+                if picked is None:
+                    await interaction.followup.send(f"No {lg.name} game for **{team}** in the next week on ESPN.")
+                    return
+            if parlay or scorers:
+                target = TARGETS[parlay.value if parlay else "safe"]
+                if picked is not None:
+                    if picked.state != "pre":
+                        await interaction.followup.send("That game has already started, so there's no parlay to build.")
+                        return
+                    await _parlay(interaction, lg, target, [picked], one_game=True, scorers=scorers)
+                elif games := await _upcoming(lg, want=PARLAY_GAMES, days_ahead=7):
+                    await _parlay(interaction, lg, target, games, one_game=False, scorers=scorers)
+                else:
+                    await interaction.followup.send(f"No {lg.name} games in the next week on ESPN.")
+            elif picked is not None:
+                await _report(interaction, picked)
             else:
                 await _overview(interaction, lg)
         except Exception:
-            log.exception("Research failed for %s %s", key, team)
+            log.exception("Research failed for %s %s %s", key, team, game)
             await interaction.followup.send("Couldn't load ESPN's data for that, try again shortly.")
 
     research.autocomplete("team")(team_suggestions)
+
+    @research.autocomplete("game")
+    async def game_suggestions(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        key = getattr(interaction.namespace, "league", None)
+        keys = [key] if key in LEAGUES else channel_leagues(interaction.channel_id)
+        if len(keys) != 1:
+            return []
+        try:
+            week = await asyncio.wait_for(bot.week_games(keys[0]), timeout=2.5)
+        except Exception:
+            log.warning("Couldn't load %s games for suggestions", keys[0], exc_info=True)
+            return []
+        q = current.strip().lower()
+        out = []
+        for g in week:
+            label = f"{g.away.name} @ {g.home.name} · {_when(g)}"[:100]
+            if not q or q in label.lower():
+                out.append(app_commands.Choice(name=label, value=g.id))
+        return out[:25]
 
     @tree.command(name="record", description="How the research leans and parlays have done so far")
     async def record(interaction: discord.Interaction):

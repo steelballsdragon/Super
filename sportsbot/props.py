@@ -31,6 +31,10 @@ BARS = {
     "default": ((0.75, 0.70), (0.65, 0.60)),
     "baseball": ((0.60, 0.50), (0.40, 0.30)),
 }
+# Goalscorer and assist bets are long shots by nature (a top striker scores in maybe 40-50% of
+# games), so they get their own bar: a real chance, and at least 2 of the last 10.
+SCORER_STATS = ("totalGoals", "goalAssists", "goalOrAssist", "goals", "assists")
+SCORER_BAR, SCORER_MIN_L10 = 0.22, 0.2
 WEIGHTS = {"l10": 0.45, "season": 0.30, "last": 0.25}
 MIN_GAMES = {"l10": 5, "season": 3, "last": 8}
 CACHE_SECONDS = 6 * 3600
@@ -233,13 +237,18 @@ def weighted(rates: dict[str, Rate]) -> float | None:
 
 
 def best_trends(name: str, pid: str, team: str, opponent: str, games: list[PlayerGame], sport: str,
-                bigger: bool = False, props: list[Prop] | None = None) -> list[Trend]:
+                bigger: bool = False, props: list[Prop] | None = None, scorers: bool = False) -> list[Trend]:
     """For each prop, the highest line this player has hit consistently.
 
     With bigger=True, each prop's smallest line (the near-certain "gimme") is
     skipped and the bar is lower, giving fewer, higher lines that pay more.
+    With scorers=True, only goal and assist bets (anytime goal, to assist, goal
+    or assist), held to the lower goalscorer bar.
     """
     target, min_l10 = BARS.get(sport, BARS["default"])[1 if bigger else 0]
+    if scorers:
+        props = [p for p in PROPS.get(sport, []) if p.stat in SCORER_STATS]
+        target, min_l10, bigger = SCORER_BAR, SCORER_MIN_L10, False
     if not games:
         return []
     seasons = []
@@ -374,7 +383,8 @@ class PropsClient:
         games.sort(key=lambda g: g.when, reverse=True)
         return _slim((games, pitcher), url)
 
-    async def game_trends(self, game: Game, injured: set[str] = frozenset(), bigger: bool = False) -> list[Trend]:
+    async def game_trends(self, game: Game, injured: set[str] = frozenset(), bigger: bool = False,
+                          scorers: bool = False) -> list[Trend]:
         """Every key player's most likely lines for this game, most likely first."""
         league = game.league
         trends: list[Trend] = []
@@ -386,7 +396,8 @@ class PropsClient:
                 games, pitcher = await self.player_games(league.path, aid)
             except Exception:
                 return []
-            return [] if pitcher else best_trends(name, aid, team.abbrev, opponent.abbrev, games, league.sport, bigger)
+            return [] if pitcher else best_trends(name, aid, team.abbrev, opponent.abbrev, games, league.sport, bigger,
+                                                  scorers=scorers)
 
         jobs = []
         for team, opponent in ((game.home, game.away), (game.away, game.home)):
@@ -441,12 +452,13 @@ class Leg:
     side: str | None = None  # moneyline: the team id picked
     league: str = ""
     path: str = ""  # ESPN path for this game, e.g. "football/nfl" or "cricket/24289"
+    player: str = ""  # the player's name, for matching match commentary
 
 
 def trend_legs(game: Game, trends: list[Trend]) -> list[Leg]:
     label = f"{game.away.name} @ {game.home.name}"
     return [Leg(t.pick, t.probability, t.evidence, label, game.id, t.player_id, "prop", t.prop.stat, t.line,
-                None, game.league_key, game.path) for t in trends]
+                None, game.league_key, game.path, t.player) for t in trends]
 
 
 def moneyline_leg(game: Game, chances: dict[str, float] | None, odds, underdog: bool = False) -> Leg | None:
@@ -582,8 +594,23 @@ def trends_embed(game: Game, trends: list[Trend], ml: Leg | None) -> discord.Emb
     return embed
 
 
+def scorer_lines(trends: list[Trend], limit: int = 1000) -> str:
+    """Goalscorer and assist chances for a game report, most likely first."""
+    goal_chance = {t.player_id: t.probability for t in trends if t.prop.stat in ("totalGoals", "goals")}
+    text = ""
+    for t in sorted(trends, key=lambda t: t.probability, reverse=True):
+        if t.prop.stat == "goalOrAssist" and abs(goal_chance.get(t.player_id, -1) - t.probability) < 0.005:
+            continue  # never assists: "goal or assist" would just repeat his goal line
+        row = f"**~{t.probability:.0%}** {t.pick} ({american(t.probability)})\n  {t.evidence}\n"
+        if len(text) + len(row) > limit:
+            break
+        text += row
+    return text.strip()
+
+
 @fitted
-def parlay_embed(league_name: str, emoji: str, legs: list[Leg], target: Target) -> tuple[discord.Embed, str]:
+def parlay_embed(league_name: str, emoji: str, legs: list[Leg], target: Target,
+                 same_game: bool = False) -> tuple[discord.Embed, str]:
     """The parlay with its evidence and estimated odds, plus a plain slip to copy or screenshot."""
     count = f"{len(legs)} leg" + ("" if len(legs) == 1 else "s")
     chance = combined(legs)
@@ -600,6 +627,15 @@ def parlay_embed(league_name: str, emoji: str, legs: list[Leg], target: Target) 
               "the legs as independent.",
         inline=False,
     )
-    embed.set_footer(text=f"At most {MAX_LEGS_PER_GAME} legs per game unless you pick a team. " + NOTE)
+    if same_game:
+        embed.add_field(name="Same-game parlay", value="Legs in one game move together (a goal can settle several), "
+                        "so the real chance can be higher or lower than the estimate.", inline=False)
+    if any(leg.stat in ("goalAssists", "goalOrAssist") for leg in legs):
+        embed.add_field(name="Assists, FanDuel rules", value="Assist legs settle like FanDuel: winning a penalty or "
+                        "free kick that's scored, a saved or blocked shot turned in, or forcing an own goal counts too. "
+                        "The hit rates use official assists, so these legs hit a little more often than shown.",
+                        inline=False)
+    embed.set_footer(text=("" if same_game else f"At most {MAX_LEGS_PER_GAME} legs per game unless you pick a team or game. ")
+                     + NOTE)
     slip = "```\n" + "\n".join(leg.pick for leg in legs) + "\n```"
     return embed, slip

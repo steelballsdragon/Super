@@ -1,5 +1,6 @@
 import asyncio
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 
 from sportsbot.cricket_props import key_cricketers, parse_scorecard, player_histories
@@ -177,3 +178,39 @@ async def _final_summary():
     return {"header": {"competitions": [{"status": {"type": {"state": "post"}},
                                          "competitors": [{"homeAway": "home", "score": "290/7", "team": {"id": "6"}},
                                                          {"homeAway": "away", "score": "250", "team": {"id": "4"}}]}]}}
+
+
+def test_soccer_assist_legs_settle_by_fanduel_rules(tmp_path):
+    from sportsbot.espn import parse_scoreboard as parse
+    comp = {"status": {"type": {"state": "post", "name": "STATUS_FULL_TIME", "shortDetail": "FT"}},
+            "competitors": [{"homeAway": "home", "score": "3", "team": {"id": "1", "abbreviation": "MUN", "displayName": "Manchester United"}},
+                            {"homeAway": "away", "score": "1", "team": {"id": "2", "abbreviation": "IPS", "displayName": "Ipswich Town"}}]}
+    [g] = parse({"events": [{"id": "88", "date": "", "competitions": [comp]}]}, LEAGUES["epl"])
+    bot = FakeBot(tmp_path, [], {"cunha": {"goalAssists": 0, "goalOrAssist": 0}, "mbeumo": {"goalAssists": 0, "goalOrAssist": 1}})
+    bot.latest = {"epl": [g]}
+    real = bot.props.player_games
+
+    async def games(path, aid, fresh=False):  # the game log has ESPN's (official) assists only
+        found, more = await real(path, aid, fresh)
+        return [replace(x, event_id="88") for x in found], more
+    bot.props.player_games = games
+
+    async def summary(path, event_id):
+        return {"commentary": [
+            {"time": {"displayValue": "59'"}, "text": "Penalty Manchester United. Matheus Cunha draws a foul in the penalty area."},
+            {"time": {"displayValue": "61'"}, "text": "Goal! Manchester United 3, Ipswich Town 1. Bruno Fernandes (Manchester "
+                                                       "United) converts the penalty with a right footed shot to the bottom left corner."},
+        ]}
+    bot.espn = SimpleNamespace(summary=summary)
+    book = ParlayBook(bot.state)
+    legs = [Leg("Matheus Cunha To Assist", 0.3, "", "IPS @ MUN", "88", "cunha", "prop", "goalAssists", 1, None, "epl",
+                "soccer/eng.1", "Matheus Cunha"),
+            Leg("Bryan Mbeumo To Assist", 0.3, "", "IPS @ MUN", "88", "mbeumo", "prop", "goalAssists", 1, None, "epl",
+                "soccer/eng.1", "Bryan Mbeumo")]
+    book.record(9, "epl", "Lotto", legs)
+    asyncio.run(settle(bot, book))
+    [(_, embed)] = bot.sent
+    assert embed.description.splitlines()[:2] == [
+        "✅ **Matheus Cunha To Assist** · 1 · predicted ~30%",  # won the penalty: an assist at FanDuel
+        "❌ **Bryan Mbeumo To Assist** · 0 · predicted ~30%",
+    ]

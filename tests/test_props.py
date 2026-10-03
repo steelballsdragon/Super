@@ -187,3 +187,38 @@ def test_injured_players_are_skipped(monkeypatch):
     embed = trends_embed(game(), trends, None)
     assert embed.fields[0].name == "Washington Commanders" and "Terry McLaurin Over" in embed.fields[0].value
     assert trend_legs(game(), trends)[0].game == "Indianapolis Colts @ Washington Commanders"
+
+
+def soccer_games(goals, assists):
+    return [PlayerGame(f"2026-09-{28 - i:02d}", "2026-27", "ARS",
+                       {"totalShots": 3, "shotsOnTarget": 1, "totalGoals": g, "goalAssists": a, "goalOrAssist": min(1, g + a),
+                        "foulsCommitted": 0}) for i, (g, a) in enumerate(zip(goals, assists))]
+
+
+def test_goalscorer_and_assist_bets():
+    # Scored in 4 of the last 10, assisted in 3: long shots, but real ones.
+    games = soccer_games([1, 0, 1, 0, 0, 1, 0, 0, 1, 0], [0, 1, 0, 0, 1, 0, 0, 1, 0, 0])
+    picks = {t.pick: t for t in best_trends("Erling Haaland", "9", "MNC", "ARS", games, "soccer", scorers=True)}
+    assert set(picks) == {"Erling Haaland Anytime Goal", "Erling Haaland To Assist", "Erling Haaland Goal or Assist"}
+    assert 0.3 < picks["Erling Haaland Anytime Goal"].probability < 0.45
+    # The regular trends skip these: they never reach the usual 75% bar.
+    assert [t.pick for t in best_trends("Erling Haaland", "9", "MNC", "ARS", games, "soccer")] == [
+        "Erling Haaland Over 2.5 Shots", "Erling Haaland Over 0.5 Shots on Target"]
+    # Rarely scores: no goalscorer bet.
+    rare = soccer_games([1, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0] * 10)
+    assert [t.pick for t in best_trends("Defender", "4", "MNC", "ARS", rare, "soccer", scorers=True)] == []
+
+
+def test_lotto_from_goalscorers_in_one_game():
+    legs = [leg(f"Player{i} Anytime Goal", p, "1", f"p{i}") for i, p in enumerate((0.42, 0.38, 0.33, 0.3, 0.28, 0.25))]
+    chosen = build_to_target(legs, TARGETS["lotto"], per_game=15)
+    assert 4 <= len(chosen) <= 10 and 3000 <= int(american(combined(chosen))) <= 20000
+    embed, _ = parlay_embed("Premier League", "⚽", chosen, TARGETS["lotto"], same_game=True)
+    assert any(f.name == "Same-game parlay" for f in embed.fields)
+
+
+def test_scorer_list_skips_goal_or_assist_that_repeats_the_goal_line():
+    from sportsbot.props import scorer_lines
+    pure_scorer = soccer_games([1, 0, 1, 0, 0, 1, 0, 0, 1, 0], [0] * 10)
+    text = scorer_lines(best_trends("Dominic Calvert-Lewin", "7", "LEE", "ARS", pure_scorer, "soccer", scorers=True))
+    assert "Anytime Goal" in text and "Goal or Assist" not in text

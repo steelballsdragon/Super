@@ -206,10 +206,27 @@ async def _player_value(bot, leg: dict) -> float | None:
             index = {"runs": 3, "fours": 5, "sixes": 6}[leg["stat"]]
             return next((float(r[index]) for r in card.batting if r[0] == leg["player_id"]), None)
         games, _ = await bot.props.player_games(LEAGUES[leg["league"]].path, leg["player_id"], fresh=True)
+        game = next((g for g in games if g.event_id == leg["game_id"]), None)
+        if game is None:
+            return None
+        value = game.stats.get(leg["stat"], 0.0)
+        if sport == "soccer" and leg["stat"] in FANDUEL_ASSIST_STATS:
+            value += await _extra_fanduel_assists(bot, leg)
+        return value
     except Exception:
         return None
-    game = next((g for g in games if g.event_id == leg["game_id"]), None)
-    return game.stats.get(leg["stat"], 0.0) if game else None
+
+
+FANDUEL_ASSIST_STATS = ("goalAssists", "goalOrAssist")
+
+
+async def _extra_fanduel_assists(bot, leg: dict) -> int:
+    """Assists FanDuel counts on top of the official ones (penalties or free kicks won, rebounds,
+    forced own goals), from the match commentary. Assist bets are settled the FanDuel way."""
+    from .espn import fanduel_assists, name_key
+    name = leg.get("player") or leg["pick"].rsplit(" To Assist", 1)[0].rsplit(" Goal or Assist", 1)[0]
+    summary = await bot.espn.summary(leg.get("path") or LEAGUES[leg["league"]].path, leg["game_id"])
+    return sum(1 for f in fanduel_assists(summary) if f.how != "assist" and name_key(f.assist) == name_key(name))
 
 
 ICONS = {"hit": "✅", "miss": "❌", "void": "➖", "pending": "⏳"}
