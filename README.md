@@ -32,7 +32,19 @@ Supported leagues: NFL, Premier League, La Liga, Serie A, Bundesliga, Ligue 1, M
 
 You don't need privileged gateway intents.
 
-### Hosting 24/7 (no computer needed)
+### Free 24/7 hosting (Oracle Cloud Always Free)
+
+On any Ubuntu 22.04+ server, including Oracle Cloud's free VM, one command installs the bot as a service
+that restarts automatically after crashes and reboots:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/steelballsdragon/Super/main/deploy/install.sh | sudo bash
+```
+
+It asks for your bot token once and stores it in `/etc/scorebot.env`, readable only by root.
+Run the same command again to update to the latest code. View the logs with `sudo journalctl -u scorebot -f`.
+
+### Hosting 24/7 on Railway
 
 The bot has to stay running, so for round-the-clock updates host it in the cloud.
 For example, on [Railway](https://railway.app), which you can set up from a phone browser:
