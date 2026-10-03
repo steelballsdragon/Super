@@ -47,6 +47,8 @@ def _goal_line(game: Game, goal: Goal) -> str:
     line = f"⚽ {goal.describe()}" + (f" ({team})" if team else "")
     if goal.assist:
         line += f"\n🅰️ Assist: {goal.assist}"
+    elif goal.fanduel:
+        line += f"\n🅰️ FanDuel assist: {goal.fanduel} ({goal.fanduel_how})"
     return line
 
 

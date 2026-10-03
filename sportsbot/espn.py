@@ -88,6 +88,8 @@ class Goal:
     penalty: bool = False
     own_goal: bool = False
     assist: str | None = None  # filled in from the match details when ESPN has it
+    fanduel: str | None = None  # FanDuel's (Opta) assist when there's no regular one, e.g. who won the penalty
+    fanduel_how: str = ""
 
     def describe(self) -> str:
         tag = " (pen)" if self.penalty else " (OG)" if self.own_goal else ""
@@ -377,9 +379,14 @@ class GoalDetail:
     minute: str
     scorer: str
     assist: str | None
+    fanduel: str | None = None  # an extra assist under FanDuel's (Opta) rules, when there's no regular one
+    fanduel_how: str = ""  # e.g. "won the penalty"
+    in_commentary: bool = True  # False while ESPN's commentary hasn't caught up with this goal yet
 
 
 def parse_goal_details(summary: dict) -> list[GoalDetail]:
+    extras = {(f.minute, name_key(f.scorer)): f for f in fanduel_assists(summary)}
+    described = {(m, name_key(n)) for m, n in _commentary_goals(summary)}
     details = []
     for k in summary.get("keyEvents") or []:
         if not k.get("scoringPlay"):
@@ -388,14 +395,99 @@ def parse_goal_details(summary: dict) -> list[GoalDetail]:
         if not names:
             continue
         own_goal = "own goal" in ((k.get("type") or {}).get("text") or "").lower()
-        details.append(
-            GoalDetail(
-                minute=(k.get("clock") or {}).get("displayValue", ""),
-                scorer=names[0],
-                assist=names[1] if len(names) > 1 and not own_goal else None,
-            )
-        )
+        minute = (k.get("clock") or {}).get("displayValue", "")
+        assist = names[1] if len(names) > 1 and not own_goal else None
+        extra = extras.get((minute, name_key(names[0]))) if not assist else None
+        details.append(GoalDetail(minute=minute, scorer=names[0], assist=assist,
+                                  fanduel=extra.assist if extra else None, fanduel_how=extra.how if extra else "",
+                                  # Matches without commentary have nothing to wait for.
+                                  in_commentary=not summary.get("commentary") or (minute, name_key(names[0])) in described))
     return details
+
+
+# ---------- FanDuel (Opta) assists ----------
+#
+# FanDuel settles assist bets on Opta's wider definition: besides the final pass, the player
+# who wins a penalty or free kick scored directly, whose saved/blocked/woodwork shot is
+# turned in by a team-mate, or who forces an own goal, gets the assist. ESPN's commentary
+# (Opta's text) shows all of these, so they're rebuilt from it.
+
+@dataclass(frozen=True)
+class FanDuelAssist:
+    minute: str
+    scorer: str
+    assist: str
+    how: str  # "assist", "won the penalty", "won the free kick", "rebound", "forced the own goal"
+
+
+_GOAL = re.compile(r"^Goal! [^.]*\. (.+?) \((.+?)\)")
+_OWN_GOAL = re.compile(r"^Own Goal by (.+?), (.+?)\.")
+_ASSISTED = re.compile(r"Assisted by (.+?)(?: with | following |\.|$)")
+_PENALTY_WON = re.compile(r"^Penalty (.+?)\. (.+?) draws a foul in the penalty area")
+_FREE_KICK_WON = re.compile(r"^(.+?) \((.+?)\) wins a free kick")
+_SHOT = re.compile(r"^(?:Attempt (?:saved|blocked)\. (.+?) \((.+?)\)|(.+?) \((.+?)\) hits the (?:left |right )?(?:post|bar))")
+
+
+def name_key(name: str) -> str:
+    """A name for matching across ESPN's feeds, which differ in accents (Méthalie / Methalie)."""
+    import unicodedata
+    plain = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode()
+    return " ".join(plain.lower().replace(".", " ").split())
+
+
+def _minute(display: str) -> float:
+    nums = [int(n) for n in re.findall(r"\d+", display or "")]
+    return float(sum(nums)) if nums else -1.0
+
+
+def _commentary_goals(summary: dict) -> list[tuple[str, str]]:
+    """(minute, scorer) of the goals ESPN's commentary has written up so far."""
+    out = []
+    for c in _list(summary.get("commentary")):
+        text = c.get("text") or ""
+        if m := (_GOAL.match(text) or _OWN_GOAL.match(text)):
+            out.append(((c.get("time") or {}).get("displayValue", ""), m.group(1)))
+    return out
+
+
+def fanduel_assists(summary: dict) -> list[FanDuelAssist]:
+    """Every goal's assist under FanDuel's rules, from the match commentary."""
+    events = [(c.get("text") or "", (c.get("time") or {}).get("displayValue", "")) for c in _list(summary.get("commentary"))]
+    found = []
+    for i, (text, when) in enumerate(events):
+        goal, own = _GOAL.match(text), _OWN_GOAL.match(text)
+        if not (goal or own):
+            continue
+        scorer, team = (goal.group(1), goal.group(2)) if goal else (own.group(1), own.group(2))
+        before = [(t, w) for t, w in reversed(events[max(0, i - 6):i]) if _minute(when) - _minute(w) <= 3]
+        assist = how = None
+        if goal and (m := _ASSISTED.search(text)):
+            assist, how = m.group(1).strip(), "assist"
+        elif goal and "converts the penalty" in text:
+            for t, _ in before:
+                if (m := _PENALTY_WON.match(t)) and m.group(1) == team:
+                    assist, how = m.group(2), "won the penalty"
+                    break
+        elif goal and "from a free kick" in text:
+            for t, _ in before:
+                if (m := _FREE_KICK_WON.match(t)) and m.group(2) == team:
+                    assist, how = m.group(1), "won the free kick"
+                    break
+        else:
+            # A rebound from a team-mate's saved, blocked or woodwork shot, or (own goal) the attacker who forced it.
+            for t, w in before:
+                if _minute(when) - _minute(w) > 0 or t.startswith(("Corner", "Goal!", "Own Goal")):
+                    break
+                if m := _SHOT.match(t):
+                    shooter, shooter_team = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+                    if own and shooter_team != team:
+                        assist, how = shooter, "forced the own goal"
+                    elif goal and shooter_team == team:
+                        assist, how = shooter, "rebound"
+                    break
+        if assist and name_key(assist) != name_key(scorer):
+            found.append(FanDuelAssist(when, scorer, assist, how))
+    return found
 
 
 def _parse_event(event: dict, league: League) -> Game | None:

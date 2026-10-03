@@ -30,9 +30,13 @@ def key_event(minute, *names, kind="Goal"):
 class Feed:
     def __init__(self):
         self.events = []
+        self.commentary = None  # None: this match has no commentary
 
     async def __call__(self, event_id):
-        return parse_goal_details({"keyEvents": self.events})
+        summary = {"keyEvents": self.events}
+        if self.commentary is not None:
+            summary["commentary"] = [{"time": {"displayValue": m}, "text": t} for m, t in self.commentary]
+        return parse_goal_details(summary)
 
 
 def setup():
@@ -104,3 +108,63 @@ def test_hockey_assists_on_their_own_line():
     assert _hockey_text("A Goal (1) Wrist Shot, assists: B (1), C (2)") == "A Goal (1) Wrist Shot\n🅰️ Assists: B (1), C (2)"
     assert _hockey_text("A Goal (1) Wrist Shot, Unassisted") == "A Goal (1) Wrist Shot\n🅰️ Unassisted"
     assert _hockey_text("A Goal (1) Wrist Shot") == "A Goal (1) Wrist Shot"
+
+
+FREE_KICK_GOAL = [("8'", "Iliman Ndiaye (Manchester City) wins a free kick on the right wing."),
+                  ("8'", "Foul by Dayann Méthalie (Sunderland)."),
+                  ("9'", "Goal! Manchester City 1, Sunderland 0. Enzo Fernández (Manchester City) from a free kick with a "
+                         "right footed shot to the top right corner.")]
+
+
+def test_fanduel_assist_for_winning_the_free_kick_shows_with_the_goal():
+    feed, step = setup()
+    feed.events = [key_event("9'", "Enzo Fernández", kind="Goal - Free-kick")]
+    feed.commentary = FREE_KICK_GOAL[:2]  # ESPN's commentary hasn't written the goal up yet: wait for it
+    assert step(match(home=1, goals=[("382", "9'", "Enzo Fernández")])) == []
+    feed.commentary = FREE_KICK_GOAL
+    [u] = step(match(home=1, goals=[("382", "9'", "Enzo Fernández")]))
+    assert ("⚽ 9' Enzo Fernández (Manchester City)\n🅰️ FanDuel assist: Iliman Ndiaye (won the free kick)"
+            in update_embed(u).description)
+
+
+def summary_with(*lines):
+    return {"commentary": [{"time": {"displayValue": m}, "text": t} for m, t in lines]}
+
+
+def test_fanduel_assist_rules():
+    from sportsbot.espn import fanduel_assists
+    cases = {
+        "penalty won": summary_with(
+            ("68'", "Penalty conceded by Bobby Thomas (Coventry City) after a foul in the penalty area."),
+            ("68'", "Penalty Brighton and Hove Albion. Charalampos Kostoulas draws a foul in the penalty area."),
+            ("70'", "Goal! Coventry City 0, Brighton and Hove Albion 3. Pascal Groß (Brighton and Hove Albion) converts "
+                    "the penalty with a right footed shot to the bottom right corner.")),
+        "rebound": summary_with(
+            ("57'", "Attempt blocked. Florian Wirtz (Liverpool) right footed shot from the centre of the box is blocked. "
+                    "Assisted by Cody Gakpo with a cross."),
+            ("57'", "Goal! Bournemouth 0, Liverpool 1. Alexander Isak (Liverpool) right footed shot from the centre of "
+                    "the box to the bottom left corner.")),
+        "own goal off the post": summary_with(
+            ("25'", "Arda Güler (Real Madrid) hits the left post with a left footed shot from outside the box from a "
+                    "direct free kick."),
+            ("25'", "Own Goal by Matías Dituro, Elche. Elche 0, Real Madrid 1.")),
+        "own rebound: no assist": summary_with(
+            ("57'", "Attempt saved. Alexander Isak (Liverpool) right footed shot is saved by Đorđe Petrović (Bournemouth)."),
+            ("57'", "Goal! Bournemouth 0, Liverpool 1. Alexander Isak (Liverpool) right footed shot to the bottom left corner.")),
+        "took his own penalty: no assist": summary_with(
+            ("68'", "Penalty Manchester United. Bruno Fernandes draws a foul in the penalty area."),
+            ("70'", "Goal! Manchester United 1, Ipswich Town 0. Bruno Fernandes (Manchester United) converts the penalty "
+                    "with a right footed shot to the bottom left corner.")),
+        "shot a minute earlier is not a rebound": summary_with(
+            ("82'", "Attempt saved. Kevin Schade (Brentford) right footed shot is saved by Emiliano Martínez (Chelsea)."),
+            ("83'", "Goal! Brentford 2, Chelsea 0. Igor Thiago (Brentford) right footed shot following a fast break.")),
+    }
+    got = {k: [(f.assist, f.how) for f in fanduel_assists(v)] for k, v in cases.items()}
+    assert got == {
+        "penalty won": [("Charalampos Kostoulas", "won the penalty")],
+        "rebound": [("Florian Wirtz", "rebound")],
+        "own goal off the post": [("Arda Güler", "forced the own goal")],
+        "own rebound: no assist": [],
+        "took his own penalty: no assist": [],
+        "shot a minute earlier is not a rebound": [],
+    }

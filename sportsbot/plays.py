@@ -165,8 +165,13 @@ class AssistResolver:
             log.exception("Failed to fetch goal details for game %s", game_id)
             return goals
         found = {(d.minute, d.scorer): d for d in details}
-        # assist "" means the goal was found and was unassisted; None means not found yet.
-        return tuple(
-            replace(g, assist=found[(g.minute, g.scorer)].assist or "") if (g.minute, g.scorer) in found else g
-            for g in goals
-        )
+        # assist "" means the goal was found and was unassisted; None means not found yet. An unassisted
+        # goal also waits for the commentary, which shows FanDuel's extra assists (e.g. who won the penalty).
+        out = []
+        for g in goals:
+            d = found.get((g.minute, g.scorer))
+            if d is None or (not d.assist and not d.in_commentary):
+                out.append(g)
+            else:
+                out.append(replace(g, assist=d.assist or "", fanduel=d.fanduel, fanduel_how=d.fanduel_how))
+        return tuple(out)
