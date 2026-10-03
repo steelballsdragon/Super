@@ -1,0 +1,897 @@
+Attribute VB_Name = "modConsolidation"
+'==============================================================================
+' STOCK CONSOLIDATION PLANNER
+'
+' Finds items stored in more than one location and works out how many units
+' to move from which location to which, so that locations can be emptied.
+' It uses exactly the same rules as consolidation_plan.sql, so for the same
+' data both give the same moves:
+'   1. Only items sitting in 2 or more locations are looked at.
+'   2. Locations are emptied smallest quantity first.
+'   3. Stock only goes to locations that already hold the same item.
+'   4. A location is only planned if it can be emptied completely:
+'        - one move if any location has room for all of it (the one holding
+'          the most of the item wins, then the one with least spare room);
+'        - otherwise, if splitting is allowed, it is spread over the
+'          locations with the most room first.
+'   5. A location that is emptied never receives stock, and a location that
+'      receives stock is never emptied.
+'   6. Open capacity = max capacity - everything in the location (all items),
+'      and goes down as moves are planned.
+'
+' Input : sheet "Inventory"  (item_number, location, quantity)
+'         sheet "Locations"  (location, zone, max_capacity)
+'         Columns are found by their header in row 1, in any order.
+' Output: sheets "Consolidation Plan" and "Not Consolidated"
+'==============================================================================
+Option Explicit
+Option Compare Binary
+
+Private Const EPS As Double = 0.000001
+Private Const HEADER_ROW As Long = 4
+Private Const FIRST_ROW As Long = 5
+Private Const PLAN_COLS As Long = 9
+Private Const FAIL_COLS As Long = 6
+
+Private Const ITEM_HEADERS As String = "item_number,item,item_no,item_code,part_number,part_no,part,sku"
+Private Const LOC_HEADERS As String = "location,location_id,loc,bin,bin_location"
+Private Const QTY_HEADERS As String = "quantity,qty,actual_qty,on_hand,on_hand_qty,qty_on_hand"
+Private Const ZONE_HEADERS As String = "zone,zone_id,location_zone"
+Private Const CAP_HEADERS As String = "max_capacity,capacity,max_qty,maximum_capacity,location_capacity"
+
+Private Const REASON_ZONE As String = "No other location of this item in the same zone"
+Private Const REASON_NO_CAP As String = "Other locations of this item have no max capacity set"
+Private Const REASON_ROOM As String = "Not enough room in the item's other locations"
+Private Const REASON_SINGLE As String = "No single location of this item has room for all of it"
+
+' Settings
+Private mSameZoneOnly As Boolean
+Private mAllowSplit As Boolean
+Private mExcludeText As String
+Private mExcluded As Collection
+Private mShowMessages As Boolean
+
+' Locations from the location master (1 To locCount)
+Private locCount As Long
+Private locIndex As Collection          ' upper-case location -> index
+Private lZone() As String
+Private lZoneKey() As String
+Private lCap() As Double
+Private lHasCap() As Boolean
+Private lTotal() As Double              ' everything in the location, all items
+
+' Stock summed per item per location (1 To rowCount)
+Private rowCount As Long
+Private rItem() As String
+Private rItemKey() As String
+Private rLoc() As String
+Private rLocKey() As String
+Private rQty() As Double                ' quantity before any move
+Private rCur() As Double                ' quantity as moves are planned
+Private rLocIdx() As Long               ' 0 = not in the location master
+Private rState() As Integer             ' 0 untouched, 1 emptied, 2 received stock
+
+' Results
+Private moveList() As Variant
+Private moveCount As Long
+Private failRow() As Long
+Private failRoom() As Double
+Private failReason() As String
+Private failCount As Long
+Private itemsMulti As Long
+
+'------------------------------------------------------------------------------
+' Buttons
+'------------------------------------------------------------------------------
+Public Sub BuildConsolidationPlan()
+    RunConsolidation True
+End Sub
+
+Public Sub ClearResults()
+    Dim ws As Worksheet
+    Set ws = GetSheet("shtPlan", "Consolidation Plan")
+    If Not ws Is Nothing Then
+        StartSheet ws, "Consolidation Plan", "Press 'Build Consolidation Plan' on the Start sheet."
+        WriteHeaders ws, PlanHeaders()
+    End If
+    Set ws = GetSheet("shtNotMoved", "Not Consolidated")
+    If Not ws Is Nothing Then
+        StartSheet ws, "Not Consolidated", "Press 'Build Consolidation Plan' on the Start sheet."
+        WriteHeaders ws, FailHeaders()
+    End If
+    SetStatus "Results cleared " & Format$(Now, "dd-mmm-yyyy hh:mm")
+End Sub
+
+' Runs the whole thing. showMessages = False skips the message boxes.
+Public Sub RunConsolidation(ByVal showMessages As Boolean)
+    Dim oldCalc As Long
+    mShowMessages = showMessages
+    oldCalc = Application.Calculation
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.Calculation = xlCalculationManual
+    On Error GoTo Failed
+
+    LoadSettings
+    If LoadLocations() Then
+        If LoadInventory() Then
+            PlanMoves
+            WritePlan
+            WriteNotMoved
+            SetStatus "Last run " & Format$(Now, "dd-mmm-yyyy hh:mm") & ": " & moveCount & " moves, " & _
+                      EmptiedCount() & " locations emptied, " & RemainingFailures() & " cannot be emptied"
+            GetSheet("shtPlan", "Consolidation Plan").Activate
+            If mShowMessages Then
+                MsgBox "Plan ready." & vbCrLf & vbCrLf & _
+                       moveCount & " moves will empty " & EmptiedCount() & " locations (" & _
+                       FormatQty(TotalMoved()) & " units)." & vbCrLf & _
+                       RemainingFailures() & " locations cannot be emptied - see 'Not Consolidated'.", _
+                       vbInformation, "Stock consolidation"
+            End If
+        End If
+    End If
+
+Finish:
+    Application.Calculation = oldCalc
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+    Exit Sub
+
+Failed:
+    SetStatus "Last run failed: error " & Err.Number & " - " & Err.Description
+    If mShowMessages Then MsgBox "Error " & Err.Number & ": " & Err.Description, vbExclamation, "Stock consolidation"
+    Resume Finish
+End Sub
+
+'------------------------------------------------------------------------------
+' Input
+'------------------------------------------------------------------------------
+Private Sub LoadSettings()
+    Dim part As Variant, z As String
+    mSameZoneOnly = IsYes(SettingText("SameZoneOnly", "No"))
+    mAllowSplit = IsYes(SettingText("AllowSplit", "Yes"))
+    mExcludeText = SettingText("ExcludeZones", "")
+    Set mExcluded = New Collection
+    For Each part In Split(mExcludeText, ",")
+        z = UCase$(Trim$(CStr(part)))
+        If Len(z) > 0 Then
+            If Lookup(mExcluded, z) = 0 Then mExcluded.Add 1, z
+        End If
+    Next part
+End Sub
+
+Private Function LoadLocations() As Boolean
+    Dim ws As Worksheet, data As Variant, v As Variant
+    Dim lastCol As Long, lastRow As Long, n As Long, r As Long, idx As Long
+    Dim cLoc As Long, cZone As Long, cCap As Long
+    Dim key As String, zone As String
+
+    Set ws = GetSheet("shtLocations", "Locations")
+    If ws Is Nothing Then
+        Report "The 'Locations' sheet is missing."
+        Exit Function
+    End If
+    lastCol = FindLastColumn(ws)
+    cLoc = FindColumn(ws, lastCol, LOC_HEADERS)
+    cZone = FindColumn(ws, lastCol, ZONE_HEADERS)
+    cCap = FindColumn(ws, lastCol, CAP_HEADERS)
+    If cLoc = 0 Or cZone = 0 Or cCap = 0 Then
+        Report "The 'Locations' sheet needs these headers in row 1: location, zone, max_capacity."
+        Exit Function
+    End If
+
+    lastRow = FindLastRow(ws, cLoc, cZone, cCap)
+    n = lastRow - 1
+    If n < 1 Then n = 1
+    ReDim lZone(1 To n)
+    ReDim lZoneKey(1 To n)
+    ReDim lCap(1 To n)
+    ReDim lHasCap(1 To n)
+    ReDim lTotal(1 To n)
+    Set locIndex = New Collection
+    locCount = 0
+
+    If lastRow >= 2 Then
+        data = ws.Range(ws.Cells(2, 1), ws.Cells(lastRow, lastCol)).Value
+        For r = 1 To UBound(data, 1)
+            key = UCase$(CellText(data(r, cLoc)))
+            If Len(key) > 0 Then
+                zone = CellText(data(r, cZone))
+                idx = Lookup(locIndex, key)
+                If idx = 0 Then
+                    locCount = locCount + 1
+                    idx = locCount
+                    locIndex.Add idx, key
+                    lZone(idx) = zone
+                ElseIf zone > lZone(idx) Then
+                    lZone(idx) = zone           ' duplicated location: keep the largest
+                End If
+                v = data(r, cCap)
+                If IsNumber(v) Then
+                    If Not lHasCap(idx) Then
+                        lCap(idx) = CDbl(v)
+                        lHasCap(idx) = True
+                    ElseIf CDbl(v) > lCap(idx) Then
+                        lCap(idx) = CDbl(v)
+                    End If
+                End If
+            End If
+        Next r
+    End If
+    For idx = 1 To locCount
+        lZoneKey(idx) = UCase$(lZone(idx))
+    Next idx
+    LoadLocations = True
+End Function
+
+Private Function LoadInventory() As Boolean
+    Dim ws As Worksheet, data As Variant, v As Variant
+    Dim lastCol As Long, lastRow As Long, n As Long, r As Long, idx As Long
+    Dim cItem As Long, cLoc As Long, cQty As Long
+    Dim item As String, loc As String, key As String
+    Dim rowIndex As Collection
+
+    Set ws = GetSheet("shtInventory", "Inventory")
+    If ws Is Nothing Then
+        Report "The 'Inventory' sheet is missing."
+        Exit Function
+    End If
+    lastCol = FindLastColumn(ws)
+    cItem = FindColumn(ws, lastCol, ITEM_HEADERS)
+    cLoc = FindColumn(ws, lastCol, LOC_HEADERS)
+    cQty = FindColumn(ws, lastCol, QTY_HEADERS)
+    If cItem = 0 Or cLoc = 0 Or cQty = 0 Then
+        Report "The 'Inventory' sheet needs these headers in row 1: item_number, location, quantity."
+        Exit Function
+    End If
+
+    lastRow = FindLastRow(ws, cItem, cLoc, cQty)
+    n = lastRow - 1
+    If n < 1 Then n = 1
+    ReDim rItem(1 To n)
+    ReDim rItemKey(1 To n)
+    ReDim rLoc(1 To n)
+    ReDim rLocKey(1 To n)
+    ReDim rQty(1 To n)
+    ReDim rCur(1 To n)
+    ReDim rLocIdx(1 To n)
+    ReDim rState(1 To n)
+    Set rowIndex = New Collection
+    rowCount = 0
+
+    If lastRow >= 2 Then
+        data = ws.Range(ws.Cells(2, 1), ws.Cells(lastRow, lastCol)).Value
+        For r = 1 To UBound(data, 1)
+            item = CellText(data(r, cItem))
+            loc = CellText(data(r, cLoc))
+            v = data(r, cQty)
+            If Len(item) > 0 And Len(loc) > 0 And IsNumber(v) Then
+                key = UCase$(item) & vbTab & UCase$(loc)
+                idx = Lookup(rowIndex, key)
+                If idx = 0 Then
+                    rowCount = rowCount + 1
+                    idx = rowCount
+                    rowIndex.Add idx, key
+                    rItem(idx) = item
+                    rItemKey(idx) = UCase$(item)
+                    rLoc(idx) = loc
+                    rLocKey(idx) = UCase$(loc)
+                Else
+                    If item < rItem(idx) Then rItem(idx) = item
+                    If loc < rLoc(idx) Then rLoc(idx) = loc
+                End If
+                rQty(idx) = rQty(idx) + CDbl(v)
+            End If
+        Next r
+    End If
+
+    For idx = 1 To rowCount
+        rCur(idx) = rQty(idx)
+        rState(idx) = 0
+        rLocIdx(idx) = Lookup(locIndex, rLocKey(idx))
+        If rQty(idx) > EPS And rLocIdx(idx) > 0 Then
+            lTotal(rLocIdx(idx)) = lTotal(rLocIdx(idx)) + rQty(idx)
+        End If
+    Next idx
+    LoadInventory = True
+End Function
+
+'------------------------------------------------------------------------------
+' Planning
+'------------------------------------------------------------------------------
+Private Sub PlanMoves()
+    Dim ord() As Long, n As Long, i As Long, g1 As Long, g2 As Long
+
+    moveCount = 0
+    failCount = 0
+    itemsMulti = 0
+    ReDim moveList(1 To 2 * rowCount + 1, 1 To PLAN_COLS)
+    ReDim failRow(1 To rowCount + 1)
+    ReDim failRoom(1 To rowCount + 1)
+    ReDim failReason(1 To rowCount + 1)
+    If rowCount = 0 Then Exit Sub
+
+    ReDim ord(1 To rowCount)
+    For i = 1 To rowCount
+        If IsEligible(i) Then
+            n = n + 1
+            ord(n) = i
+        End If
+    Next i
+    If n = 0 Then Exit Sub
+    SortRows ord, 1, n
+
+    ' Walk through the items; within an item, smallest quantity first
+    g1 = 1
+    Do While g1 <= n
+        g2 = g1
+        Do While g2 < n
+            If rItemKey(ord(g2 + 1)) <> rItemKey(ord(g1)) Then Exit Do
+            g2 = g2 + 1
+        Loop
+        If g2 > g1 Then
+            itemsMulti = itemsMulti + 1
+            For i = g1 To g2
+                If rState(ord(i)) = 0 Then TryToEmpty ord, g1, g2, ord(i)
+            Next i
+        End If
+        g1 = g2 + 1
+    Loop
+End Sub
+
+' Tries to empty row s into the other locations of the same item (ord(g1..g2)).
+Private Sub TryToEmpty(ord() As Long, ByVal g1 As Long, ByVal g2 As Long, ByVal s As Long)
+    Dim cand() As Long, nc As Long, nOther As Long, nWithCap As Long
+    Dim i As Long, k As Long, t As Long, best As Long
+    Dim need As Double, room As Double, sumOpen As Double, maxOpen As Double
+    Dim remaining As Double, take As Double
+
+    need = rQty(s)
+    ReDim cand(1 To g2 - g1 + 1)
+    For i = g1 To g2
+        t = ord(i)
+        If t <> s And rState(t) <> 1 Then
+            If SameZoneOk(s, t) Then
+                nOther = nOther + 1
+                If rLocIdx(t) > 0 Then
+                    If lHasCap(rLocIdx(t)) Then
+                        nWithCap = nWithCap + 1
+                        room = OpenCap(t)
+                        If room > EPS Then
+                            nc = nc + 1
+                            cand(nc) = t
+                            sumOpen = sumOpen + room
+                            If room > maxOpen Then maxOpen = room
+                            If room >= need - EPS Then
+                                If best = 0 Then
+                                    best = t
+                                ElseIf SingleBefore(t, best) Then
+                                    best = t
+                                End If
+                            End If
+                        End If
+                    End If
+                End If
+            End If
+        End If
+    Next i
+
+    If best > 0 Then
+        AddMove s, best, need
+    ElseIf mAllowSplit And nc > 0 And sumOpen >= need - EPS Then
+        SortCandidates cand, nc
+        remaining = need
+        For k = 1 To nc
+            If remaining <= EPS Then Exit For
+            take = OpenCap(cand(k))
+            If take > remaining Then take = remaining
+            AddMove s, cand(k), take
+            remaining = remaining - take
+        Next k
+    Else
+        failCount = failCount + 1
+        failRow(failCount) = s
+        If mAllowSplit Then failRoom(failCount) = sumOpen Else failRoom(failCount) = maxOpen
+        If nOther = 0 Then
+            failReason(failCount) = REASON_ZONE
+        ElseIf nWithCap = 0 Then
+            failReason(failCount) = REASON_NO_CAP
+        ElseIf mAllowSplit Then
+            failReason(failCount) = REASON_ROOM
+        Else
+            failReason(failCount) = REASON_SINGLE
+        End If
+        Exit Sub
+    End If
+
+    ' The source location is now empty
+    rState(s) = 1
+    rCur(s) = 0
+    If rLocIdx(s) > 0 Then lTotal(rLocIdx(s)) = lTotal(rLocIdx(s)) - need
+End Sub
+
+Private Sub AddMove(ByVal s As Long, ByVal t As Long, ByVal qty As Double)
+    Dim li As Long, before As Double
+    li = rLocIdx(t)
+    before = OpenCap(t)
+    moveCount = moveCount + 1
+    moveList(moveCount, 1) = rItem(s)
+    moveList(moveCount, 2) = rLoc(s)
+    moveList(moveCount, 3) = qty
+    moveList(moveCount, 4) = rLoc(t)
+    moveList(moveCount, 5) = before
+    moveList(moveCount, 6) = lCap(li)
+    moveList(moveCount, 7) = lZone(li)
+    If rLocIdx(s) > 0 Then moveList(moveCount, 8) = lZone(rLocIdx(s)) Else moveList(moveCount, 8) = Empty
+    moveList(moveCount, 9) = before - qty
+    lTotal(li) = lTotal(li) + qty
+    rCur(t) = rCur(t) + qty
+    rState(t) = 2
+End Sub
+
+Private Function IsEligible(ByVal i As Long) As Boolean
+    If rQty(i) <= EPS Then Exit Function
+    If rLocIdx(i) > 0 Then
+        If Lookup(mExcluded, lZoneKey(rLocIdx(i))) > 0 Then Exit Function
+    End If
+    IsEligible = True
+End Function
+
+Private Function SameZoneOk(ByVal s As Long, ByVal t As Long) As Boolean
+    If Not mSameZoneOnly Then
+        SameZoneOk = True
+    ElseIf rLocIdx(s) > 0 And rLocIdx(t) > 0 Then
+        SameZoneOk = (lZoneKey(rLocIdx(s)) = lZoneKey(rLocIdx(t)))
+    End If
+End Function
+
+Private Function OpenCap(ByVal t As Long) As Double
+    OpenCap = lCap(rLocIdx(t)) - lTotal(rLocIdx(t))
+End Function
+
+' Order of work: item, then smallest quantity, then location
+Private Function RowBefore(ByVal a As Long, ByVal b As Long) As Boolean
+    If rItemKey(a) <> rItemKey(b) Then
+        RowBefore = (rItemKey(a) < rItemKey(b))
+    ElseIf Abs(rQty(a) - rQty(b)) > EPS Then
+        RowBefore = (rQty(a) < rQty(b))
+    Else
+        RowBefore = (rLocKey(a) < rLocKey(b))
+    End If
+End Function
+
+' Single target: holds the most of the item, then least spare room, then location
+Private Function SingleBefore(ByVal a As Long, ByVal b As Long) As Boolean
+    If Abs(rCur(a) - rCur(b)) > EPS Then
+        SingleBefore = (rCur(a) > rCur(b))
+    ElseIf Abs(OpenCap(a) - OpenCap(b)) > EPS Then
+        SingleBefore = (OpenCap(a) < OpenCap(b))
+    Else
+        SingleBefore = (rLocKey(a) < rLocKey(b))
+    End If
+End Function
+
+' Split targets: most spare room, then holds the most of the item, then location
+Private Function SplitBefore(ByVal a As Long, ByVal b As Long) As Boolean
+    If Abs(OpenCap(a) - OpenCap(b)) > EPS Then
+        SplitBefore = (OpenCap(a) > OpenCap(b))
+    ElseIf Abs(rCur(a) - rCur(b)) > EPS Then
+        SplitBefore = (rCur(a) > rCur(b))
+    Else
+        SplitBefore = (rLocKey(a) < rLocKey(b))
+    End If
+End Function
+
+Private Sub SortRows(arr() As Long, ByVal lo As Long, ByVal hi As Long)
+    Dim i As Long, j As Long, p As Long, tmp As Long
+    Do While lo < hi
+        i = lo
+        j = hi
+        p = arr((lo + hi) \ 2)
+        Do While i <= j
+            Do While RowBefore(arr(i), p)
+                i = i + 1
+            Loop
+            Do While RowBefore(p, arr(j))
+                j = j - 1
+            Loop
+            If i <= j Then
+                tmp = arr(i)
+                arr(i) = arr(j)
+                arr(j) = tmp
+                i = i + 1
+                j = j - 1
+            End If
+        Loop
+        If j - lo < hi - i Then
+            If lo < j Then SortRows arr, lo, j
+            lo = i
+        Else
+            If i < hi Then SortRows arr, i, hi
+            hi = j
+        End If
+    Loop
+End Sub
+
+' Few candidates per item, so a simple insertion sort is enough
+Private Sub SortCandidates(arr() As Long, ByVal n As Long)
+    Dim i As Long, j As Long, v As Long
+    For i = 2 To n
+        v = arr(i)
+        j = i - 1
+        Do While j >= 1
+            If Not SplitBefore(v, arr(j)) Then Exit Do
+            arr(j + 1) = arr(j)
+            j = j - 1
+        Loop
+        arr(j + 1) = v
+    Next i
+End Sub
+
+'------------------------------------------------------------------------------
+' Output
+'------------------------------------------------------------------------------
+Private Function PlanHeaders() As Variant
+    PlanHeaders = Array("Item Number", "From Location", "Qty to Move", "To Location", _
+                        "Target Open Capacity", "Target Max Capacity", "Target Zone", _
+                        "From Zone", "Target Open After Move")
+End Function
+
+Private Function FailHeaders() As Variant
+    FailHeaders = Array("Item Number", "Location", "Zone", "Quantity", "Room Elsewhere", "Reason")
+End Function
+
+Private Sub WritePlan()
+    Dim ws As Worksheet, out() As Variant, r As Long, c As Long, lastRow As Long
+
+    Set ws = GetSheet("shtPlan", "Consolidation Plan")
+    StartSheet ws, "Consolidation Plan", SettingsLine()
+    WriteHeaders ws, PlanHeaders()
+
+    If moveCount > 0 Then
+        ReDim out(1 To moveCount, 1 To PLAN_COLS)
+        For r = 1 To moveCount
+            For c = 1 To PLAN_COLS
+                out(r, c) = moveList(r, c)
+            Next c
+        Next r
+        lastRow = FIRST_ROW + moveCount - 1
+        TextColumns ws, lastRow, Array(1, 2, 4, 7, 8)
+        ws.Range(ws.Cells(FIRST_ROW, 1), ws.Cells(lastRow, PLAN_COLS)).Value = out
+        FormatTable ws, out, moveCount, PLAN_COLS, Array(3, 5, 6, 9), Array(1)
+        With ws.Range(ws.Cells(FIRST_ROW, 3), ws.Cells(lastRow, 3))
+            .Font.Bold = True
+            .Font.Color = RGB(0, 97, 0)
+        End With
+    Else
+        NoRowsMessage ws, "No moves found - nothing can be consolidated with this data and these settings."
+    End If
+
+    ' Summary panel
+    ws.Range("K4").Value = "Summary"
+    With ws.Range("K4:L4")
+        .VerticalAlignment = xlCenter
+        .Font.Bold = True
+        .Font.Color = RGB(255, 255, 255)
+        .Interior.Color = RGB(31, 56, 100)
+    End With
+    SummaryLine ws, 5, "Items in 2+ locations", itemsMulti
+    SummaryLine ws, 6, "Locations emptied", EmptiedCount()
+    SummaryLine ws, 7, "Moves", moveCount
+    SummaryLine ws, 8, "Units to move", TotalMoved()
+    SummaryLine ws, 9, "Locations that stay", RemainingFailures()
+    ws.Range("L8").NumberFormat = QtyFormat(TotalMoved())
+    With ws.Range("K4:L9").Borders
+        .LineStyle = xlContinuous
+        .Color = RGB(200, 206, 216)
+    End With
+
+    SetWidths ws, Array(14, 15, 12, 14, 13, 13, 12, 12, 14, 3, 22, 10)
+    FinishSheet ws, PLAN_COLS, moveCount
+End Sub
+
+Private Sub WriteNotMoved()
+    Dim ws As Worksheet, out() As Variant, idx() As Long, n As Long, i As Long, s As Long, lastRow As Long
+
+    Set ws = GetSheet("shtNotMoved", "Not Consolidated")
+    StartSheet ws, "Not Consolidated", _
+               "Locations of multi-location items that cannot be emptied with the space available.   " & SettingsLine()
+    WriteHeaders ws, FailHeaders()
+
+    ' Only locations that are still untouched at the end of planning
+    If failCount > 0 Then ReDim idx(1 To failCount)
+    For i = 1 To failCount
+        If rState(failRow(i)) = 0 Then
+            n = n + 1
+            idx(n) = i
+        End If
+    Next i
+
+    If n > 0 Then
+        ReDim out(1 To n, 1 To FAIL_COLS)
+        For i = 1 To n
+            s = failRow(idx(i))
+            out(i, 1) = rItem(s)
+            out(i, 2) = rLoc(s)
+            If rLocIdx(s) > 0 Then out(i, 3) = lZone(rLocIdx(s)) Else out(i, 3) = Empty
+            out(i, 4) = rQty(s)
+            out(i, 5) = failRoom(idx(i))
+            out(i, 6) = failReason(idx(i))
+        Next i
+        lastRow = FIRST_ROW + n - 1
+        TextColumns ws, lastRow, Array(1, 2, 3, 6)
+        ws.Range(ws.Cells(FIRST_ROW, 1), ws.Cells(lastRow, FAIL_COLS)).Value = out
+        FormatTable ws, out, n, FAIL_COLS, Array(4, 5), Array(1, 6)
+    Else
+        NoRowsMessage ws, "Every multi-location item can be consolidated."
+    End If
+
+    SetWidths ws, Array(14, 14, 12, 12, 14, 52)
+    FinishSheet ws, FAIL_COLS, n
+End Sub
+
+Private Sub StartSheet(ByVal ws As Worksheet, ByVal title As String, ByVal subtitle As String)
+    If ws.AutoFilterMode Then ws.AutoFilterMode = False
+    ws.Cells.UnMerge
+    ws.Cells.Clear
+    With ws.Range("A1")
+        .Value = title
+        .Font.Size = 16
+        .Font.Bold = True
+        .Font.Color = RGB(31, 56, 100)
+    End With
+    With ws.Range("A2")
+        .Value = subtitle
+        .Font.Size = 9
+        .Font.Color = RGB(89, 89, 89)
+    End With
+End Sub
+
+Private Sub WriteHeaders(ByVal ws As Worksheet, ByVal headers As Variant)
+    Dim n As Long
+    n = UBound(headers) - LBound(headers) + 1
+    With ws.Range(ws.Cells(HEADER_ROW, 1), ws.Cells(HEADER_ROW, n))
+        .Value = headers
+        .Font.Bold = True
+        .Font.Color = RGB(255, 255, 255)
+        .Interior.Color = RGB(31, 56, 100)
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+        .WrapText = True
+    End With
+    ws.Rows(HEADER_ROW).RowHeight = 30
+End Sub
+
+Private Sub TextColumns(ByVal ws As Worksheet, ByVal lastRow As Long, ByVal cols As Variant)
+    Dim c As Variant
+    For Each c In cols
+        ws.Range(ws.Cells(FIRST_ROW, c), ws.Cells(lastRow, c)).NumberFormat = "@"
+    Next c
+End Sub
+
+' Borders, number formats and a light band for every other item
+Private Sub FormatTable(ByVal ws As Worksheet, out() As Variant, ByVal n As Long, ByVal nCols As Long, _
+                        ByVal qtyCols As Variant, ByVal leftCols As Variant)
+    Dim lastRow As Long, r As Long, g1 As Long, shade As Boolean, c As Variant, fmt As String
+
+    lastRow = FIRST_ROW + n - 1
+    With ws.Range(ws.Cells(FIRST_ROW, 1), ws.Cells(lastRow, nCols))
+        .Font.Size = 10
+        .VerticalAlignment = xlCenter
+        .HorizontalAlignment = xlCenter
+        .Borders.LineStyle = xlContinuous
+        .Borders.Color = RGB(217, 217, 217)
+    End With
+    For Each c In leftCols
+        ws.Range(ws.Cells(FIRST_ROW, c), ws.Cells(lastRow, c)).HorizontalAlignment = xlLeft
+    Next c
+
+    fmt = "#,##0"
+    For Each c In qtyCols
+        For r = 1 To n
+            If Abs(out(r, c) - Fix(out(r, c))) > EPS Then fmt = "#,##0.00"
+        Next r
+    Next c
+    For Each c In qtyCols
+        ws.Range(ws.Cells(FIRST_ROW, c), ws.Cells(lastRow, c)).NumberFormat = fmt
+    Next c
+
+    g1 = 1
+    For r = 1 To n
+        If r = n Then
+            BandGroup ws, FIRST_ROW + g1 - 1, FIRST_ROW + r - 1, nCols, shade
+        ElseIf UCase$(out(r + 1, 1)) <> UCase$(out(r, 1)) Then
+            BandGroup ws, FIRST_ROW + g1 - 1, FIRST_ROW + r - 1, nCols, shade
+            shade = Not shade
+            g1 = r + 1
+        End If
+    Next r
+End Sub
+
+Private Sub BandGroup(ByVal ws As Worksheet, ByVal r1 As Long, ByVal r2 As Long, ByVal nCols As Long, ByVal shade As Boolean)
+    With ws.Range(ws.Cells(r1, 1), ws.Cells(r2, nCols))
+        If shade Then .Interior.Color = RGB(234, 241, 251)
+        With .Borders(xlEdgeTop)
+            .LineStyle = xlContinuous
+            .Color = RGB(142, 160, 189)
+        End With
+    End With
+    ws.Cells(r1, 1).Font.Bold = True
+End Sub
+
+Private Sub NoRowsMessage(ByVal ws As Worksheet, ByVal msg As String)
+    With ws.Cells(FIRST_ROW, 1)
+        .Value = msg
+        .Font.Italic = True
+        .Font.Color = RGB(89, 89, 89)
+    End With
+End Sub
+
+Private Sub SummaryLine(ByVal ws As Worksheet, ByVal r As Long, ByVal label As String, ByVal value As Double)
+    ws.Cells(r, 11).Value = label
+    ws.Cells(r, 11).Font.Color = RGB(64, 64, 64)
+    With ws.Cells(r, 12)
+        .Value = value
+        .Font.Bold = True
+        .NumberFormat = "#,##0"
+        .HorizontalAlignment = xlRight
+    End With
+End Sub
+
+Private Sub SetWidths(ByVal ws As Worksheet, ByVal widths As Variant)
+    Dim i As Long
+    For i = LBound(widths) To UBound(widths)
+        ws.Columns(i - LBound(widths) + 1).ColumnWidth = widths(i)
+    Next i
+End Sub
+
+Private Sub FinishSheet(ByVal ws As Worksheet, ByVal nCols As Long, ByVal n As Long)
+    If n > 0 Then ws.Range(ws.Cells(HEADER_ROW, 1), ws.Cells(FIRST_ROW + n - 1, nCols)).AutoFilter
+    On Error Resume Next                ' window settings are cosmetic
+    ws.Activate
+    With ActiveWindow
+        .FreezePanes = False
+        .ScrollRow = 1
+        .ScrollColumn = 1
+        .SplitColumn = 0
+        .SplitRow = HEADER_ROW
+        .FreezePanes = True
+    End With
+    On Error GoTo 0
+End Sub
+
+Private Function SettingsLine() As String
+    Dim ex As String
+    ex = mExcludeText
+    If Len(ex) = 0 Then ex = "none"
+    SettingsLine = "Built " & Format$(Now, "dd-mmm-yyyy hh:mm") & _
+                   "   |   Same zone only: " & YesNo(mSameZoneOnly) & _
+                   "   |   Split moves: " & YesNo(mAllowSplit) & _
+                   "   |   Excluded zones: " & ex
+End Function
+
+'------------------------------------------------------------------------------
+' Counters
+'------------------------------------------------------------------------------
+Private Function EmptiedCount() As Long
+    Dim i As Long
+    For i = 1 To rowCount
+        If rState(i) = 1 Then EmptiedCount = EmptiedCount + 1
+    Next i
+End Function
+
+Private Function RemainingFailures() As Long
+    Dim i As Long
+    For i = 1 To failCount
+        If rState(failRow(i)) = 0 Then RemainingFailures = RemainingFailures + 1
+    Next i
+End Function
+
+Private Function TotalMoved() As Double
+    Dim i As Long
+    For i = 1 To moveCount
+        TotalMoved = TotalMoved + moveList(i, 3)
+    Next i
+End Function
+
+'------------------------------------------------------------------------------
+' Helpers
+'------------------------------------------------------------------------------
+' Finds a sheet by its code name, or failing that by its tab name
+Private Function GetSheet(ByVal codeName As String, ByVal tabName As String) As Worksheet
+    Dim ws As Worksheet
+    For Each ws In ThisWorkbook.Worksheets
+        If ws.CodeName = codeName Then
+            Set GetSheet = ws
+            Exit Function
+        End If
+    Next ws
+    For Each ws In ThisWorkbook.Worksheets
+        If StrComp(ws.Name, tabName, vbTextCompare) = 0 Then
+            Set GetSheet = ws
+            Exit Function
+        End If
+    Next ws
+End Function
+
+Private Function SettingText(ByVal settingName As String, ByVal fallback As String) As String
+    On Error GoTo UseFallback
+    SettingText = CellText(ThisWorkbook.Names(settingName).RefersToRange.Value)
+    Exit Function
+UseFallback:
+    SettingText = fallback
+End Function
+
+Private Sub SetStatus(ByVal msg As String)
+    On Error Resume Next
+    ThisWorkbook.Names("LastRun").RefersToRange.Value = msg
+End Sub
+
+Private Sub Report(ByVal msg As String)
+    SetStatus "Last run stopped: " & msg
+    If mShowMessages Then MsgBox msg, vbExclamation, "Stock consolidation"
+End Sub
+
+' Column whose row-1 header matches one of the comma-separated names
+Private Function FindColumn(ByVal ws As Worksheet, ByVal lastCol As Long, ByVal aliases As String) As Long
+    Dim c As Long, h As String, nm As Variant
+    For c = 1 To lastCol
+        h = LCase$(CellText(ws.Cells(1, c).Value))
+        h = Replace(Replace(h, " ", "_"), "-", "_")
+        For Each nm In Split(aliases, ",")
+            If h = nm Then
+                FindColumn = c
+                Exit Function
+            End If
+        Next nm
+    Next c
+End Function
+
+Private Function FindLastColumn(ByVal ws As Worksheet) As Long
+    FindLastColumn = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+End Function
+
+Private Function FindLastRow(ByVal ws As Worksheet, ParamArray cols() As Variant) As Long
+    Dim c As Variant, r As Long
+    For Each c In cols
+        r = ws.Cells(ws.Rows.Count, c).End(xlUp).Row
+        If r > FindLastRow Then FindLastRow = r
+    Next c
+End Function
+
+Private Function Lookup(ByVal col As Collection, ByVal key As String) As Long
+    On Error Resume Next
+    Lookup = col(key)
+    On Error GoTo 0
+End Function
+
+Private Function CellText(ByVal v As Variant) As String
+    If IsError(v) Or IsEmpty(v) Or IsNull(v) Then
+        CellText = ""
+    Else
+        CellText = Trim$(CStr(v))
+    End If
+End Function
+
+Private Function IsNumber(ByVal v As Variant) As Boolean
+    If IsError(v) Or IsEmpty(v) Or IsNull(v) Then Exit Function
+    If VarType(v) = vbBoolean Then Exit Function
+    IsNumber = IsNumeric(v)
+End Function
+
+Private Function IsYes(ByVal s As String) As Boolean
+    s = UCase$(Trim$(s))
+    IsYes = (s = "YES" Or s = "Y" Or s = "TRUE" Or s = "1")
+End Function
+
+Private Function YesNo(ByVal b As Boolean) As String
+    If b Then YesNo = "Yes" Else YesNo = "No"
+End Function
+
+Private Function QtyFormat(ByVal v As Double) As String
+    If Abs(v - Fix(v)) > EPS Then QtyFormat = "#,##0.00" Else QtyFormat = "#,##0"
+End Function
+
+Private Function FormatQty(ByVal v As Double) As String
+    FormatQty = Format$(v, QtyFormat(v))
+End Function
