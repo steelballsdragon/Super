@@ -44,6 +44,19 @@ curl -fsSL https://raw.githubusercontent.com/steelballsdragon/Super/main/deploy/
 It asks for your bot token once and stores it in `/etc/scorebot.env`, readable only by root.
 Run the same command again to update to the latest code. View the logs with `sudo journalctl -u scorebot -f`.
 
+**No terminal? (e.g. setting up from a phone)** When creating the server, paste this as its startup script
+(on Oracle: *Create instance → Show advanced options → Management → Initialization script → Paste cloud-init script*).
+It installs the bot on first boot, with no typing in a terminal:
+
+```bash
+#!/bin/bash
+export DISCORD_TOKEN='paste-your-token-here'
+curl -fsSL https://raw.githubusercontent.com/steelballsdragon/Super/main/deploy/install.sh | bash
+```
+
+Note: the startup script, including the token, is saved in your server's settings. Anyone who can open
+those settings in your Oracle account can read the token.
+
 ### Hosting 24/7 on Railway
 
 The bot has to stay running, so for round-the-clock updates host it in the cloud.
