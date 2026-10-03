@@ -603,6 +603,19 @@ def register_commands(bot: SportsBot) -> None:
                if enabled else "Reminders off.")
         await interaction.response.send_message(msg, ephemeral=True)
 
+    @tree.command(name="update", description="Check GitHub for a new version of the bot right now")
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.guild_only()
+    async def update(interaction: discord.Interaction):
+        ok, detail = await trigger_update()
+        if ok:
+            msg = (f"🔄 Checking GitHub now (running {bot.version}). If there's a new version I'll restart with it "
+                   "in about a minute; run `/status` afterwards to see the new version.")
+        else:
+            msg = ("I can't start an update from here yet. The server sets this up on its next automatic check "
+                   f"(within the hour on older setups), so try again later.\n`{detail}`")
+        await interaction.response.send_message(msg, ephemeral=True)
+
     @tree.command(name="status", description="Show whether the bot is checking scores and when it last succeeded")
     async def status(interaction: discord.Interaction):
         active = sorted(bot.store.leagues() & LEAGUES.keys(), key=list(LEAGUES).index)
@@ -637,6 +650,21 @@ def register_commands(bot: SportsBot) -> None:
             if s.league in LEAGUES
         ]
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+UPDATE_COMMAND = ("sudo", "-n", "systemctl", "start", "--no-block", "scorebot-update.service")
+
+
+async def trigger_update() -> tuple[bool, str]:
+    """Asks the server to check for updates now (allowed by deploy/system-setup.sh)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *UPDATE_COMMAND, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+    except (OSError, asyncio.TimeoutError) as exc:
+        return False, f"{type(exc).__name__}: {exc}"[:300]
+    return proc.returncode == 0, out.decode(errors="replace").strip()[:300]
 
 
 def poll_seconds(setting: str | None) -> float:
