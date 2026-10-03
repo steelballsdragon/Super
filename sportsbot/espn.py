@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import re
@@ -18,6 +19,11 @@ SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/summary"
 SCOREPANEL_URL = "https://site.web.api.espn.com/apis/site/v2/sports/{path}/scorepanel"
 TEAMS_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/teams"
 PLAYBYPLAY_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/playbyplay"
+
+# Rate limits and server hiccups are retried with a growing wait (1s, 2s, 4s).
+RETRY_STATUSES = (429, 500, 502, 503, 504)
+RETRIES = 3
+RETRY_BASE_SECONDS = 1.0
 
 # ESPN has no team list for international cricket, so team suggestions start
 # from the national sides and add any team currently playing.
@@ -516,10 +522,15 @@ class ESPNClient:
         return self._session
 
     async def _get_json(self, url: str, params: dict | None = None) -> dict:
+        """GET JSON, retrying briefly when ESPN is throttling or having a hiccup."""
         session = await self._get_session()
-        async with session.get(url, params=params) as resp:
-            resp.raise_for_status()
-            return await resp.json(content_type=None)
+        for attempt in range(RETRIES + 1):
+            async with session.get(url, params=params) as resp:
+                if resp.status in RETRY_STATUSES and attempt < RETRIES:
+                    await asyncio.sleep(RETRY_BASE_SECONDS * 2 ** attempt)
+                    continue
+                resp.raise_for_status()
+                return await resp.json(content_type=None)
 
     async def scoreboard(self, league: League, date: str | None = None) -> list[Game]:
         """Current games, or a given day's (YYYYMMDD, by ESPN's US Eastern day)."""

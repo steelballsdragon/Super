@@ -78,6 +78,13 @@ team leaders; players listed Out, Doubtful or on IR are skipped.
 - NBA: points, rebounds, assists, 3-pointers, points + rebounds + assists
 - NHL: shots on goal, points, goals, assists
 - MLB (batters): hits, total bases, runs, RBIs, home runs
+- Soccer: shots, shots on target, anytime goal, to assist, goal or assist, fouls committed
+- Cricket: runs, fours, sixes (batters); wickets (bowlers)
+
+Cricket has no player game logs on ESPN, so its history is rebuilt from full scorecards (taken from the
+ball-by-ball commentary, since ESPN's match summary only carries the latest innings): every IPL match of the current
+season, and for internationals, earlier matches in the current series plus every match the bot records as it finishes.
+International history therefore grows over time; players need 3+ matches before trends appear.
 
 The **~%** is the hit rate adjusted for sample size (10/10 becomes about 92%, so nothing is ever "certain"),
 weighted toward the last 10 games. A line needs about 75% (and 7 of the last 10) to be shown. MLB hitting is far less
@@ -88,6 +95,15 @@ legs, at most two per game and one per player (legs in the same game move togeth
 *Safest* takes the most likely lines, often small ones that pay little; *Bigger payout* skips each stat's smallest
 line. It shows each leg's evidence, an estimate of the chance all legs hit (optimistic: it assumes independence),
 and a plain slip to copy or screenshot for an odds bot.
+
+Parlays look up to three days ahead when there are no games left today, and say so when there are fewer games than
+legs asked for.
+
+**Every parlay is graded.** It's saved with the channel it was built in; after the games, each leg is checked against
+the player's actual stats (game log, or the cricket scorecard) or the final score, players who didn't play are voided as
+books do, and the result is posted back, e.g. *✅ Aaron Rodgers Over 199.5 Passing Yards · 299 · predicted ~79%*.
+`/research record` adds parlay and leg results per sport with **hit rate vs predicted**, the honest test of whether the
+estimates can be trusted.
 
 These are historical frequencies, not odds, and books price these trends in; check prices before betting.
 

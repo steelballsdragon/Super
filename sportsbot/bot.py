@@ -22,6 +22,8 @@ from .espn import start_time
 from .formatting import ball_messages, board_embed, reminder_text, schedule_embed, scoreboard_embed, update_embed
 from .leagues import LEAGUES
 from .odds import OddsBook, grade_text, line_text
+from .cricket_props import CricketHistory
+from .parlays import ParlayBook, record_field, settle
 from .props import PropsClient, build_parlay, injured_names, moneyline_leg, parlay_embed, trend_legs, trends_embed
 from .research import LeanBook, leans, market_chances, parse_research, picks_embed, record_embed, report_embed
 from .schedule import COMMON_TIMEZONES, games_on, today
@@ -50,6 +52,7 @@ CHANNEL_KINDS = (KICKOFF, FINAL, CALLED_OFF)
 THREAD_KEEP_SECONDS = 4 * 86400
 
 REMINDER_SECONDS = 15 * 60
+SETTLE_SECONDS = 60  # how often finished parlay legs are graded
 # The daily schedule goes out once a day, at the chosen hour or within the next
 # two hours if the bot was restarting right then.
 DAILY_WINDOW_HOURS = 2
@@ -97,6 +100,9 @@ class SportsBot(discord.Client):
         self._boards_shown: dict[int, dict] = {}
         self.espn = ESPNClient()
         self.props = PropsClient(self.espn)
+        self.cricket = CricketHistory(self.props, self.state)
+        self.parlays = ParlayBook(self.state)
+        self._last_settle = 0.0
         self.tracker = Tracker()
         # NFL, MLB and NHL scores are posted as the actual scoring plays.
         self.play_resolvers = {
@@ -162,12 +168,18 @@ class SportsBot(discord.Client):
     @tasks.loop(seconds=DEFAULT_POLL_SECONDS)
     async def poll(self) -> None:
         # Leagues with research leans still to grade are checked even if no channel follows them.
-        active = self.store.leagues() | self.leans.pending_leagues()
+        active = self.store.leagues() | self.leans.pending_leagues() | self.parlays.pending_leagues()
         for key in list(LEAGUES):
             if key not in active:
                 self.tracker.forget(key)
         await asyncio.gather(*(self._poll_league(key) for key in active if key in LEAGUES))
         await self._refresh_boards()
+        if time.monotonic() - self._last_settle >= SETTLE_SECONDS:
+            self._last_settle = time.monotonic()
+            try:
+                await settle(self, self.parlays)
+            except Exception:
+                log.exception("Grading parlays failed")
         await self._send_reminders()
         await self._post_daily_schedules()
 
@@ -196,6 +208,9 @@ class SportsBot(discord.Client):
         for update in updates:
             if update.kind == FINAL:
                 self.leans.settle(update.game)
+                if update.game.league.feed == "scorepanel":
+                    # ESPN has no international cricket history: keep our own as matches finish.
+                    asyncio.create_task(self.cricket.record(update.game))
             channels = {
                 s.channel_id
                 for s in subs
@@ -317,7 +332,10 @@ class SportsBot(discord.Client):
         """Player trends and a moneyline leg for one game."""
         summary = await self.espn.summary(game.path or LEAGUES[game.league_key].path, game.id)
         r = parse_research(summary, game)
-        trends = await self.props.game_trends(game, injured_names(summary), bigger)
+        if game.league.sport == "cricket":
+            trends = await self.cricket.trends(game, bigger)
+        else:
+            trends = await self.props.game_trends(game, injured_names(summary), bigger)
         return trends, moneyline_leg(game, market_chances(r), r.odds)
 
     async def research(self, game):
@@ -646,6 +664,17 @@ def register_commands(bot: SportsBot) -> None:
         mine = [g for g in games if g.involves(team) and g.state != "post"]
         return min(mine, key=lambda g: (g.state != "in", g.start), default=None)
 
+    async def _upcoming(lg, days_ahead: int = 3):
+        """Today's games that haven't started, or the next day's (up to a few days ahead)."""
+        games = [g for g in await bot.espn.scoreboard(lg) if g.state == "pre"]
+        if not games and lg.feed == "scoreboard":
+            from datetime import date, timedelta
+            for ahead in range(1, days_ahead + 1):
+                day = (date.today() + timedelta(days=ahead)).strftime("%Y%m%d")
+                if games := [g for g in await bot.espn.scoreboard(lg, day) if g.state == "pre"]:
+                    break
+        return games[:16]
+
     async def _next_game(lg, team):
         """The team's live or next game: today's scoreboard, then up to a week ahead."""
         game = _find_game(await bot.espn.scoreboard(lg), team)
@@ -702,7 +731,7 @@ def register_commands(bot: SportsBot) -> None:
             return
         await interaction.followup.send(embed=picks_embed(lg.name, lg.emoji, reports))
 
-    PROP_LEAGUES = [c for c in LEAGUE_CHOICES if LEAGUES[c.value].sport in ("football", "basketball", "hockey", "baseball")]
+    PROP_LEAGUES = LEAGUE_CHOICES  # every sport, cricket included
 
     @research.command(name="trends", description="Linemate-style hit rates: each key player's most likely lines for a team's next game")
     @app_commands.describe(league="League", team="Team (name or abbreviation)")
@@ -735,12 +764,12 @@ def register_commands(bot: SportsBot) -> None:
         await interaction.response.defer(thinking=True)
         lg = LEAGUES[league.value]
         try:
-            games = [g for g in await bot.espn.scoreboard(lg) if g.state == "pre"][:16]
+            games = await _upcoming(lg)
         except Exception:
             await interaction.followup.send("Couldn't reach ESPN, try again shortly.")
             return
         if not games:
-            await interaction.followup.send(f"No upcoming {lg.name} games on ESPN's scoreboard right now.")
+            await interaction.followup.send(f"No {lg.name} games in the next few days on ESPN.")
             return
 
         async def one(g):
@@ -755,13 +784,19 @@ def register_commands(bot: SportsBot) -> None:
         if not chosen:
             await interaction.followup.send("Not enough data in the upcoming games to build a parlay yet.")
             return
-        embed, slip = parlay_embed(lg.name, lg.emoji, chosen, "Bigger payout" if bigger else "Safest")
+        style_name = "Bigger payout" if bigger else "Safest"
+        embed, slip = parlay_embed(lg.name, lg.emoji, chosen, style_name, legs)
+        bot.parlays.record(interaction.channel_id, lg.key, style_name, chosen)
         await interaction.followup.send(embed=embed)
-        await interaction.followup.send(f"📋 Copy or screenshot for your odds bot:\n{slip}")
+        await interaction.followup.send(f"📋 Copy or screenshot for your odds bot:\n{slip}\n"
+                                        "I'll grade every leg after the games and post the result here.")
 
     @research.command(name="record", description="How the research leans have done so far")
     async def research_record(interaction: discord.Interaction):
-        await interaction.response.send_message(embed=record_embed(bot.leans.summary(), bot.leans.pending()))
+        embed = record_embed(bot.leans.summary(), bot.leans.pending())
+        if field := record_field(bot.parlays.summary()):
+            embed.add_field(name=field[0], value=field[1][:1024], inline=False)
+        await interaction.response.send_message(embed=embed)
 
     tree.add_command(research)
 
