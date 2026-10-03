@@ -1,5 +1,6 @@
 import asyncio
 import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 from sportsbot.bot import SportsBot, poll_seconds, register_commands
@@ -13,7 +14,7 @@ CRICKET = LEAGUES["cricket"]
 
 
 def make_bot():
-    bot = SportsBot(SubscriptionStore(tempfile.mktemp()), 10, None)
+    bot = SportsBot(SubscriptionStore(Path(tempfile.mkdtemp()) / "subscriptions.json"), 10, None)
     register_commands(bot)
     return bot
 

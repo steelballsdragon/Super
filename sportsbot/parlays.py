@@ -1,4 +1,4 @@
-"""Saves parlays built with /research parlay and grades every leg after the games.
+"""Saves parlays built with /research and grades every leg after the games.
 
 Moneyline legs are graded from the final score. Player legs are graded from the
 player's game log (or, for cricket, the match's ball-by-ball scorecard). A
@@ -227,12 +227,12 @@ def result_embed(parlay: dict) -> discord.Embed:
     embed = discord.Embed(title=f"🎟️ {title}: {hits}/{decided} legs hit",
                           description="\n".join(lines),
                           color=discord.Color.green() if parlay["status"] == "won" else discord.Color.dark_grey())
-    embed.set_footer(text=f"{league.name if league else parlay['league']} · {parlay['style']} · /research record for the running record")
+    embed.set_footer(text=f"{league.name if league else parlay['league']} · {parlay['style']} · /record for the running record")
     return embed
 
 
 def record_field(summary: dict) -> tuple[str, str] | None:
-    """The parlay part of /research record: results, and how well the estimates held up."""
+    """The parlay part of /record: results, and how well the estimates held up."""
     s = summary.get("all")
     if not s or not (s["hit"] + s["miss"] + s["won"] + s["lost"]):
         return None

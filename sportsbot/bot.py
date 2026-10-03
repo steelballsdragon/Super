@@ -25,7 +25,8 @@ from .limits import MESSAGE, clip, fit_embed
 from .odds import OddsBook, grade_text, line_text
 from .cricket_props import CricketHistory
 from .parlays import ParlayBook, record_field, settle
-from .props import PropsClient, build_parlay, injured_names, moneyline_leg, parlay_embed, trend_legs, trends_embed
+from .props import (MAX_LEGS, MAX_LEGS_PER_GAME, TARGETS, PropsClient, build_to_target, injured_names, moneyline_leg,
+                    parlay_embed, trend_legs, trends_embed)
 from .research import LeanBook, leans, market_chances, parse_research, picks_embed, record_embed, report_embed
 from .schedule import COMMON_TIMEZONES, games_on, today
 from .plays import AssistResolver, PlayResolver
@@ -736,8 +737,6 @@ def register_commands(bot: SportsBot) -> None:
                    f"(within the hour on older setups), so try again later.\n`{detail}`")
         await interaction.response.send_message(msg, ephemeral=True)
 
-    research = app_commands.Group(name="research", description="Betting research from ESPN data, with sources")
-
     def _find_game(games, team):
         mine = [g for g in games if g.involves(team) and g.state != "post"]
         return min(mine, key=lambda g: (g.state != "in", g.start), default=None)
@@ -764,119 +763,103 @@ def register_commands(bot: SportsBot) -> None:
                     break
         return game
 
-    @research.command(name="game", description="Market, ESPN model, form, injuries and any leans for a team's next game")
-    @app_commands.describe(league="League", team="Team (name or abbreviation)")
-    @app_commands.choices(league=[c for c in LEAGUE_CHOICES if LEAGUES[c.value].sport != "cricket"])
-    async def research_game(interaction: discord.Interaction, league: app_commands.Choice[str], team: TeamName):
-        await interaction.response.defer(thinking=True)
-        try:
-            game = await _next_game(LEAGUES[league.value], team)
-            if game is None:
-                await interaction.followup.send(f"No {league.name} game for **{team}** in the next week on ESPN.")
-                return
+    async def _team_report(interaction, lg, team):
+        """Everything on one team's next game: market, model, form, injuries, leans and player trends."""
+        game = await _next_game(lg, team)
+        if game is None:
+            await interaction.followup.send(f"No {lg.name} game for **{team}** in the next week on ESPN.")
+            return
+        if lg.sport != "cricket":  # ESPN has no lines or model for cricket
             r, found = await bot.research(game)
-        except Exception:
-            log.exception("Research failed for %s %s", league.value, team)
-            await interaction.followup.send("Couldn't load ESPN's data for that game, try again shortly.")
-            return
-        await interaction.followup.send(embed=report_embed(r, found))
-
-    research_game.autocomplete("team")(team_suggestions)
-
-    @research.command(name="picks", description="Today's games ranked by how strongly the data disagrees with the line")
-    @app_commands.describe(league="League")
-    @app_commands.choices(league=[c for c in LEAGUE_CHOICES if LEAGUES[c.value].sport != "cricket"])
-    async def research_picks(interaction: discord.Interaction, league: app_commands.Choice[str]):
-        await interaction.response.defer(thinking=True)
-        lg = LEAGUES[league.value]
-        try:
-            games = [g for g in await bot.espn.scoreboard(lg) if g.state == "pre"]
-        except Exception:
-            await interaction.followup.send("Couldn't reach ESPN, try again shortly.")
-            return
-        limit = asyncio.Semaphore(5)
-
-        async def one(g):
-            async with limit:
-                try:
-                    return await bot.research(g)
-                except Exception:
-                    log.warning("Research failed for %s", g.id, exc_info=True)
-                    return None
-        reports = [x for x in await asyncio.gather(*(one(g) for g in games[:20])) if x]
-        if not reports:
-            await interaction.followup.send(f"No upcoming {lg.name} games with lines on ESPN right now.")
-            return
-        await interaction.followup.send(embed=picks_embed(lg.name, lg.emoji, reports))
-
-    PROP_LEAGUES = LEAGUE_CHOICES  # every sport, cricket included
-
-    @research.command(name="trends", description="Linemate-style hit rates: each key player's most likely lines for a team's next game")
-    @app_commands.describe(league="League", team="Team (name or abbreviation)")
-    @app_commands.choices(league=PROP_LEAGUES)
-    async def research_trends(interaction: discord.Interaction, league: app_commands.Choice[str], team: TeamName):
-        await interaction.response.defer(thinking=True)
-        try:
-            game = await _next_game(LEAGUES[league.value], team)
-            if game is None:
-                await interaction.followup.send(f"No {league.name} game for **{team}** in the next week on ESPN.")
-                return
-            trends, ml = await bot.game_props(game)
-        except Exception:
-            log.exception("Trends failed for %s %s", league.value, team)
-            await interaction.followup.send("Couldn't load ESPN's data for that game, try again shortly.")
-            return
+            await interaction.followup.send(embed=report_embed(r, found))
+        trends, ml = await bot.game_props(game)
         await interaction.followup.send(embed=trends_embed(game, trends, ml))
 
-    research_trends.autocomplete("team")(team_suggestions)
-
-    @research.command(name="parlay", description="Build a parlay from the most likely legs in upcoming games")
-    @app_commands.describe(league="League", legs="Number of legs (2-10, default 4)",
-                           style="Safest: most likely legs (small lines, small payout). Bigger payout: higher lines")
-    @app_commands.choices(league=PROP_LEAGUES, style=[app_commands.Choice(name="Safest", value="safest"),
-                                                       app_commands.Choice(name="Bigger payout", value="bigger")])
-    async def research_parlay(interaction: discord.Interaction, league: app_commands.Choice[str],
-                              legs: app_commands.Range[int, 2, 10] = 4,
-                              style: app_commands.Choice[str] | None = None):
-        bigger = style is not None and style.value == "bigger"
-        await interaction.response.defer(thinking=True)
-        lg = LEAGUES[league.value]
-        try:
-            games = await _upcoming(lg)
-        except Exception:
-            await interaction.followup.send("Couldn't reach ESPN, try again shortly.")
-            return
-        if not games:
+    async def _parlay(interaction, lg, target, team=None):
+        if team:
+            game = await _next_game(lg, team)
+            games = [game] if game and game.state == "pre" else []
+            if not games:
+                await interaction.followup.send(f"No upcoming {lg.name} game for **{team}** to build a parlay from.")
+                return
+        elif not (games := await _upcoming(lg)):
             await interaction.followup.send(f"No {lg.name} games in the next few days on ESPN.")
             return
 
         async def one(g):
             try:
-                trends, ml = await bot.game_props(g, bigger)
-                return trend_legs(g, trends) + ([ml] if ml and not bigger else [])
+                trends, ml = await bot.game_props(g, target.bigger)
+                legs = trend_legs(g, trends)
+                if target.bigger:  # the near-certain lines too, to finish near the target
+                    legs += trend_legs(g, (await bot.game_props(g))[0])
+                return legs + ([ml] if ml else [])
             except Exception:
                 log.warning("Parlay research failed for %s", g.id, exc_info=True)
                 return []
-        candidates = [leg for found in await asyncio.gather(*(one(g) for g in games)) for leg in found]
-        chosen = build_parlay(candidates, legs)
-        if not chosen:
-            await interaction.followup.send("Not enough data in the upcoming games to build a parlay yet.")
+        candidates = {(leg.pick, leg.game_id): leg for found in await asyncio.gather(*(one(g) for g in games))
+                      for leg in found}
+        chosen = build_to_target(list(candidates.values()), target, per_game=MAX_LEGS if team else MAX_LEGS_PER_GAME)
+        if len(chosen) < 2:
+            await interaction.followup.send(f"Not enough strong legs in the upcoming {lg.name} games for a parlay yet.")
             return
-        style_name = "Bigger payout" if bigger else "Safest"
-        embed, slip = parlay_embed(lg.name, lg.emoji, chosen, style_name, legs)
-        bot.parlays.record(interaction.channel_id, lg.key, style_name, chosen)
+        embed, slip = parlay_embed(lg.name, lg.emoji, chosen, target)
+        bot.parlays.record(interaction.channel_id, lg.key, target.name, chosen)
         await interaction.followup.send(embed=embed)
         await interaction.followup.send(f"📋 Copy or screenshot for your odds bot:\n{slip}\n"
                                         "I'll grade every leg after the games and post the result here.")
 
-    @research.command(name="record", description="How the research leans have done so far")
-    async def research_record(interaction: discord.Interaction):
+    async def _overview(interaction, lg):
+        """The league's strongest leans, a safe parlay, and how the research has done."""
+        if lg.sport != "cricket":
+            games = [g for g in await bot.espn.scoreboard(lg) if g.state == "pre"]
+            limit = asyncio.Semaphore(5)
+
+            async def one(g):
+                async with limit:
+                    try:
+                        return await bot.research(g)
+                    except Exception:
+                        log.warning("Research failed for %s", g.id, exc_info=True)
+                        return None
+            reports = [x for x in await asyncio.gather(*(one(g) for g in games[:20])) if x]
+            if reports:
+                embed = picks_embed(lg.name, lg.emoji, reports)
+                if field := record_field(bot.parlays.summary()):
+                    embed.add_field(name=field[0], value=field[1], inline=False)
+                await interaction.followup.send(embed=fit_embed(embed))
+        await _parlay(interaction, lg, TARGETS["safe"])
+
+    @tree.command(name="research", description="Betting research: a league's best picks, a team's game, or a parlay")
+    @app_commands.describe(
+        league="League",
+        team="A team: everything on its next game (with a parlay: legs from that game only)",
+        parlay="Build a parlay: Safe (around +100) or Big payout (+1000 to +10000)",
+    )
+    @app_commands.choices(league=LEAGUE_CHOICES, parlay=[app_commands.Choice(name=t.name, value=t.key)
+                                                         for t in TARGETS.values()])
+    async def research(interaction: discord.Interaction, league: app_commands.Choice[str],
+                       team: TeamName | None = None, parlay: app_commands.Choice[str] | None = None):
+        await interaction.response.defer(thinking=True)
+        lg = LEAGUES[league.value]
+        try:
+            if parlay:
+                await _parlay(interaction, lg, TARGETS[parlay.value], team)
+            elif team:
+                await _team_report(interaction, lg, team)
+            else:
+                await _overview(interaction, lg)
+        except Exception:
+            log.exception("Research failed for %s %s", league.value, team)
+            await interaction.followup.send("Couldn't load ESPN's data for that, try again shortly.")
+
+    research.autocomplete("team")(team_suggestions)
+
+    @tree.command(name="record", description="How the research leans and parlays have done so far")
+    async def record(interaction: discord.Interaction):
         embed = record_embed(bot.leans.summary(), bot.leans.pending())
         if field := record_field(bot.parlays.summary()):
             embed.add_field(name=field[0], value=field[1], inline=False)
         await interaction.response.send_message(embed=fit_embed(embed))
-
-    tree.add_command(research)
 
     @tree.command(name="status", description="Show whether the bot is checking scores and when it last succeeded")
     async def status(interaction: discord.Interaction):

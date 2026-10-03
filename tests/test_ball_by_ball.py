@@ -1,5 +1,6 @@
 import asyncio
 import tempfile
+from pathlib import Path
 
 from sportsbot.balls import BallFeed
 from sportsbot.espn import parse_balls, parse_scorepanel
@@ -90,7 +91,7 @@ def test_long_bursts_are_split_under_discords_limit():
 
 
 def test_switching_a_follow_to_ball_by_ball_and_back():
-    store = SubscriptionStore(tempfile.mktemp())
+    store = SubscriptionStore(Path(tempfile.mkdtemp()) / "subscriptions.json")
     store.add(1, "cricket", "India")
     assert store.add(1, "cricket", "India", ball_by_ball=True)
     [s] = store.for_channel(1)
