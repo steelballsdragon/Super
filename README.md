@@ -9,7 +9,6 @@ channel's. If it follows several, a team you type picks the league (e.g. `/resea
 NFL and MLB), and `/scores` on its own shows every followed league.
 
 - `/scores [league] [team]`: shows the current scoreboard (live, upcoming and finished games).
-
 - `/follow <league> [team]`: posts live updates in this channel for a whole league or for one team.
 - `/unfollow [league] [team]`: stops those updates.
 - `/following`: lists what this channel follows.
