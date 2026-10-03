@@ -549,16 +549,50 @@ def _ago(ts: float | None) -> str:
 def register_commands(bot: SportsBot) -> None:
     tree = bot.tree
 
+    def channel_leagues(channel_id: int) -> list[str]:
+        """The leagues this channel follows, in the usual league order."""
+        followed = {s.league for s in bot.store.for_channel(channel_id)}
+        return [k for k in LEAGUES if k in followed]
+
+    def team_matches(teams, team: str) -> bool:
+        q = team.strip().lower()
+        return any(q == a.lower() or q in n.lower() for n, a in teams)
+
+    async def pick_league(interaction: discord.Interaction, league, team: str | None = None):
+        """The league asked for or, when left out, the one this channel follows. With several followed,
+        the team decides (e.g. "Chiefs" in a channel following NFL and MLB). Returns (key, problem)."""
+        if league is not None:
+            return league.value, None
+        keys = channel_leagues(interaction.channel_id)
+        if len(keys) == 1:
+            return keys[0], None
+        if not keys:
+            return None, "Pick a league: this channel doesn't follow one yet (or `/follow` one to skip this next time)."
+        if team:
+            found = []
+            for key in keys:
+                try:
+                    if team_matches(await bot.team_list(key), team):
+                        found.append(key)
+                except Exception:
+                    log.warning("Couldn't load %s teams", key, exc_info=True)
+            if len(found) == 1:
+                return found[0], None
+        names = ", ".join(LEAGUES[k].name for k in keys)
+        return None, f"This channel follows {names}. Pick the league too."
+
     async def team_suggestions(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
         key = getattr(interaction.namespace, "league", None)
-        if key not in LEAGUES:
+        keys = [key] if key in LEAGUES else channel_leagues(interaction.channel_id)
+        if not keys:
             return []
         try:
             # Discord drops suggestions that take longer than 3 seconds.
-            teams = await asyncio.wait_for(bot.team_list(key), timeout=2.5)
+            lists = await asyncio.wait_for(asyncio.gather(*(bot.team_list(k) for k in keys)), timeout=2.5)
         except Exception:
-            log.warning("Couldn't load %s teams for suggestions", key, exc_info=True)
+            log.warning("Couldn't load %s teams for suggestions", keys, exc_info=True)
             return []
+        teams = list(dict.fromkeys(t for found in lists for t in found))
         q = current.strip().lower()
         matches = [n for n, a in teams if not q or q in n.lower() or q == a.lower()]
         return [app_commands.Choice(name=n[:100], value=n[:100]) for n in matches[:25]]
@@ -566,23 +600,34 @@ def register_commands(bot: SportsBot) -> None:
     async def followed_team_suggestions(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
         key = getattr(interaction.namespace, "league", None)
         q = current.strip().lower()
-        teams = [s.team for s in bot.store.for_channel(interaction.channel_id) if s.league == key and s.team]
+        teams = [s.team for s in bot.store.for_channel(interaction.channel_id) if (key is None or s.league == key) and s.team]
         return [app_commands.Choice(name=t[:100], value=t[:100]) for t in teams if q in t][:25]
 
     @tree.command(name="scores", description="Show current scores for a league")
-    @app_commands.describe(league="League to show", team="Only show games for this team (name or abbreviation)")
+    @app_commands.describe(league="League to show (leave out for the ones this channel follows)",
+                           team="Only show games for this team (name or abbreviation)")
     @app_commands.choices(league=LEAGUE_CHOICES)
-    async def scores(interaction: discord.Interaction, league: app_commands.Choice[str], team: TeamName | None = None):
+    async def scores(interaction: discord.Interaction, league: app_commands.Choice[str] | None = None,
+                     team: TeamName | None = None):
         await interaction.response.defer(thinking=True)
-        try:
-            games = await bot.espn.scoreboard(LEAGUES[league.value])
-        except Exception:
-            log.exception("Failed to fetch %s scoreboard", league.value)
-            await interaction.followup.send("Couldn't reach the score service, try again shortly.")
+        key, problem = await pick_league(interaction, league, team)
+        if key is not None:
+            keys = [key]
+        elif league is None and not team and (keys := channel_leagues(interaction.channel_id)):
+            pass  # every league this channel follows, one scoreboard each
+        else:
+            await interaction.followup.send(problem)
             return
-        if team:
-            games = [g for g in games if g.involves(team)]
-        await interaction.followup.send(embed=scoreboard_embed(league.value, games, team))
+        for key in keys:
+            try:
+                games = await bot.espn.scoreboard(LEAGUES[key])
+            except Exception:
+                log.exception("Failed to fetch %s scoreboard", key)
+                await interaction.followup.send(f"Couldn't reach the score service for {LEAGUES[key].name}, try again shortly.")
+                continue
+            if team:
+                games = [g for g in games if g.involves(team)]
+            await interaction.followup.send(embed=scoreboard_embed(key, games, team))
 
     scores.autocomplete("team")(team_suggestions)
 
@@ -616,13 +661,27 @@ def register_commands(bot: SportsBot) -> None:
     follow.autocomplete("team")(team_suggestions)
 
     @tree.command(name="unfollow", description="Stop live updates for a league (or one team) in this channel")
-    @app_commands.describe(league="League to unfollow", team="The team you followed, if any")
+    @app_commands.describe(league="League to unfollow (leave out if this channel follows just one)",
+                           team="The team you followed, if any")
     @app_commands.choices(league=LEAGUE_CHOICES)
     @app_commands.default_permissions(manage_channels=True)
     @app_commands.guild_only()
-    async def unfollow(interaction: discord.Interaction, league: app_commands.Choice[str], team: TeamName | None = None):
-        target = f"**{team}** in {league.name}" if team else f"all **{league.name}** games"
-        if bot.store.remove(interaction.channel_id, league.value, team):
+    async def unfollow(interaction: discord.Interaction, league: app_commands.Choice[str] | None = None,
+                       team: TeamName | None = None):
+        key = league.value if league else None
+        if key is None:
+            # A followed team decides the league; otherwise the channel's only league.
+            leagues = {s.league for s in bot.store.for_channel(interaction.channel_id)
+                       if team and s.team and s.team == team.strip().lower()} or set(channel_leagues(interaction.channel_id))
+            if len(leagues) != 1:
+                names = ", ".join(LEAGUES[k].name for k in channel_leagues(interaction.channel_id))
+                msg = f"This channel follows {names}. Pick the league too." if names else "This channel isn't following anything."
+                await interaction.response.send_message(msg, ephemeral=True)
+                return
+            key = leagues.pop()
+        name = LEAGUES[key].name
+        target = f"**{team}** in {name}" if team else f"all **{name}** games"
+        if bot.store.remove(interaction.channel_id, key, team):
             msg = f"🛑 Stopped updates for {target}."
         else:
             msg = f"This channel wasn't following {target}. Use `/following` to see what it follows."
@@ -855,16 +914,20 @@ def register_commands(bot: SportsBot) -> None:
 
     @tree.command(name="research", description="Betting research: a league's best picks, a team's game, or a parlay")
     @app_commands.describe(
-        league="League",
+        league="League (leave out to use the one this channel follows)",
         team="A team: everything on its next game (with a parlay: legs from that game only)",
         parlay="Safe (around +100), Big payout (+1000 to +10000) or Lotto (4-10 legs, +3000 to +20000)",
     )
     @app_commands.choices(league=LEAGUE_CHOICES, parlay=[app_commands.Choice(name=t.name, value=t.key)
                                                          for t in TARGETS.values()])
-    async def research(interaction: discord.Interaction, league: app_commands.Choice[str],
+    async def research(interaction: discord.Interaction, league: app_commands.Choice[str] | None = None,
                        team: TeamName | None = None, parlay: app_commands.Choice[str] | None = None):
         await interaction.response.defer(thinking=True)
-        lg = LEAGUES[league.value]
+        key, problem = await pick_league(interaction, league, team)
+        if key is None:
+            await interaction.followup.send(problem)
+            return
+        lg = LEAGUES[key]
         try:
             if parlay:
                 await _parlay(interaction, lg, TARGETS[parlay.value], team)
@@ -873,7 +936,7 @@ def register_commands(bot: SportsBot) -> None:
             else:
                 await _overview(interaction, lg)
         except Exception:
-            log.exception("Research failed for %s %s", league.value, team)
+            log.exception("Research failed for %s %s", key, team)
             await interaction.followup.send("Couldn't load ESPN's data for that, try again shortly.")
 
     research.autocomplete("team")(team_suggestions)

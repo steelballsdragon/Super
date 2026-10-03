@@ -4,9 +4,14 @@ A Discord bot that posts live **NFL, NBA, MLB, NHL, soccer and cricket** updates
 
 ## Features
 
-- `/scores <league> [team]`: shows the current scoreboard (live, upcoming and finished games).
+In a channel that follows a league, `/scores`, `/research` and `/unfollow` don't need the league: they use the
+channel's. If it follows several, a team you type picks the league (e.g. `/research team:Chiefs` in a channel following
+NFL and MLB), and `/scores` on its own shows every followed league.
+
+- `/scores [league] [team]`: shows the current scoreboard (live, upcoming and finished games).
+
 - `/follow <league> [team]`: posts live updates in this channel for a whole league or for one team.
-- `/unfollow <league> [team]`: stops those updates.
+- `/unfollow [league] [team]`: stops those updates.
 - `/following`: lists what this channel follows.
 - `/status`: shows when the bot last checked each followed league, how many games are live, and any errors.
 - `/update`: (admins) checks GitHub for a new version right away, instead of waiting up to 5 minutes.
@@ -46,7 +51,7 @@ When a game ends on a score, such as a walk-off home run, the winning play is po
 
 ### Betting research
 
-Everything is one command, `/research <league> [team] [parlay]`:
+Everything is one command, `/research [league] [team] [parlay]` (the league can be left out in a channel that follows one):
 
 | You type | You get |
 |---|---|
