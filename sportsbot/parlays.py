@@ -15,6 +15,7 @@ from datetime import datetime
 
 import discord
 
+from .bankroll import result_lines
 from .leagues import LEAGUES
 from .limits import fitted
 from .props import Leg
@@ -108,7 +109,8 @@ async def settle(bot, book: ParlayBook) -> None:
             before = parlay["status"]
             book.save(parlay)
             if before == "pending" and parlay["status"] != "pending":
-                await bot._send(parlay["channel"], result_embed(parlay))
+                bets = bot.bets.settle(parlay) if getattr(bot, "bets", None) else []
+                await bot._send(parlay["channel"], result_embed(parlay, bets))
 
 
 async def game_result(bot, league: str, game_id: str, path: str = "") -> dict | None:
@@ -247,7 +249,7 @@ ICONS = {"hit": "✅", "miss": "❌", "void": "➖", "pending": "⏳"}
 
 
 @fitted
-def result_embed(parlay: dict) -> discord.Embed:
+def result_embed(parlay: dict, bets: list[dict] | None = None) -> discord.Embed:
     legs = parlay["legs"]
     hits = sum(l["status"] == "hit" for l in legs)
     decided = sum(l["status"] in ("hit", "miss") for l in legs)
@@ -265,7 +267,10 @@ def result_embed(parlay: dict) -> discord.Embed:
     embed = discord.Embed(title=f"🎟️ {title}: {hits}/{decided} legs hit",
                           description="\n".join(lines),
                           color=discord.Color.green() if parlay["status"] == "won" else discord.Color.dark_grey())
-    embed.set_footer(text=f"{league.name if league else parlay['league']} · {parlay['style']} · /record for the running record")
+    if bets:
+        embed.add_field(name="Your bets", value="\n".join(result_lines(bets)), inline=False)
+    embed.set_footer(text=f"{league.name if league else parlay['league']} · {parlay['style']} · /record for the running record"
+                     + (" · /bankroll for your balance" if bets else ""))
     return embed
 
 

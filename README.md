@@ -65,7 +65,7 @@ Everything is one command, `/research [league] [team] [parlay]` (the league can 
 | `/research league:NBA bets:3-pointers round robin` | 3 role-player 3+ / 4+ made threes picks as a round robin of 2's |
 | `/research bets:Goalscorers & assists` | A goalscorer/assist slip: anytime goalscorers and assisters, taking turns (soccer, NHL); a Lotto unless you pick another payout |
 
-`/record` shows how the leans and parlays have done.
+`/record` shows how the leans and parlays have done. `/bankroll` shows your own money: see below.
 
 A team's report labels every number by source:
 
@@ -132,6 +132,38 @@ on long shots:
 - **Fair prices, every pair and the chances.** Each pick shows its fair price from its record: back it only if your
   book pays more. The post lists every 2-leg combination with its price and the chance at least one pair cashes.
 - **Graded as a round robin.** After the games the result shows how many picks hit and how many of the bets cashed.
+
+### Your bets and bankroll
+
+The bot doesn't place bets: sportsbooks have no betting API, and automating their site breaks their terms (and puts
+your account at risk). Instead, every slip has a **💵 I placed it** button:
+
+1. Bet the slip at your book, then tap **I placed it** and enter your stake and the price you got (`+1250`, `-110` or
+   `13.5`). For a round robin enter the stake per bet and each pick's price in order (`+250, +310, +400`). The form is
+   filled in with the plan's stake. Tap it again to change the bet, or enter a stake of 0 to remove it.
+2. The reply (only you see it) shows what it pays, your **edge at that price** by the bot's numbers (a price worse
+   than fair gets a warning to shop around or skip), and how the stake fits your plan.
+3. When the slip is graded, your bet settles with it: the result post shows what you won or lost, and your balance
+   updates. Void legs come off like at the book (a parlay is repriced without them; a round-robin pair with a void
+   pick becomes a single).
+
+| Command | What you get (only you see it) |
+| --- | --- |
+| `/bankroll start:500` | Starts your bankroll at $500: the money set aside for betting. Results count from now |
+| `/bankroll style:Careful` | Unit size: Careful 1%, Standard 2% (default) or Aggressive 3% of your balance |
+| `/bankroll add:100` | Adds money (a negative amount takes some out) |
+| `/bankroll` | Balance, unit, suggested stakes, money at risk, today's total, results and ROI by bet type, recent bets |
+
+The staking plan:
+
+- **Units from your balance.** A unit is 1-3% of your *current* balance, so stakes shrink after losses and grow
+  after wins, and a cold run can't wipe you out.
+- **Smaller stakes on longer shots.** 1 unit on a bet with a 30%+ chance (Safe), half a unit at 5-30% (Big payout,
+  most round robins), a quarter unit below 5% (Lotto). A round robin's stake is split across its pairs. Every slip
+  says its stake in units.
+- **Guard rails.** A warning for more than 3 units on one bet, a stop sign once you've staked 10% of your bankroll in
+  a day, and a note when you're 25% below your peak.
+- **Price check.** `/bankroll` counts how often you got a price better than fair: over time that's what makes money.
 
 ### Player trends and parlays (Linemate-style)
 
