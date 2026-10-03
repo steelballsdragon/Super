@@ -118,7 +118,7 @@ def parse_research(summary: dict, game: Game) -> Research:
     open_fav = None
     for side, team in (("homeTeamOdds", game.home), ("awayTeamOdds", game.away)):
         if (pick.get(side) or {}).get("favoriteAtOpen"):
-            open_fav = team.abbrev
+            open_fav = team.name
 
     model = {}
     pred = summary.get("predictor") or {}
@@ -179,13 +179,13 @@ def _side_cautions(r: Research, tid: str) -> list[str]:
     cautions = []
     qbs = [i for i in r.injuries.get(tid, []) if i.position == "QB" and i.status in ("Out", "Doubtful")]
     if qbs:
-        cautions.append(f"{team.abbrev} QB {qbs[0].name} is {qbs[0].status}; the model may not reflect it")
+        cautions.append(f"{team.name} QB {qbs[0].name} is {qbs[0].status}; the model may not reflect it")
     if r.open_home_spread is not None and r.odds and r.odds.home_spread is not None:
         move = r.odds.home_spread - r.open_home_spread  # positive: line moved toward the away team
         toward = g.away if move > 0 else g.home
         if abs(move) >= BIG_LINE_MOVE and toward is other:
-            cautions.append(f"The line moved {abs(move):g} points toward {other.abbrev} since it opened "
-                            f"({g.home.abbrev} {r.open_home_spread:+g} → {r.odds.home_spread:+g})")
+            cautions.append(f"The line moved {abs(move):g} points toward {other.name} since it opened "
+                            f"({g.home.name} {r.open_home_spread:+g} → {r.odds.home_spread:+g})")
     return cautions
 
 
@@ -201,8 +201,8 @@ def leans(r: Research) -> list[Lean]:
         gap = r.model[tid] - 100 * market[tid]
         if gap >= MODEL_GAP_MIN:
             team = teams[tid]
-            why = [f"ESPN Matchup Predictor gives {team.abbrev} {r.model[tid]:.1f}%",
-                   f"DraftKings prices {team.abbrev} at {100 * market[tid]:.1f}% (no-vig)",
+            why = [f"ESPN Matchup Predictor gives {team.name} {r.model[tid]:.1f}%",
+                   f"DraftKings prices {team.name} at {100 * market[tid]:.1f}% (no-vig)",
                    f"Model is {gap:.1f} points higher than the market"]
             cautions = _side_cautions(r, tid)
             if gap >= SUSPICIOUS_GAP:
@@ -210,10 +210,10 @@ def leans(r: Research) -> list[Lean]:
                                 "(injuries, lineup changes); check before relying on it")
             conf = "Low" if cautions else _confidence(gap, 12, 8)
             price = o.home_ml if tid == g.home.id else o.away_ml
-            found.append(Lean("moneyline", f"{team.abbrev} {price}", tid, None, price, conf, why, cautions))
+            found.append(Lean("moneyline", f"{team.name} {price}", tid, None, price, conf, why, cautions))
             line = o.home_spread if tid == g.home.id else o.away_spread
             if line is not None:
-                found.append(Lean("spread", f"{team.abbrev} {line:+g}", tid, line, None, conf, why, cautions))
+                found.append(Lean("spread", f"{team.name} {line:+g}", tid, line, None, conf, why, cautions))
 
     # Total: recent scoring vs the over/under.
     fh, fa = r.form.get(g.home.id), r.form.get(g.away.id)
@@ -224,8 +224,8 @@ def leans(r: Research) -> list[Lean]:
         gap_size = abs(projected - o.total) / needed if needed else abs(diff) / TOTAL_GAP_SHARE  # 1.0 = just enough
         if gap_size >= 1:
             side = "over" if diff > 0 else "under"
-            why = [f"{g.home.abbrev} last {fh.games}: {fh.scored:.1f} scored, {fh.allowed:.1f} allowed per game",
-                   f"{g.away.abbrev} last {fa.games}: {fa.scored:.1f} scored, {fa.allowed:.1f} allowed per game",
+            why = [f"{g.home.name} last {fh.games}: {fh.scored:.1f} scored, {fh.allowed:.1f} allowed per game",
+                   f"{g.away.name} last {fa.games}: {fa.scored:.1f} scored, {fa.allowed:.1f} allowed per game",
                    f"Projected total {projected:.1f} vs line {o.total:g} ({100 * diff:+.0f}%)"]
             # Five games of unadjusted scoring is a weak signal, so totals top out at Medium.
             found.append(Lean("total", f"{side.title()} {o.total:g}", side, o.total, None,
@@ -240,7 +240,7 @@ def most_likely(r: Research) -> tuple[str, float, str] | None:
         return None
     o, g = r.odds, r.game
     price = {g.home.id: o.home_ml, g.away.id: o.away_ml, "draw": o.draw_ml}
-    label = {g.home.id: f"{g.home.abbrev} win", g.away.id: f"{g.away.abbrev} win", "draw": "Draw"}
+    label = {g.home.id: f"{g.home.name} win", g.away.id: f"{g.away.name} win", "draw": "Draw"}
     key = max(market, key=market.get)
     return label[key], market[key], price[key] or ""
 
@@ -280,13 +280,13 @@ class LeanBook:
             key = f"{game.league_key}:{game.id}:{lean.market}"
             if self._state.get("leans", key) is None:
                 self._state.set("leans", key, {**asdict(lean), "game": game.id, "league": game.league_key,
-                                               "matchup": f"{game.away.abbrev} @ {game.home.abbrev}", "at": time.time()})
+                                               "matchup": f"{game.away.name} @ {game.home.name}", "at": time.time()})
 
     def settle(self, game: Game) -> list[dict]:
         settled = []
         for key, lean in self._state.items("leans"):
             if lean.get("game") == game.id and lean.get("league") == game.league_key and "result" not in lean:
-                lean = {**lean, "result": grade(lean, game), "final": f"{game.away.abbrev} {game.away.score} - {game.home.score} {game.home.abbrev}"}
+                lean = {**lean, "result": grade(lean, game), "final": f"{game.away.name} {game.away.score} - {game.home.score} {game.home.name}"}
                 self._state.set("leans", key, lean)
                 settled.append(lean)
         return settled
@@ -360,31 +360,31 @@ def report_embed(r: Research, found: list[Lean]) -> discord.Embed:
     if o:
         lines = []
         if o.home_spread is not None and o.away_spread is not None and g.league.sport != "soccer":
-            lines.append(f"Spread: {g.away.abbrev} {o.away_spread:+g} · {g.home.abbrev} {o.home_spread:+g}")
+            lines.append(f"Spread: {g.away.name} {o.away_spread:+g} · {g.home.name} {o.home_spread:+g}")
         if o.total is not None:
             lines.append(f"Total: O/U {o.total:g}")
         if market:
-            parts = [f"{t.abbrev} {(o.home_ml if t is g.home else o.away_ml)} ({_pct(market[t.id])})" for t in (a, b)]
+            parts = [f"{t.name} {(o.home_ml if t is g.home else o.away_ml)} ({_pct(market[t.id])})" for t in (a, b)]
             if "draw" in market:
                 parts.insert(1, f"Draw {o.draw_ml} ({_pct(market['draw'])})")
             lines.append("Moneyline: " + " · ".join(parts))
             lines.append("*% = implied chance with the bookmaker's margin removed*")
         if r.open_home_spread is not None and o.home_spread is not None and r.open_home_spread != o.home_spread:
-            lines.append(f"Line move: {g.home.abbrev} {r.open_home_spread:+g} at open → {o.home_spread:+g} now")
+            lines.append(f"Line move: {g.home.name} {r.open_home_spread:+g} at open → {o.home_spread:+g} now")
         embed.add_field(name=f"📈 Market ({o.provider})", value="\n".join(lines) or "No line yet", inline=False)
     if len(r.model) == 2:
-        lines = [f"{t.abbrev}: {r.model[t.id]:.1f}%" + (f" (market {_pct(market[t.id])})" if market else "") for t in (a, b)]
+        lines = [f"{t.name}: {r.model[t.id]:.1f}%" + (f" (market {_pct(market[t.id])})" if market else "") for t in (a, b)]
         embed.add_field(name="🧮 ESPN Matchup Predictor", value="\n".join(lines), inline=False)
     form_lines = []
     for t in (a, b):
         f = r.form.get(t.id)
         if f:
-            form_lines.append(f"**{t.abbrev}** {' · '.join(f.results)}\n  avg {f.scored:.1f} scored, {f.allowed:.1f} allowed")
+            form_lines.append(f"**{t.name}** {' · '.join(f.results)}\n  avg {f.scored:.1f} scored, {f.allowed:.1f} allowed")
         if t.id in r.ats:
             form_lines.append(f"  {r.ats[t.id]}")
     if form_lines:
         embed.add_field(name="📋 Last 5 (ESPN)", value="\n".join(form_lines)[:1024], inline=False)
-    inj_lines = [f"**{t.abbrev}** " + ", ".join(f"{i.name} ({i.position}, {i.status})" for i in r.injuries[t.id][:5])
+    inj_lines = [f"**{t.name}** " + ", ".join(f"{i.name} ({i.position}, {i.status})" for i in r.injuries[t.id][:5])
                  for t in (a, b) if r.injuries.get(t.id)]
     if inj_lines:
         embed.add_field(name="🩹 Injuries (ESPN)", value="\n".join(inj_lines)[:1024], inline=False)
@@ -428,7 +428,7 @@ def picks_embed(league_name: str, emoji: str, reports: list[tuple[Research, list
     for _, _, r, lean, pick in rows[:10]:
         g = r.game
         warn = " ⚠️" if lean.cautions else ""
-        entry = f"**{pick}** · {g.away.abbrev} @ {g.home.abbrev} · {lean.confidence}{warn}\n  {lean.why[-1]}"
+        entry = f"**{pick}** · {g.away.name} @ {g.home.name} · {lean.confidence}{warn}\n  {lean.why[-1]}"
         if used + len(entry) + 1 > 1000:
             break  # whole entries only, within Discord's 1024-character field limit
         lines.append(entry)
@@ -440,7 +440,7 @@ def picks_embed(league_name: str, emoji: str, reports: list[tuple[Research, list
     if likely:
         embed.add_field(
             name="🎯 Most likely results (market)",
-            value="\n".join(f"{label} ({r.game.away.abbrev} @ {r.game.home.abbrev}) · {_pct(c)} at {p}" for (label, c, p), r in likely)
+            value="\n".join(f"{label} ({r.game.away.name} @ {r.game.home.name}) · {_pct(c)} at {p}" for (label, c, p), r in likely)
             + "\n*Likely ≠ good value: short prices pay little.*",
             inline=False,
         )

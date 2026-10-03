@@ -116,7 +116,7 @@ def test_threads_keep_the_channel_to_start_and_result():
     run(bot, match("pre"), match("in"), match(home=1, goals=SAKA), match("post", home=1, goals=SAKA))
     assert channel.titles() == ["⚽ Kick-off", "⚽ Full-time"]
     [thread] = [c for c in server.channels.values() if c is not channel]
-    assert thread.name == "⚽ ARS v LEE · Premier League"
+    assert thread.name == "⚽ Arsenal v Leeds United · Premier League"
     assert thread.titles() == ["⚽ GOAL!", "⚽ Full-time"]
     assert bot.state.items("threads") == []  # finished games are forgotten
 
@@ -177,11 +177,11 @@ def test_scoreboard_is_pinned_and_edits_only_when_scores_change():
     assert reply.startswith("📺 Live scoreboard posted.")
     [board] = channel.messages
     assert board.pinned and board.embed.title == "📺 Live scoreboard"
-    assert "🔴 ARS **0 - 0** LEE · 30'" in board.embed.description
+    assert "🔴 Arsenal **0 - 0** Leeds United · 30'" in board.embed.description
     run(bot, match())  # same score: no edit
     assert channel.edits == 0
     run(bot, match(home=1, minute="31'", goals=SAKA))
-    assert channel.edits == 1 and "🔴 ARS **1 - 0** LEE · 31'" in board.embed.description
+    assert channel.edits == 1 and "🔴 Arsenal **1 - 0** Leeds United · 31'" in board.embed.description
     assert [m.embed.title for m in channel.messages] == ["📺 Live scoreboard", "⚽ GOAL!"]
 
 

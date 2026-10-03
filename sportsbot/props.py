@@ -443,7 +443,7 @@ class Leg:
 
 
 def trend_legs(game: Game, trends: list[Trend]) -> list[Leg]:
-    label = f"{game.away.abbrev} @ {game.home.abbrev}"
+    label = f"{game.away.name} @ {game.home.name}"
     return [Leg(t.pick, t.probability, t.evidence, label, game.id, t.player_id, "prop", t.prop.stat, t.line,
                 None, game.league_key, game.path) for t in trends]
 
@@ -457,7 +457,7 @@ def moneyline_leg(game: Game, chances: dict[str, float] | None, odds) -> Leg | N
     team = game.home if tid == game.home.id else game.away
     price = odds.home_ml if team is game.home else odds.away_ml
     return Leg(f"{team.name} Moneyline", chances[tid], f"{odds.provider} {price} → {chances[tid]:.0%} implied (no-vig)",
-               f"{game.away.abbrev} @ {game.home.abbrev}", game.id, None, "moneyline", None, None, tid,
+               f"{game.away.name} @ {game.home.name}", game.id, None, "moneyline", None, None, tid,
                game.league_key, game.path)
 
 
@@ -517,7 +517,7 @@ def trends_embed(game: Game, trends: list[Trend], ml: Leg | None) -> discord.Emb
                 if len(text) + len(row) + 1 > 1024:
                     break
                 text += row + "\n"
-            embed.add_field(name=f"{team.abbrev}", value=text, inline=False)
+            embed.add_field(name=team.name, value=text, inline=False)
     if not trends:
         if game.league.feed == "scorepanel":
             why = ("ESPN has no international match history for players, so I build it as matches finish "

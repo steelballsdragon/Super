@@ -28,23 +28,23 @@ def test_parse_real_shaped_lines():
     assert o == Odds("DraftKings", home_ml="+170", away_ml="-205", home_spread=4.5, away_spread=-4.5, total=47.5)
     assert parse_odds({"odds": []}) is None
     g = nfl(0, 0, "pre")
-    assert line_text(g, g.odds) == "Spread: IND -4.5 · WSH +4.5\nTotal: O/U 47.5\nMoneyline: IND -205 · WSH +170"
+    assert line_text(g, g.odds) == "Spread: Indianapolis Colts -4.5 · Washington Commanders +4.5\nTotal: O/U 47.5\nMoneyline: Indianapolis Colts -205 · Washington Commanders +170"
 
 
 def test_favorite_covers_and_under():
     g = nfl(17, 30)
-    assert grade_text(g, g.odds).splitlines() == ["Spread: IND -4.5 ✅ covered", "Total: Under 47.5 ✅ (47)", "Moneyline: IND -205 ✅"]
+    assert grade_text(g, g.odds).splitlines() == ["Spread: Indianapolis Colts -4.5 ✅ covered", "Total: Under 47.5 ✅ (47)", "Moneyline: Indianapolis Colts -205 ✅"]
 
 
 def test_underdog_covers_while_losing():
     g = nfl(24, 27)  # IND wins by 3, so WSH +4.5 covers
-    assert grade_text(g, g.odds).splitlines()[:2] == ["Spread: WSH +4.5 ✅ covered", "Total: Over 47.5 ✅ (51)"]
+    assert grade_text(g, g.odds).splitlines()[:2] == ["Spread: Washington Commanders +4.5 ✅ covered", "Total: Over 47.5 ✅ (51)"]
 
 
 def test_pushes():
     g = nfl(20, 24)
     odds = Odds("DraftKings", home_spread=4.0, away_spread=-4.0, total=44.0)
-    assert grade_text(g, odds).splitlines() == ["Spread: push (WSH +4)", "Total: push (44)"]
+    assert grade_text(g, odds).splitlines() == ["Spread: push (Washington Commanders +4)", "Total: push (44)"]
 
 
 def soccer(home_goals, away_goals, name="STATUS_FULL_TIME", detail="FT", goals=()):
@@ -61,14 +61,14 @@ SOCCER_ODDS = Odds("DraftKings", home_ml="-260", away_ml="+650", draw_ml="+390",
 
 def test_soccer_line_and_draw():
     g = soccer(1, 1)
-    assert line_text(g, SOCCER_ODDS) == "Total: O/U 2.5 goals\nMoneyline: ARS -260 · Draw +390 · LEE +650"
+    assert line_text(g, SOCCER_ODDS) == "Total: O/U 2.5 goals\nMoneyline: Arsenal -260 · Draw +390 · Leeds United +650"
     assert grade_text(g, SOCCER_ODDS).splitlines() == ["Total: Under 2.5 ✅ (2)", "Moneyline: Draw +390 ✅"]
 
 
 def test_soccer_extra_time_settles_on_90_minutes():
     g = soccer(2, 1, "STATUS_FINAL_AET", "AET", goals=[("359", "30'"), ("357", "88'"), ("359", "105'")])
     assert grade_text(g, SOCCER_ODDS).splitlines() == [
-        "Total: Under 2.5 ✅ (2)", "Moneyline: Draw +390 ✅", "*Settled on the 90-minute score: ARS 1-1 LEE*"]
+        "Total: Under 2.5 ✅ (2)", "Moneyline: Draw +390 ✅", "*Settled on the 90-minute score: Arsenal 1-1 Leeds United*"]
 
 
 def test_book_keeps_the_pregame_line_after_espn_drops_it(tmp_path):
@@ -113,7 +113,7 @@ def test_bot_shows_line_at_start_and_grades_at_final(tmp_path):
     for cid, title, fields in sent:
         by_channel.setdefault(cid, []).append((title, fields))
     start, final = [x for x in by_channel[1] if x[0] in ("🏈 Game started", "🏈 Final")]
-    assert start[1] == [("📊 Line (DraftKings)", "Spread: IND -4.5 · WSH +4.5\nTotal: O/U 47.5\nMoneyline: IND -205 · WSH +170")]
+    assert start[1] == [("📊 Line (DraftKings)", "Spread: Indianapolis Colts -4.5 · Washington Commanders +4.5\nTotal: O/U 47.5\nMoneyline: Indianapolis Colts -205 · Washington Commanders +170")]
     assert final[1][-1] == ("📊 Bets (DraftKings closing line)",
-                            "Spread: IND -4.5 ✅ covered\nTotal: Under 47.5 ✅ (47)\nMoneyline: IND -205 ✅")
+                            "Spread: Indianapolis Colts -4.5 ✅ covered\nTotal: Under 47.5 ✅ (47)\nMoneyline: Indianapolis Colts -205 ✅")
     assert all(not any(name.startswith("📊") for name, _ in fields) for _, fields in by_channel[2])  # odds off

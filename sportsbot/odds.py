@@ -68,7 +68,7 @@ def _fmt_spread(line: float) -> str:
 
 def line_text(game: Game, odds: Odds) -> str:
     """The pre-game line, e.g. for the kick-off post."""
-    home, away = game.home.abbrev, game.away.abbrev
+    home, away = game.home.name, game.away.name
     lines = []
     if game.league.sport != "soccer" and odds.home_spread is not None and odds.away_spread is not None:
         lines.append(f"Spread: {away} {_fmt_spread(odds.away_spread)} · {home} {_fmt_spread(odds.home_spread)}")
@@ -78,10 +78,10 @@ def line_text(game: Game, odds: Odds) -> str:
     if odds.home_ml or odds.away_ml:
         price = {game.home.id: odds.home_ml, game.away.id: odds.away_ml}
         first, second = game.teams  # home first for soccer, away first for US sports
-        parts = [f"{first.abbrev} {price[first.id] or '–'}"]
+        parts = [f"{first.name} {price[first.id] or '–'}"]
         if odds.draw_ml:
             parts.append(f"Draw {odds.draw_ml}")
-        parts.append(f"{second.abbrev} {price[second.id] or '–'}")
+        parts.append(f"{second.name} {price[second.id] or '–'}")
         lines.append("Moneyline: " + " · ".join(parts))
     return "\n".join(lines)
 
@@ -103,15 +103,15 @@ def grade_text(game: Game, odds: Odds) -> str:
     went_long = "AET" in game.status_name or "PEN" in game.status_name or game.detail in ("AET", "FT-Pens")
     if game.league.sport == "soccer" and went_long and game.goals:
         hs, as_ = _regulation_score(game)
-        note = f"\n*Settled on the 90-minute score: {home.abbrev} {hs}-{as_} {away.abbrev}*"
+        note = f"\n*Settled on the 90-minute score: {home.name} {hs}-{as_} {away.name}*"
     lines = []
     if game.league.sport != "soccer" and odds.home_spread is not None:
         margin = hs + odds.home_spread - as_
         if margin == 0:
-            lines.append(f"Spread: push ({home.abbrev} {_fmt_spread(odds.home_spread)})")
+            lines.append(f"Spread: push ({home.name} {_fmt_spread(odds.home_spread)})")
         else:
             team, line = (home, odds.home_spread) if margin > 0 else (away, odds.away_spread if odds.away_spread is not None else -odds.home_spread)
-            lines.append(f"Spread: {team.abbrev} {_fmt_spread(line)} ✅ covered")
+            lines.append(f"Spread: {team.name} {_fmt_spread(line)} ✅ covered")
     if odds.total is not None:
         total = hs + as_
         if total == odds.total:
@@ -124,7 +124,7 @@ def grade_text(game: Game, odds: Odds) -> str:
                 lines.append(f"Moneyline: Draw {odds.draw_ml} ✅")
         else:
             winner, price = (home, odds.home_ml) if hs > as_ else (away, odds.away_ml)
-            lines.append(f"Moneyline: {winner.abbrev} {price or ''} ✅".replace("  ", " "))
+            lines.append(f"Moneyline: {winner.name} {price or ''} ✅".replace("  ", " "))
     return "\n".join(lines) + note
 
 

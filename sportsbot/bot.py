@@ -380,7 +380,7 @@ class SportsBot(discord.Client):
 
     async def _open_thread(self, key: str, game, message) -> int | None:
         a, b = game.teams
-        name = f"{game.league.emoji} {a.abbrev} v {b.abbrev} · {game.league.name}"[:100]
+        name = f"{game.league.emoji} {a.name} v {b.name} · {game.league.name}"[:100]
         try:
             thread = await message.create_thread(name=name, auto_archive_duration=1440)
         except discord.HTTPException:
