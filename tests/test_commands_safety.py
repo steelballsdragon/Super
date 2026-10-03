@@ -83,3 +83,29 @@ def test_status_and_following_stay_within_discord_limits(tmp_path):
     asyncio.run(bot.tree.get_command("following").callback(inter))
     assert len(sent["content"]) <= 2000
     asyncio.run(bot.espn.close())
+
+
+def test_outdated_server_commands_are_removed_once(tmp_path):
+    bot = make_bot(tmp_path)
+    bot.dev_guild = 3
+    guilds = [SimpleNamespace(id=1), SimpleNamespace(id=2), SimpleNamespace(id=3)]
+    stale = {1: ["research game", "research picks"], 2: [], 3: ["research"]}
+    synced, cleared = [], []
+
+    async def fetch_commands(guild=None):
+        return stale[guild.id]
+
+    async def sync(guild=None):
+        synced.append(guild.id)
+        stale[guild.id] = []
+    bot.tree.fetch_commands = fetch_commands
+    bot.tree.sync = sync
+    bot.tree.clear_commands = lambda guild=None: cleared.append(guild.id)
+    type(bot).guilds = property(lambda self: guilds)
+    try:
+        asyncio.run(bot.on_ready())
+        asyncio.run(bot.on_ready())  # reconnects don't repeat it
+    finally:
+        del type(bot).guilds
+    assert cleared == [1] and synced == [1]  # only the server with leftovers; the dev server is left alone
+    asyncio.run(bot.espn.close())

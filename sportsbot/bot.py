@@ -113,6 +113,7 @@ class SportsBot(discord.Client):
         self._tasks: set[asyncio.Task] = set()
         self._last_prune = time.monotonic()
         self._last_settle = 0.0
+        self._cleaned_guilds = False
         self.result_lookups: dict[str, float] = {}  # when to next ask ESPN how an off-scoreboard game ended
         self.tracker = Tracker()
         # NFL, MLB and NHL scores are posted as the actual scoring plays.
@@ -180,6 +181,26 @@ class SportsBot(discord.Client):
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s (%s)", self.user, getattr(self.user, "id", "?"))
+        if not self._cleaned_guilds:
+            self._cleaned_guilds = True
+            await self._remove_old_server_commands()
+
+    async def _remove_old_server_commands(self) -> None:
+        """Deletes slash commands an older version registered to individual servers.
+
+        The current commands are global, so any server-only copies are outdated
+        duplicates (e.g. the old /research subcommands) that would otherwise stay listed.
+        """
+        for guild in self.guilds:
+            if guild.id == self.dev_guild:
+                continue  # that server's commands are the current ones on purpose
+            try:
+                if await self.tree.fetch_commands(guild=guild):
+                    self.tree.clear_commands(guild=guild)
+                    await self.tree.sync(guild=guild)
+                    log.info("Removed outdated commands from server %s", guild.id)
+            except discord.HTTPException:
+                log.warning("Couldn't check server %s for outdated commands", guild.id, exc_info=True)
 
     @tasks.loop(seconds=DEFAULT_POLL_SECONDS)
     async def poll(self) -> None:
