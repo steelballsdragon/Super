@@ -19,7 +19,7 @@ from .tracker import Tracker
 
 log = logging.getLogger("sportsbot")
 
-PLAY_BY_PLAY_SPORTS = ("football", "baseball")
+PLAY_BY_PLAY_SPORTS = ("football", "baseball", "hockey")
 
 LEAGUE_CHOICES = [app_commands.Choice(name=l.name, value=l.key) for l in LEAGUES.values()]
 
@@ -31,7 +31,7 @@ class SportsBot(discord.Client):
         self.store = store
         self.espn = ESPNClient()
         self.tracker = Tracker()
-        # NFL and MLB scores are posted as the actual scoring plays.
+        # NFL, MLB and NHL scores are posted as the actual scoring plays.
         self.play_resolvers = {
             league.key: PlayResolver(self._plays_fetcher(league))
             for league in LEAGUES.values()

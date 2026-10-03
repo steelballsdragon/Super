@@ -25,6 +25,7 @@ KICKOFF_TITLES = {
     "football": "Game started",
     "basketball": "Tip-off",
     "baseball": "First pitch",
+    "hockey": "Puck drop",
     "cricket": "Match started",
 }
 
@@ -84,7 +85,7 @@ def _title(update: Update) -> str:
     elif kind == SCORE:
         text = "GOAL!" if sport == "soccer" else "Score update"
     elif kind == PERIOD:
-        text = f"End of {period_label(game.period)}"
+        text = f"End of {period_label(game.period, sport)}"
     elif kind == HALFTIME:
         text = "Half-time"
     elif kind == WICKET:

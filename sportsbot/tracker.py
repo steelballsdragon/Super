@@ -8,15 +8,18 @@ from .espn import Game, Goal, ScoringPlay
 
 KICKOFF = "kickoff"
 SCORE = "score"
-PERIOD = "period"  # basketball: end of a quarter
+PERIOD = "period"  # basketball/hockey: end of a quarter or period
 HALFTIME = "halftime"
 WICKET = "wicket"
 INNINGS = "innings"  # cricket: innings break
 FINAL = "final"
 
+# Statuses meaning a basketball quarter or hockey period just ended.
+END_OF_PERIOD = ("STATUS_END_PERIOD", "STATUS_INTERMISSION")
+
 # Sports where every change in score is posted. Basketball scores change too
 # often (posted per quarter instead) and cricket posts wickets, not runs.
-PER_SCORE_SPORTS = ("football", "soccer", "baseball")
+PER_SCORE_SPORTS = ("football", "soccer", "baseball", "hockey")
 
 
 @dataclass(frozen=True)
@@ -26,7 +29,7 @@ class Update:
     new_goals: tuple[Goal, ...] = ()
     score_decreased: bool = False  # e.g. a goal overturned by VAR
     prev_total: int = 0  # combined score before this update
-    play: ScoringPlay | None = None  # NFL/MLB scoring play details, when known
+    play: ScoringPlay | None = None  # NFL/MLB/NHL scoring play details, when known
     count: int = 1  # wickets that fell since the last snapshot
 
 
@@ -54,7 +57,7 @@ def diff_game(prev: Game, cur: Game) -> list[Update]:
             updates.append(Update(WICKET, cur, count=fallen))
         if _batting(prev) is not None and _batting(cur) not in (None, _batting(prev)):
             updates.append(Update(INNINGS, cur))
-    if sport == "basketball" and cur.status_name == "STATUS_END_PERIOD" and prev.status_name != "STATUS_END_PERIOD":
+    if sport in ("basketball", "hockey") and cur.status_name in END_OF_PERIOD and prev.status_name not in END_OF_PERIOD:
         updates.append(Update(PERIOD, cur))
     if cur.status_name == "STATUS_HALFTIME" and prev.status_name != "STATUS_HALFTIME":
         updates.append(Update(HALFTIME, cur))
