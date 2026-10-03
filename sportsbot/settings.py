@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
@@ -45,22 +46,56 @@ class SettingsStore:
 
 
 class StateStore:
-    """Small key/value store for bot state like which thread belongs to which game."""
+    """Small key/value store for bot state like which thread belongs to which game.
+
+    Each change is saved straight away, except inside `batch()`, where changes are
+    saved once at the end (an update cycle can change dozens of entries at once).
+    """
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self._data: dict[str, dict] = read_json(self.path, {})
+        self._held = 0
+        self._dirty = False
 
     def get(self, section: str, key: str, default=None):
         return self._data.get(section, {}).get(key, default)
 
     def set(self, section: str, key: str, value) -> None:
         self._data.setdefault(section, {})[key] = value
-        write_json(self.path, self._data)
+        self._changed()
 
     def delete(self, section: str, key: str) -> None:
         if self._data.get(section, {}).pop(key, None) is not None:
-            write_json(self.path, self._data)
+            self._changed()
 
     def items(self, section: str):
         return list(self._data.get(section, {}).items())
+
+    def _changed(self) -> None:
+        if self._held:
+            self._dirty = True
+        else:
+            write_json(self.path, self._data)
+
+    @contextmanager
+    def batch(self):
+        """Saves once when the outermost batch ends, however many changes it made (even if it fails)."""
+        self._held += 1
+        try:
+            yield self
+        finally:
+            self._held -= 1
+            if not self._held and self._dirty:
+                self._dirty = False
+                write_json(self.path, self._data)
+
+
+def move_sections(source: StateStore, target: StateStore, sections) -> None:
+    """Moves whole sections from one store to another (e.g. when a section gets its own file), once."""
+    with source.batch(), target.batch():
+        for section in sections:
+            for key, value in source.items(section):
+                if target.get(section, key) is None:
+                    target.set(section, key, value)
+                source.delete(section, key)

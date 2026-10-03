@@ -215,24 +215,26 @@ def test_unfollow_without_a_league(tmp_path):
     asyncio.run(bot.espn.close())
 
 
-def soccer_game(gid, home, away, day):
+def soccer_game(gid, home, away, day, league="mls"):
     from sportsbot.espn import parse_scoreboard
     from sportsbot.leagues import LEAGUES
     comp = {"status": {"type": {"state": "pre", "name": "STATUS_SCHEDULED", "shortDetail": ""}},
             "competitors": [{"homeAway": "home", "score": "0", "team": {"id": home, "abbreviation": home, "displayName": home}},
                             {"homeAway": "away", "score": "0", "team": {"id": away, "abbreviation": away, "displayName": away}}]}
-    [g] = parse_scoreboard({"events": [{"id": gid, "date": f"{day}T19:00Z", "competitions": [comp]}]}, LEAGUES["mls"])
+    [g] = parse_scoreboard({"events": [{"id": gid, "date": f"{day}T19:00Z", "competitions": [comp]}]}, LEAGUES[league])
     return g
 
 
 def test_parlays_look_past_a_lone_midweek_game_and_never_fake_a_lotto(tmp_path):
-    from datetime import date, timedelta
+    from datetime import datetime, timedelta
 
     from sportsbot.props import Leg
     bot = bot_with_teams(tmp_path)
-    lone = soccer_game("1", "CHI", "VAN", "2026-10-06")
-    weekend = [soccer_game(str(10 + i), f"H{i}", f"A{i}", "2026-10-10") for i in range(8)]
-    in_four_days = (date.today() + timedelta(days=4)).strftime("%Y%m%d")
+    from sportsbot.espn import EASTERN
+    today = datetime.now(EASTERN).date()
+    lone = soccer_game("1", "CHI", "VAN", f"{today + timedelta(days=2):%Y-%m-%d}")
+    weekend = [soccer_game(str(10 + i), f"H{i}", f"A{i}", f"{today + timedelta(days=4):%Y-%m-%d}") for i in range(8)]
+    in_four_days = f"{today + timedelta(days=4):%Y%m%d}"
 
     async def scoreboard(league, day=None):
         return weekend if day == in_four_days else [lone] if day is None else []
@@ -243,7 +245,8 @@ def test_parlays_look_past_a_lone_midweek_game_and_never_fake_a_lotto(tmp_path):
             return [], None
         legs = [Leg(f"{game.home.name} P{i} Over 0.5 Shots", 0.62, "", "", game.id, f"{game.id}-{i}") for i in range(2)]
         return [SimpleNamespace(**{"pick": l.pick, "probability": l.probability, "evidence": "", "player_id": l.player_id,
-                                   "prop": SimpleNamespace(stat="shots"), "line": 1, "player": "P"}) for l in legs], None
+                                   "prop": SimpleNamespace(stat="shots"), "line": 1, "player": "P",
+                                   "team": game.home.abbrev}) for l in legs], None
     bot.game_props = game_props
     bot.store.add(7, "mls")
     research = bot.tree.get_command("research").callback
@@ -255,6 +258,7 @@ def test_parlays_look_past_a_lone_midweek_game_and_never_fake_a_lotto(tmp_path):
     async def only_lone(league, day=None):
         return [lone] if day is None else []
     bot.espn.scoreboard = only_lone
+    bot._week.clear()  # the week's games are cached; this is a different week
     i = Inter()
     asyncio.run(research(i, parlay=SimpleNamespace(value="lotto")))
     assert i.sent == ["Not enough strong legs in VAN @ CHI for a Lotto (4-10 legs, +3000 to +20000) parlay. "
@@ -263,11 +267,12 @@ def test_parlays_look_past_a_lone_midweek_game_and_never_fake_a_lotto(tmp_path):
 
 
 def test_pick_a_game_for_a_same_game_lotto_of_goalscorers(tmp_path):
-    from sportsbot.props import Leg
     bot = bot_with_teams(tmp_path)
     bot.store.add(7, "epl")
-    game = soccer_game("55", "Chelsea", "Bournemouth", "2026-10-10")
-    other = soccer_game("56", "Arsenal", "Leeds United", "2026-10-10")
+    from datetime import datetime, timedelta, timezone
+    saturday = f"{datetime.now(timezone.utc) + timedelta(days=5):%Y-%m-%d}"
+    game = soccer_game("55", "Chelsea", "Bournemouth", saturday)
+    other = soccer_game("56", "Arsenal", "Leeds United", saturday)
 
     async def week_games(key):
         return [game, other]
@@ -278,11 +283,13 @@ def test_pick_a_game_for_a_same_game_lotto_of_goalscorers(tmp_path):
         asked.append((g.id, scorers))
         if not scorers:
             return [], None
-        names = ("Cole Palmer", "João Pedro", "Antoine Semenyo", "Justin Kluivert", "Enzo Fernández", "Evanilson")
-        legs = [Leg(f"{n} Anytime Goal", p, "", "", g.id, f"{g.id}-{n}", "prop", "totalGoals", 1, None, "epl", "", n)
-                for n, p in zip(names, (0.45, 0.4, 0.35, 0.3, 0.27, 0.25))]
-        return [SimpleNamespace(pick=l.pick, probability=l.probability, evidence="", player_id=l.player_id,
-                                prop=SimpleNamespace(stat="totalGoals"), line=1, player=l.player) for l in legs], None
+        # Three scorers and three assisters for each side; only one of each per team can be used.
+        names = {"CHE": ("Cole Palmer", "João Pedro", "Enzo Fernández"), "BOU": ("Antoine Semenyo", "Justin Kluivert", "Evanilson")}
+        legs = [(f"{n} {wording}", p, f"{g.id}-{n}-{stat}", stat, n, team)
+                for team, players in names.items() for n, p in zip(players, (0.45, 0.4, 0.3))
+                for stat, wording in (("totalGoals", "Anytime Goalscorer"), ("goalAssists", "Anytime Assist"))]
+        return [SimpleNamespace(pick=pick, probability=p, evidence="", player_id=pid, prop=SimpleNamespace(stat=stat),
+                                line=1, player=n, team=team) for pick, p, pid, stat, n, team in legs], None
     bot.game_props = game_props
     research = bot.tree.get_command("research")
 
@@ -297,7 +304,10 @@ def test_pick_a_game_for_a_same_game_lotto_of_goalscorers(tmp_path):
     assert i.sent[0].startswith("🎟️ ⚽ Premier League · Lotto") and "Closest" not in i.sent[0]
     assert {gid for gid, _ in asked} == {"55"} and all(s for _, s in asked)  # only that game, only scorer bets
     [parlay] = bot.parlays.pending()
-    assert {leg["game_id"] for leg in parlay["legs"]} == {"55"} and 4 <= len(parlay["legs"]) <= 10
+    assert {leg["game_id"] for leg in parlay["legs"]} == {"55"} and len(parlay["legs"]) == 4
+    # One goalscorer and one assister per team, never two assists from the same side.
+    assert sorted((leg["team"], leg["stat"]) for leg in parlay["legs"]) == [
+        ("BOU", "goalAssists"), ("BOU", "totalGoals"), ("CHE", "goalAssists"), ("CHE", "totalGoals")]
 
     # Typing the game instead of picking it works too.
     i = Inter()
@@ -311,3 +321,52 @@ def test_pick_a_game_for_a_same_game_lotto_of_goalscorers(tmp_path):
     asyncio.run(research.callback(i, bets=SimpleNamespace(value="scorers")))
     assert i.sent == ["Goalscorer and assist bets are for soccer and the NHL."]
     asyncio.run(bot.espn.close())
+
+
+def test_game_picker_works_in_a_channel_following_several_leagues(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    bot = bot_with_teams(tmp_path)
+    for key in ("epl", "nfl"):
+        bot.store.add(9, key)
+    soon = f"{datetime.now(timezone.utc) + timedelta(days=2):%Y-%m-%d}"
+    weeks = {"epl": [soccer_game("55", "Chelsea", "Bournemouth", soon, "epl")], "nfl": []}
+
+    async def week_games(key):
+        return weeks[key]
+    bot.week_games = week_games
+    research = bot.tree.get_command("research")
+    found = asyncio.run(research._params["game"].autocomplete(Inter(channel_id=9), ""))
+    assert [c.name.split(" · ")[0] for c in found] == ["⚽ Bournemouth @ Chelsea"]
+    seen = []
+
+    async def game_props(g, *args, **kw):
+        seen.append(g.league_key)
+        return [], None
+    bot.game_props = game_props
+    i = Inter(channel_id=9)
+    asyncio.run(research.callback(i, game="55", parlay=SimpleNamespace(value="safe")))
+    assert seen == ["epl"]  # the picked game decided the league
+    asyncio.run(bot.espn.close())
+
+
+def test_slow_suggestions_keep_loading_for_next_time():
+    from sportsbot.bot import gather_within
+    finished = []
+
+    async def quick():
+        return "quick"
+
+    async def slow():
+        await asyncio.sleep(0.2)
+        finished.append("slow")
+        return "slow"
+
+    async def broken():
+        raise RuntimeError("ESPN down")
+
+    async def run():
+        first = await gather_within(0.05, quick(), slow(), broken())
+        await asyncio.sleep(0.3)  # the slow one wasn't cancelled: it finished (and would have been cached)
+        return first
+    assert asyncio.run(run()) == ["quick"] and finished == ["slow"]

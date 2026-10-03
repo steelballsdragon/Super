@@ -29,11 +29,13 @@ class ParlayBook:
     def __init__(self, state) -> None:
         self._state = state
 
-    def record(self, channel_id: int, league: str, style: str, legs: list[Leg]) -> str:
+    def record(self, channel_id: int, league: str, style: str, legs: list[Leg], round_robin: int | None = None) -> str:
+        """Saves a parlay to grade later. round_robin=2 means a round robin of 2's: it wins if any 2 legs hit."""
         pid = uuid.uuid4().hex[:8]
         self._state.set("parlays", pid, {
             "id": pid, "channel": channel_id, "league": league, "style": style, "created": time.time(),
             "legs": [{**asdict(leg), "status": "pending"} for leg in legs], "status": "pending",
+            **({"round_robin": round_robin} if round_robin else {}),
         })
         return pid
 
@@ -45,6 +47,16 @@ class ParlayBook:
 
     def save(self, parlay: dict) -> None:
         statuses = [leg["status"] for leg in parlay["legs"]]
+        if size := parlay.get("round_robin"):  # pays if any `size` legs hit
+            hits, live = statuses.count("hit"), statuses.count("pending")
+            if hits >= size:
+                parlay["status"] = "won" if not live else "pending"
+            elif hits + live < size:
+                parlay["status"] = "void" if statuses.count("miss") == 0 else "lost"
+            else:
+                parlay["status"] = "pending"
+            self._state.set("parlays", parlay["id"], parlay)
+            return
         if "miss" in statuses:
             parlay["status"] = "lost" if "pending" not in statuses else "pending"
         elif "pending" in statuses:
@@ -225,7 +237,7 @@ async def _extra_fanduel_assists(bot, leg: dict) -> int:
     forced own goals), from the match commentary. Assist bets are settled the FanDuel way."""
     from .espn import fanduel_assists, name_key
     name = leg.get("player") or leg["pick"]
-    for wording in (" To Record an Assist", " To Score or Assist", " To Assist", " Goal or Assist"):  # older wording too
+    for wording in (" Anytime Assist", " To Record an Assist", " To Score or Assist", " To Assist", " Goal or Assist"):
         name = name.rsplit(wording, 1)[0]
     summary = await bot.espn.summary(leg.get("path") or LEAGUES[leg["league"]].path, leg["game_id"])
     return sum(1 for f in fanduel_assists(summary) if f.how != "assist" and name_key(f.assist) == name_key(name))
@@ -240,6 +252,13 @@ def result_embed(parlay: dict) -> discord.Embed:
     hits = sum(l["status"] == "hit" for l in legs)
     decided = sum(l["status"] in ("hit", "miss") for l in legs)
     title = {"won": "✅ Parlay won", "lost": "❌ Parlay lost", "void": "➖ Parlay void"}.get(parlay["status"], "⏳ Parlay")
+    if size := parlay.get("round_robin"):
+        from itertools import combinations
+        hit = [l["status"] == "hit" for l in legs]
+        cashed = sum(all(hit[i] for i in combo) for combo in combinations(range(len(legs)), size))
+        total = sum(1 for _ in combinations(range(len(legs)), size))
+        title = ({"won": "✅ Round robin cashed", "lost": "❌ Round robin lost", "void": "➖ Round robin void"}
+                 .get(parlay["status"], "⏳ Round robin") + f" ({cashed} of {total} bets)")
     lines = [f"{ICONS[l['status']]} **{l['pick']}**" + (f" · {l['actual']}" if l.get("actual") else "")
              + f" · predicted ~{l['probability']:.0%}" for l in legs]
     league = LEAGUES.get(parlay["league"])

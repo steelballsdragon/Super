@@ -214,3 +214,15 @@ def test_soccer_assist_legs_settle_by_fanduel_rules(tmp_path):
         "✅ **Matheus Cunha To Assist** · 1 · predicted ~30%",  # won the penalty: an assist at FanDuel
         "❌ **Bryan Mbeumo To Assist** · 0 · predicted ~30%",
     ]
+
+
+def test_round_robin_cashes_when_any_two_hit(tmp_path):
+    bot = FakeBot(tmp_path, [nfl_game()], {"p1": {"receptions": 6}, "p2": {"receivingYards": 10}})
+    book = ParlayBook(bot.state)
+    third = Leg("Washington Commanders Moneyline", 0.60, "", "IND @ WSH", "77", None, "moneyline", None, None, "28",
+                "nfl", "football/nfl")
+    book.record(9, "nfl", "Assists round robin", legs()[:2] + [third], round_robin=2)
+    asyncio.run(settle(bot, book))
+    [(_, embed)] = bot.sent
+    assert embed.title == "🎟️ ✅ Round robin cashed (1 of 3 bets): 2/3 legs hit"
+    assert book.summary()["all"]["won"] == 1

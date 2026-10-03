@@ -35,6 +35,9 @@ BARS = {
 # games), so they get their own bar: a real chance, and at least 2 of the last 10.
 SCORER_STATS = ("totalGoals", "goalAssists", "goalOrAssist", "goals", "assists")
 SCORER_BAR, SCORER_MIN_L10 = 0.22, 0.2
+# Two assists (or two goalscorers) from one team rarely both land: a parlay takes at most one of each per team.
+SCORER_KIND = {"totalGoals": "goal", "goals": "goal", "goalAssists": "assist", "assists": "assist",
+               "goalOrAssist": "goal or assist"}
 # Before the matchup adjustment, players a little under the bar are kept too: a good matchup can lift them over it.
 SCORER_PRE_BAR = 0.15
 WEIGHTS = {"l10": 0.45, "season": 0.30, "last": 0.25}
@@ -43,6 +46,7 @@ CACHE_SECONDS = 6 * 3600
 # The server has 1 GB of memory, so only small, processed results are cached (never raw
 # ESPN responses), the cache is capped, and expired entries are dropped.
 CACHE_MAX_ENTRIES = 4000
+PLAYERS_AT_ONCE = 6  # game logs fetched at the same time
 SKIP_STATUSES = ("Out", "Doubtful", "Injured Reserve", "Suspension")
 
 
@@ -52,6 +56,7 @@ class Prop:
     stat: str  # stat name in the game log, or a computed name below
     lines: tuple[int, ...]  # "N or more" thresholds, like a book's alternate lines
     anytime: str | None = None  # wording when the line is 1+ (e.g. "Anytime TD")
+    plus: str | None = None  # FanDuel-style wording for "N or more", e.g. "{n}+ Made Threes"
 
 
 PROPS = {
@@ -64,24 +69,25 @@ PROPS = {
         Prop("Touchdowns", "anytimeTouchdowns", (1,), anytime="Anytime TD"),
     ],
     "basketball": [
-        Prop("Points", "points", (10, 15, 20, 25, 30, 35)),
-        Prop("Rebounds", "totalRebounds", (4, 6, 8, 10, 12)),
-        Prop("Assists", "assists", (2, 4, 6, 8, 10)),
-        Prop("3-Pointers Made", "threesMade", (1, 2, 3, 4)),
+        # Worded as FanDuel lists them.
+        Prop("Points", "points", (10, 15, 20, 25, 30, 35), plus="To Score {n}+ Points"),
+        Prop("Rebounds", "totalRebounds", (4, 6, 8, 10, 12), plus="To Record {n}+ Rebounds"),
+        Prop("Assists", "assists", (2, 4, 6, 8, 10), plus="To Record {n}+ Assists"),
+        Prop("3-Pointers Made", "threesMade", (1, 2, 3, 4), plus="{n}+ Made Threes"),
         Prop("Pts + Reb + Ast", "pra", (20, 25, 30, 35, 40, 45, 50)),
     ],
     "hockey": [
         Prop("Shots on Goal", "shotsTotal", (2, 3, 4, 5)),  # books rarely offer 0.5
         Prop("Points", "points", (1, 2)),
         Prop("Goals", "goals", (1,), anytime="Anytime Goalscorer"),
-        Prop("Assists", "assists", (1,), anytime="To Record an Assist"),
+        Prop("Assists", "assists", (1,), anytime="Anytime Assist"),
     ],
     "soccer": [
         Prop("Shots", "totalShots", (1, 2, 3, 4)),
         Prop("Shots on Target", "shotsOnTarget", (1, 2)),
         # Named as FanDuel lists them, so a slip can be matched as-is.
         Prop("Goals", "totalGoals", (1,), anytime="Anytime Goalscorer"),
-        Prop("Assists", "goalAssists", (1,), anytime="To Record an Assist"),
+        Prop("Assists", "goalAssists", (1,), anytime="Anytime Assist"),
         Prop("Goal or Assist", "goalOrAssist", (1,), anytime="To Score or Assist"),
         Prop("Fouls Committed", "foulsCommitted", (1, 2)),
     ],
@@ -214,6 +220,8 @@ class Trend:
     def pick(self) -> str:
         if self.line == 1 and self.prop.anytime:
             return f"{self.player} {self.prop.anytime}"
+        if self.prop.plus:
+            return f"{self.player} {self.prop.plus.format(n=self.line)}"
         return f"{self.player} Over {self.line - 0.5:g} {self.prop.label}"
 
     @property
@@ -244,18 +252,21 @@ def weighted(rates: dict[str, Rate]) -> float | None:
 
 def best_trends(name: str, pid: str, team: str, opponent: str, games: list[PlayerGame], sport: str,
                 bigger: bool = False, props: list[Prop] | None = None, scorers: bool = False,
-                bar: float | None = None) -> list[Trend]:
+                bar: float | None = None, ceiling: float | None = None, min_l10: float | None = None) -> list[Trend]:
     """For each prop, the highest line this player has hit consistently.
 
     With bigger=True, each prop's smallest line (the near-certain "gimme") is
     skipped and the bar is lower, giving fewer, higher lines that pay more.
     With scorers=True, only goal and assist bets (anytime goal, to assist, goal
-    or assist), held to the lower goalscorer bar.
+    or assist), held to the lower goalscorer bar. A ceiling keeps only lines
+    no likelier than it (long shots: the highest line between bar and ceiling).
     """
-    target, min_l10 = BARS.get(sport, BARS["default"])[1 if bigger else 0]
+    target, l10_min = BARS.get(sport, BARS["default"])[1 if bigger else 0]
     if scorers:
         props = [p for p in PROPS.get(sport, []) if p.stat in SCORER_STATS]
-        target, min_l10, bigger = SCORER_BAR if bar is None else bar, SCORER_MIN_L10, False
+        target, l10_min, bigger = SCORER_BAR, SCORER_MIN_L10, False
+    target = target if bar is None else bar
+    l10_min = l10_min if min_l10 is None else min_l10
     if not games:
         return []
     seasons = []
@@ -275,7 +286,7 @@ def best_trends(name: str, pid: str, team: str, opponent: str, games: list[Playe
             rates = {"l10": _rate(l10, prop.stat, line), "season": _rate(current, prop.stat, line),
                      "last": _rate(last, prop.stat, line)}
             p = weighted(rates)
-            if p is None or p < target or rates["l10"].pct < min_l10:
+            if p is None or p < target or rates["l10"].pct < l10_min or (ceiling is not None and p > ceiling):
                 continue
             best = Trend(name, pid, team, prop, line, rates["l10"], rates["season"], rates["last"],
                          _rate(vs, prop.stat, line), seasons[0], seasons[1] if len(seasons) > 1 else "",
@@ -283,6 +294,58 @@ def best_trends(name: str, pid: str, team: str, opponent: str, games: list[Playe
         if best:
             found.append(best)
     return found
+
+
+# ---------- long-shot round robins (assists, 3-pointers) ----------
+
+@dataclass(frozen=True)
+class Longshot:
+    """A long-shot bet type for round robins: who to look at, the line, and the price range to keep."""
+    key: str
+    name: str
+    sport: str
+    picks: tuple  # ESPN team-leader categories and how many from each: the pool of players
+    limit: int  # players per team at most
+    prop: Prop
+    low: float  # keep chances between these by default
+    high: float
+
+    def band(self, payout: str | None) -> tuple[float, float]:
+        """The chances to pick from: the default, or the payout picked (Safe, Big payout, Lotto)."""
+        return ROUND_ROBIN_BANDS.get(payout, (self.low, self.high))
+
+
+# Chance ranges for a round robin's picks by payout: Lotto is the +450 to +1500 assists that big wins come from.
+ROUND_ROBIN_BANDS = {"safe": (0.25, 0.50), "big": (0.10, 0.25), "lotto": (0.06, 0.18)}
+
+
+LONGSHOTS = {
+    # Full-backs, wing-backs and set-piece takers sit well down the assist list but pay +500 to +1400:
+    # a team's top 8 assisters plus its best passers, not just the stars.
+    "rr-assists": Longshot("rr-assists", "Assists round robin", "soccer",
+                           (("assistsLeaders", 8), ("accuratePasses", 3)), 10,
+                           Prop("Assists", "goalAssists", (1,), anytime="Anytime Assist"), 0.13, 0.33),
+    # Role-player shooters at 3+ / 4+ / 5+ made threes.
+    "rr-threes": Longshot("rr-threes", "3-pointers round robin", "basketball",
+                          (("3PointMadePerGame", 6),), 6,
+                          Prop("3-Pointers Made", "threesMade", (3, 4, 5, 6), plus="{n}+ Made Threes"), 0.15, 0.40),
+}
+LONGSHOT_MIN_L10 = 0.05  # it has happened at least once in the last 10 games: never a pick on a hunch
+
+
+def chance_at_least(probabilities: list[float], k: int) -> float:
+    """The chance that at least k of these independent legs hit."""
+    dist = [1.0]  # dist[j] = chance exactly j have hit so far
+    for p in probabilities:
+        dist = [(dist[j] if j < len(dist) else 0) * (1 - p) + (dist[j - 1] * p if j else 0) for j in range(len(dist) + 1)]
+    return sum(dist[k:])
+
+
+def pick_round_robin(legs: list[Leg], size: int, per_game: int) -> list[Leg]:
+    """The `size` most likely long shots, one per player, `per_game` per game at most, and (for goals and
+    assists) one per team."""
+    every_size = Target("rr", "", 0.0, 1.0, 1.0, bigger=False, min_legs=size, max_legs=size)
+    return build_to_target(legs, every_size, per_game=per_game)
 
 
 # ---------- matchup adjustment for goalscorer and assist bets ----------
@@ -324,7 +387,7 @@ def expected_goals(game: Game, chances: dict[str, float] | None, total: float | 
     return Matchup({home: (usual[home] + concede[away]) / 2, away: (usual[away] + concede[home]) / 2}, usual, "form", games)
 
 
-def apply_matchup(trends: list[Trend], game: Game, matchup: Matchup | None) -> list[Trend]:
+def apply_matchup(trends: list[Trend], game: Game, matchup: Matchup | None, bar: float = SCORER_BAR) -> list[Trend]:
     """Scales each goal and assist chance by how many goals the player's team is expected to score here
     against its usual (a player's goals come and go with his team's), then keeps those over the bar.
 
@@ -347,7 +410,7 @@ def apply_matchup(trends: list[Trend], game: Game, matchup: Matchup | None) -> l
             t = replace(t, probability=min(max(p, 0.02), 0.9),
                         note=f"{names[tid]} expected {matchup.expected[tid]:.1f} goals ({why}), "
                              f"{matchup.usual[tid]:.1f} a game lately")
-        if t.prop.stat not in SCORER_STATS or t.probability >= SCORER_BAR:
+        if t.prop.stat not in SCORER_STATS or t.probability >= bar:
             out.append(t)
     return sorted(out, key=lambda t: t.probability, reverse=True)
 
@@ -358,20 +421,25 @@ class PropsClient:
     def __init__(self, espn) -> None:
         self.espn = espn
         self._cache: dict[str, tuple[float, float, object]] = {}  # key -> (stored at, ttl, value)
+        self._leader_season: dict[str, int] = {}  # league -> the season its team leaders were found under
         self._limit = asyncio.Semaphore(8)
+        self._players = asyncio.Semaphore(PLAYERS_AT_ONCE)
 
     async def _json(self, url: str, params: dict | None = None):
         """Fetches from ESPN (at most 8 at a time). Not cached: callers cache what they keep."""
         async with self._limit:
             return await self.espn._get_json(url, params)
 
-    async def cached(self, key: str, ttl: float, make):
-        """make()'s result, reused for ttl seconds. Keep results small: this lives in memory."""
+    async def cached(self, key: str, ttl: float, make, keep=None):
+        """make()'s result, reused for ttl seconds (only if keep(result), when given, so an empty result
+        from a temporary problem is tried again). Keep results small: this lives in memory."""
         now = time.monotonic()
         hit = self._cache.get(key)
         if hit and now - hit[0] < hit[1]:
             return hit[2]
         value = await make()
+        if keep is not None and not keep(value):
+            return value
         self._cache[key] = (now, ttl, value)
         if len(self._cache) > CACHE_MAX_ENTRIES:
             self._trim(now)
@@ -385,24 +453,39 @@ class PropsClient:
             for key in sorted(self._cache, key=lambda k: self._cache[k][0])[:overflow]:
                 del self._cache[key]
 
-    async def key_players(self, league_key: str, team_id: str) -> list[tuple[str, str, str]]:
-        """(athlete id, name, position) of a team's key players, from ESPN's team leaders."""
+    async def key_players(self, league_key: str, team_id: str, picks=None, limit: int | None = None
+                          ) -> list[tuple[str, str, str]]:
+        """(athlete id, name, position) of a team's key players, from ESPN's team leaders (by default the
+        sport's usual picks; round robins look deeper, e.g. a team's top 8 assisters). Worked out once every
+        few hours per team: finding the current season's leaders can take several requests."""
+        league = LEAGUES[league_key]
+        picks = picks or LEADER_PICKS[league.sport]
+        limit = limit or MAX_PLAYERS[league.sport]
+        return await self.cached(f"key-players:{league_key}:{team_id}:{picks}:{limit}", CACHE_SECONDS,
+                                 lambda: self._find_key_players(league_key, team_id, picks, limit), keep=bool)
+
+    async def _find_key_players(self, league_key: str, team_id: str, picks, limit: int) -> list[tuple[str, str, str]]:
         league = LEAGUES[league_key]
         sport_path, league_slug = league.path.split("/")
-        picks = LEADER_PICKS[league.sport]
         ids: list[str] = []
         year = date.today().year
-        for season in (year + 1, year, year - 1):  # newest season that has leaders yet
+        seasons = [year + 1, year, year - 1]  # the newest season that has leaders yet
+        if (known := self._leader_season.get(league_key)) in seasons:  # the season that worked for this league
+            seasons.remove(known)
+            seasons.insert(0, known)
+        for season in seasons:
             for kind in LEADER_TYPES:
                 url = LEADERS_URL.format(sport=sport_path, league=league_slug, season=season, type=kind, team=team_id)
                 try:
-                    found = await self.cached(url, CACHE_SECONDS, lambda url=url: self._leader_ids(url, picks))
+                    found = await self.cached(f"{url}#{picks}", CACHE_SECONDS,
+                                              lambda url=url: self._leader_ids(url, picks))
                 except Exception:
                     continue
                 ids += [aid for aid in found if aid not in ids]
                 if ids:
                     break
             if ids:
+                self._leader_season[league_key] = season
                 break
         roster = await self._roster(league.path, team_id)
         players = [(aid, *roster[aid]) for aid in ids if aid in roster]
@@ -410,7 +493,7 @@ class PropsClient:
             players = [p for p in players if p[2] not in ("SP", "RP", "P")]  # batters only
         if league.sport == "soccer":
             players = [p for p in players if p[2] not in ("G", "GK")]  # no goalkeepers
-        return players[:MAX_PLAYERS[league.sport]]
+        return players[:limit]
 
     async def _leader_ids(self, url: str, picks) -> list[str]:
         data = await self._json(url)
@@ -445,17 +528,49 @@ class PropsClient:
         return await self.cached(url, CACHE_SECONDS, lambda: self._both_seasons(url, path))
 
     async def _both_seasons(self, url: str, path: str) -> tuple[list[PlayerGame], bool]:
-        latest = await self._json(url)
-        games, pitcher = parse_gamelog(latest)
-        seasons = seasons_from(latest)
-        if len(seasons) > 1:
-            try:
-                older, _ = parse_gamelog(await self._json(url, {"season": seasons[1]}))
-                games += [g for g in older if g.season not in {x.season for x in games}]
-            except Exception:
-                pass
+        # A game log is ~1 MB of JSON. Only a few players are fetched at once, and each log is cut down to the
+        # stats used straight away, so a parlay over a week of games doesn't hold a hundred of them in memory.
+        async with self._players:
+            games, pitcher, seasons = await self._season(url)
+            if len(seasons) > 1:
+                try:
+                    older, _, _ = await self._season(url, {"season": seasons[1]})
+                    games += [g for g in older if g.season not in {x.season for x in games}]
+                except Exception:
+                    pass
         games.sort(key=lambda g: g.when, reverse=True)
-        return _slim((games, pitcher), url)
+        return games, pitcher
+
+    async def _season(self, url: str, params: dict | None = None):
+        data = await self._json(url, params)
+        games, pitcher = _slim(parse_gamelog(data), url)
+        return games, pitcher, seasons_from(data)
+
+    async def longshot_trends(self, game: Game, shot: Longshot, injured: set[str] = frozenset(),
+                              band: tuple[float, float] | None = None) -> list[Trend]:
+        """Each player in the round robin's pool, at the highest line inside its price range."""
+        low, high = band or (shot.low, shot.high)
+        league = game.league
+
+        async def one(team, opponent, aid, name):
+            if name in injured:
+                return []
+            try:
+                games, _ = await self.player_games(league.path, aid)
+            except Exception:
+                return []
+            return best_trends(name, aid, team.abbrev, opponent.abbrev, games, league.sport, props=[shot.prop],
+                               bar=low * 0.8, ceiling=high * 1.2, min_l10=LONGSHOT_MIN_L10)
+
+        jobs = []
+        for team, opponent in ((game.home, game.away), (game.away, game.home)):
+            try:
+                players = await self.key_players(game.league_key, team.id, shot.picks, shot.limit)
+            except Exception:
+                players = []
+            jobs += [one(team, opponent, aid, name) for aid, name, _ in players]
+        found = [t for result in await asyncio.gather(*jobs) for t in result]
+        return sorted(found, key=lambda t: t.probability, reverse=True)
 
     async def game_trends(self, game: Game, injured: set[str] = frozenset(), bigger: bool = False,
                           scorers: bool = False) -> list[Trend]:
@@ -527,12 +642,13 @@ class Leg:
     league: str = ""
     path: str = ""  # ESPN path for this game, e.g. "football/nfl" or "cricket/24289"
     player: str = ""  # the player's name, for matching match commentary
+    team: str = ""  # the player's team (abbreviation)
 
 
 def trend_legs(game: Game, trends: list[Trend]) -> list[Leg]:
     label = f"{game.away.name} @ {game.home.name}"
     return [Leg(t.pick, t.probability, t.evidence, label, game.id, t.player_id, "prop", t.prop.stat, t.line,
-                None, game.league_key, game.path, t.player) for t in trends]
+                None, game.league_key, game.path, t.player, t.team) for t in trends]
 
 
 def moneyline_leg(game: Game, chances: dict[str, float] | None, odds, underdog: bool = False) -> Leg | None:
@@ -600,8 +716,15 @@ def build_to_target(legs: list[Leg], target: Target, per_game: int = MAX_LEGS_PE
     pool = sorted(legs, key=lambda l: (l.probability > target.leg_max, -l.probability))
     p = 1.0
 
+    team_bets: set[tuple] = set()  # (game, team, goal/assist): one goalscorer and one assister per team at most
+
+    def team_bet(leg):
+        kind = SCORER_KIND.get(leg.stat or "")
+        return (leg.game_id, leg.team, kind) if kind and leg.team else None
+
     def allowed(leg):
-        return counts.get(leg.game_id, 0) < per_game and not (leg.player_id and leg.player_id in players)
+        return (counts.get(leg.game_id, 0) < per_game and not (leg.player_id and leg.player_id in players)
+                and team_bet(leg) not in team_bets)
 
     def fewest_of_its_kind(found):
         if not balance or not found:
@@ -622,6 +745,8 @@ def build_to_target(legs: list[Leg], target: Target, per_game: int = MAX_LEGS_PE
         counts[leg.game_id] = counts.get(leg.game_id, 0) + 1
         if leg.player_id:
             players.add(leg.player_id)
+        if bet := team_bet(leg):
+            team_bets.add(bet)
         p *= leg.probability
     return chosen
 
@@ -723,5 +848,39 @@ def parlay_embed(league_name: str, emoji: str, legs: list[Leg], target: Target,
                         inline=False)
     embed.set_footer(text=("" if same_game else f"At most {MAX_LEGS_PER_GAME} legs per game unless you pick a team or game. ")
                      + NOTE)
+    slip = "```\n" + "\n".join(leg.pick for leg in legs) + "\n```"
+    return embed, slip
+
+
+@fitted
+def round_robin_embed(league_name: str, emoji: str, legs: list[Leg], shot: Longshot,
+                      same_game: bool = False) -> tuple[discord.Embed, str]:
+    """The picks with their fair prices, every 2-leg combination, and the chances it pays."""
+    from itertools import combinations
+    embed = discord.Embed(title=f"🔁 {emoji} {league_name} · {shot.name}: {len(legs)} picks", color=discord.Color.purple())
+    embed.description = "\n".join(
+        f"**{i}. {leg.pick}** ({leg.game})\n  ~{leg.probability:.0%} · fair {american(leg.probability)} · {leg.evidence}"
+        for i, leg in enumerate(legs, 1))
+    pairs = list(combinations(range(len(legs)), 2))
+    embed.add_field(name=f"Round robin (2's): {len(pairs)} bets",
+                    value="\n".join(f"{a + 1} + {b + 1} → about {american(legs[a].probability * legs[b].probability)}"
+                                     for a, b in pairs), inline=False)
+    probs = [leg.probability for leg in legs]
+    embed.add_field(
+        name="Chances (estimate)",
+        value=f"At least one pair cashes (2+ hit): **{chance_at_least(probs, 2):.0%}**\n"
+              f"All {len(legs)} hit (a {len(legs)}-leg parlay, about {american(combined(legs))}): **{combined(legs):.1%}**",
+        inline=False)
+    embed.add_field(
+        name="Where the value is",
+        value="Each pick's **fair** price comes from its record. Back it only if your book pays more (e.g. fair +400, "
+              "book +600): that's the edge. Books price these trends in too, so check before betting.",
+        inline=False)
+    if shot.prop.stat == "goalAssists":
+        embed.add_field(name="Assists, FanDuel rules", value="Winning a penalty or free kick that's scored, a saved or "
+                        "blocked shot turned in, or forcing an own goal counts as an assist too.", inline=False)
+    if same_game:
+        embed.add_field(name="Same game", value="Legs in one game move together.", inline=False)
+    embed.set_footer(text="One pick per player; for assists, one per team. " + NOTE)
     slip = "```\n" + "\n".join(leg.pick for leg in legs) + "\n```"
     return embed, slip
