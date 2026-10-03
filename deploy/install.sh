@@ -3,8 +3,8 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/steelballsdragon/Super/main/deploy/install.sh | sudo bash
 #
-# It also sets up an hourly timer that pulls new code from GitHub and restarts
-# the bot when anything changed. Running this script again does the same update
+# It also sets up a timer that checks GitHub every 5 minutes and restarts the
+# bot when anything changed (or use /update in Discord to check right away). Running this script again does the same update
 # right away; the saved token and followed leagues are kept.
 #
 # To install without any prompts (e.g. from a cloud server's startup script),
@@ -90,33 +90,10 @@ RestartSec=10
 WantedBy=multi-user.target
 UNIT
 
-cat > "/etc/systemd/system/$SERVICE-update.service" <<UNIT
-[Unit]
-Description=Update ScoreBot to the latest code
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/bin/bash $APP_DIR/deploy/update.sh
-UNIT
-
-cat > "/etc/systemd/system/$SERVICE-update.timer" <<UNIT
-[Unit]
-Description=Check for ScoreBot updates every hour
-
-[Timer]
-OnBootSec=5min
-OnUnitActiveSec=1h
-RandomizedDelaySec=5min
-
-[Install]
-WantedBy=timers.target
-UNIT
+bash "$APP_DIR/deploy/system-setup.sh"
 
 systemctl daemon-reload
 systemctl enable -q "$SERVICE"
-systemctl enable -q --now "$SERVICE-update.timer"
 systemctl restart "$SERVICE"
 
 sleep 5
@@ -132,5 +109,5 @@ Useful commands:
   sudo journalctl -u scorebot -f          # live log (Ctrl+C to exit)
   sudo systemctl restart scorebot         # restart
   sudo nano /etc/scorebot.env             # change the token, then restart
-  (updates install automatically every hour; re-run the install command to update now)
+  (updates install automatically within 5 minutes, or right away with /update in Discord)
 HELP

@@ -119,3 +119,31 @@ def test_follow_rejects_ball_by_ball_outside_cricket():
     league = SimpleNamespace(value="nfl", name="NFL")
     asyncio.run(bot.tree.get_command("follow").callback(inter, league, None, True))
     assert replies == ["Ball-by-ball is only available for cricket."] and bot.store.for_channel(1) == []
+
+
+def test_update_command(monkeypatch):
+    import sportsbot.bot as botmod
+    bot = make_bot()
+    replies = []
+
+    async def send_message(msg, ephemeral=False):
+        replies.append(msg)
+    inter = SimpleNamespace(response=SimpleNamespace(send_message=send_message))
+
+    async def works():
+        return True, ""
+
+    async def refused():
+        return False, "sudo: a password is required"
+    monkeypatch.setattr(botmod, "trigger_update", works)
+    asyncio.run(bot.tree.get_command("update").callback(inter))
+    monkeypatch.setattr(botmod, "trigger_update", refused)
+    asyncio.run(bot.tree.get_command("update").callback(inter))
+    assert replies[0].startswith("🔄 Checking GitHub now")
+    assert replies[1].startswith("I can't start an update from here yet") and "password is required" in replies[1]
+
+
+def test_trigger_update_reports_failure_without_sudo_rule():
+    from sportsbot.bot import trigger_update
+    ok, detail = asyncio.run(trigger_update())  # this test machine has no such rule
+    assert ok is False and detail

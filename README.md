@@ -9,6 +9,7 @@ A Discord bot that posts live **NFL, NBA, MLB, NHL, soccer and cricket** updates
 - `/unfollow <league> [team]`: stops those updates.
 - `/following`: lists what this channel follows.
 - `/status`: shows when the bot last checked each followed league, how many games are live, and any errors.
+- `/update`: (admins) checks GitHub for a new version right away, instead of waiting up to 5 minutes.
 - `/scoreboard`: posts a live scoreboard in this channel and pins it. It keeps editing itself with every game the
   channel follows (live first, then upcoming, then recent results). `/scoreboard enabled:False` removes it.
 - `/schedule`: today's games for everything this channel follows.
@@ -92,7 +93,8 @@ curl -fsSL https://raw.githubusercontent.com/steelballsdragon/Super/main/deploy/
 ```
 
 It asks for your bot token once and stores it in `/etc/scorebot.env`, readable only by root.
-The server checks GitHub every hour and installs new code automatically. Run the same command again to update right away.
+The server checks GitHub every 5 minutes and installs new code automatically. To update right away, run `/update` in
+Discord (server admins only) or run the install command again.
 View the logs with `sudo journalctl -u scorebot -f`.
 
 **No terminal? (e.g. setting up from a phone)** When creating the server, paste this as its startup script
