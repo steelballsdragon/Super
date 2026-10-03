@@ -50,6 +50,7 @@ class Goal:
     scorer: str
     penalty: bool = False
     own_goal: bool = False
+    assist: str | None = None  # filled in from the match details when ESPN has it
 
     def describe(self) -> str:
         tag = " (pen)" if self.penalty else " (OG)" if self.own_goal else ""
@@ -58,15 +59,15 @@ class Goal:
 
 @dataclass(frozen=True)
 class ScoringPlay:
-    """An NFL or MLB scoring play, e.g. a touchdown with its yardage and kick."""
+    """An NFL, MLB or NHL scoring play, e.g. a touchdown with its yardage and kick."""
 
     id: str
     kind: str  # e.g. "Passing Touchdown", "Field Goal Good"; empty for MLB
-    category: str  # e.g. "Touchdown", "Field Goal", "Home Run", "Run Scored"
+    category: str  # e.g. "Touchdown", "Field Goal", "Home Run", "Power-Play Goal"
     text: str  # e.g. "Roman Wilson 12 Yd pass from Aaron Rodgers (Chris Boswell Kick)"
     team_id: str
     team_abbrev: str
-    when: str  # e.g. "Q1 2:59" or "Bottom 1st"
+    when: str  # e.g. "Q1 2:59", "Bottom 1st" or "2nd 16:58"
     away_score: int
     home_score: int
 
@@ -138,9 +139,14 @@ def _float(value) -> float:
         return 0.0
 
 
-def period_label(n: int) -> str:
-    """Football/basketball period name: Q1-Q4, then OT, 2OT..."""
-    return f"Q{n}" if n <= 4 else "OT" if n == 5 else f"{n - 4}OT"
+def period_label(n: int, sport: str = "football") -> str:
+    """Period name: Q1-Q4 then OT, 2OT... (hockey: 1st-3rd then OT, 2OT...)."""
+    regulation = 3 if sport == "hockey" else 4
+    if n > regulation:
+        return "OT" if n == regulation + 1 else f"{n - regulation}OT"
+    if sport == "hockey":
+        return {1: "1st", 2: "2nd", 3: "3rd"}.get(n, str(n))
+    return f"Q{n}"
 
 
 def _parse_team(competitor: dict, sport: str) -> Team:
@@ -186,9 +192,10 @@ def _parse_goals(details: list[dict]) -> tuple[Goal, ...]:
 
 # NFL lists game-wide leaders per stat category.
 LEADER_CATEGORIES = {"passingYards": "PASS", "rushingYards": "RUSH", "receivingYards": "REC"}
-# NBA and MLB list leaders per team; their overall "rating" leader has the
-# fullest stat line (e.g. "36 PTS, 7 AST, 3 STL").
-TEAM_RATING_CATEGORIES = ("rating", "MLBRating")
+# NBA, MLB and NHL list leaders per team. NBA's and MLB's overall "rating"
+# leader has the fullest stat line (e.g. "36 PTS, 7 AST, 3 STL"); NHL only has
+# a bare number for its points leader, so it's labelled.
+TEAM_RATING_CATEGORIES = ("rating", "MLBRating", "points")
 
 
 def _list(value) -> list[dict]:
@@ -215,16 +222,21 @@ def _parse_leaders(comp: dict, competitors: list[dict]) -> tuple[Leader, ...]:
         return tuple(leaders)
     for c in competitors:
         cats = {cat.get("name"): cat for cat in _list(c.get("leaders"))}
-        cat = next((cats[n] for n in TEAM_RATING_CATEGORIES if n in cats), None)
-        top = _top(cat) if cat else None
+        name = next((n for n in TEAM_RATING_CATEGORIES if n in cats), None)
+        top = _top(cats[name]) if name else None
         if top:
-            leaders.append(Leader((c.get("team") or {}).get("abbreviation", "?"), *top))
+            athlete, stats = top
+            if name == "points":
+                stats = f"{stats} PTS"
+            leaders.append(Leader((c.get("team") or {}).get("abbreviation", "?"), athlete, stats))
     return tuple(leaders)
 
 
 def parse_scoring_plays(summary: dict, sport: str = "football") -> list[ScoringPlay]:
     if sport == "baseball":
         return _parse_baseball_plays(summary)
+    if sport == "hockey":
+        return _parse_hockey_plays(summary)
     plays = []
     for p in summary.get("scoringPlays") or []:
         team = p.get("team") or {}
@@ -273,6 +285,68 @@ def _parse_baseball_plays(summary: dict) -> list[ScoringPlay]:
             )
         )
     return plays
+
+
+def _parse_hockey_plays(summary: dict) -> list[ScoringPlay]:
+    plays = []
+    for p in summary.get("plays") or []:
+        if not p.get("scoringPlay"):
+            continue
+        strength = p.get("strength") or {}
+        strength = f"{strength.get('abbreviation', '')} {strength.get('text', '')}".lower()
+        text = (p.get("text") or "").strip()
+        if "empty net" in text.lower():
+            category = "Empty-Net Goal"
+        elif "power" in strength:
+            category = "Power-Play Goal"
+        elif "short" in strength:
+            category = "Shorthanded Goal"
+        else:
+            category = "Goal"
+        period = (p.get("period") or {}).get("displayValue", "")
+        clock = (p.get("clock") or {}).get("displayValue", "")
+        plays.append(
+            ScoringPlay(
+                id=str(p.get("id", "")),
+                kind="",
+                category=category,
+                text=text,
+                team_id=str((p.get("team") or {}).get("id", "")),
+                team_abbrev="",
+                when=f"{period} {clock}".strip(),
+                away_score=_int(p.get("awayScore")),
+                home_score=_int(p.get("homeScore")),
+            )
+        )
+    return plays
+
+
+@dataclass(frozen=True)
+class GoalDetail:
+    """A goal as described in a soccer match's details, which name the assister."""
+
+    minute: str
+    scorer: str
+    assist: str | None
+
+
+def parse_goal_details(summary: dict) -> list[GoalDetail]:
+    details = []
+    for k in summary.get("keyEvents") or []:
+        if not k.get("scoringPlay"):
+            continue
+        names = [(p.get("athlete") or {}).get("displayName", "") for p in _list(k.get("participants"))]
+        if not names:
+            continue
+        own_goal = "own goal" in ((k.get("type") or {}).get("text") or "").lower()
+        details.append(
+            GoalDetail(
+                minute=(k.get("clock") or {}).get("displayValue", ""),
+                scorer=names[0],
+                assist=names[1] if len(names) > 1 and not own_goal else None,
+            )
+        )
+    return details
 
 
 def _parse_event(event: dict, league: League) -> Game | None:
@@ -361,6 +435,10 @@ class ESPNClient:
     async def scoring_plays(self, league: League, event_id: str) -> list[ScoringPlay]:
         data = await self._get_json(SUMMARY_URL.format(path=league.path), {"event": event_id})
         return parse_scoring_plays(data, league.sport)
+
+    async def goal_details(self, league: League, event_id: str) -> list[GoalDetail]:
+        data = await self._get_json(SUMMARY_URL.format(path=league.path), {"event": event_id})
+        return parse_goal_details(data)
 
     async def close(self) -> None:
         if self._owns_session and self._session and not self._session.closed:

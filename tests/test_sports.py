@@ -142,3 +142,72 @@ def test_link_shaped_leaders_and_bad_events_are_tolerated():
     bad = {"id": "broken", "competitions": [{"competitors": "not a list"}]}
     games = parse_scoreboard({"events": [bad, ok]}, IPL)
     assert [g.id for g in games] == ["1552779"]
+
+
+NHL = LEAGUES["nhl"]
+
+
+def nhl_game(state="in", name="STATUS_IN_PROGRESS", away=0, home=0, period=1, leaders=False):
+    def team(side, tid, abbrev, display, score, star, pts):
+        c = {"homeAway": side, "score": str(score), "team": {"id": tid, "abbreviation": abbrev, "displayName": display}}
+        if leaders:
+            c["leaders"] = [{"name": "goals", "leaders": [{"displayValue": "2", "athlete": {"shortName": star}}]},
+                            {"name": "points", "leaders": [{"displayValue": pts, "athlete": {"shortName": star}}]}]
+        return c
+    comp = {"status": {"period": period, "type": {"state": state, "name": name, "shortDetail": "1st 10:00"}},
+            "competitors": [team("home", "7", "CAR", "Carolina Hurricanes", home, "S. Aho", "1"),
+                            team("away", "23", "WSH", "Washington Capitals", away, "A. Tuch", "2")]}
+    return parse_scoreboard({"events": [{"id": "401892432", "date": "", "competitions": [comp]}]}, NHL)
+
+
+def nhl_play(pid, away, home, text, strength="even-strength", period="1st", clock="6:33", team="23"):
+    return {"id": pid, "scoringPlay": True, "text": text, "awayScore": away, "homeScore": home, "scoreValue": 1,
+            "period": {"displayValue": period}, "clock": {"displayValue": clock}, "team": {"id": team},
+            "strength": {"abbreviation": strength, "text": strength.replace("-", " ").title()}}
+
+
+def test_nhl_goals_periods_and_final():
+    feed_plays = []
+
+    async def feed(_):
+        return parse_scoring_plays({"plays": feed_plays}, "hockey")
+
+    t, r = Tracker(), PlayResolver(feed)
+    step = lambda games: asyncio.run(r.resolve(games, t.update("nhl", games)))
+    step(nhl_game("pre", "STATUS_SCHEDULED"))
+    [u] = step(nhl_game())
+    assert update_embed(u).title == "🏒 Puck drop"
+
+    feed_plays.append(nhl_play("g1", 1, 0, "Alex Tuch Goal (1) Wrist Shot, assists: Pierre-Luc Dubois (1), Alex Ovechkin (1)"))
+    [u] = step(nhl_game(away=1))
+    e = update_embed(u)
+    assert e.title == "🏒 GOAL — WSH"
+    assert "Washington Capitals 1 - 0 Carolina Hurricanes" in e.description
+    assert "Alex Tuch Goal (1) Wrist Shot\n🅰️ Assists: Pierre-Luc Dubois (1), Alex Ovechkin (1)" in e.description
+    assert e.footer.text == "NHL · 1st 6:33"
+
+    [u] = step(nhl_game(name="STATUS_END_PERIOD", away=1))
+    assert update_embed(u).title == "🏒 End of 1st"
+    assert step(nhl_game(name="STATUS_INTERMISSION", away=1)) == []  # not posted twice
+
+    feed_plays.append(nhl_play("g2", 1, 1, "Sebastian Aho Goal (1) Snap Shot, assists: Andrei Svechnikov (1)",
+                               "power-play", "2nd", "16:50", "7"))
+    [u] = step(nhl_game(away=1, home=1, period=2))
+    assert update_embed(u).title == "🏒 POWER-PLAY GOAL — CAR"
+
+    feed_plays.append(nhl_play("g3", 1, 2, "Seth Jarvis Goal (4) Wrist Shot, Empty Net", "short-handed", "3rd", "19:02", "7"))
+    [u] = step(nhl_game(away=1, home=2, period=3))
+    assert update_embed(u).title == "🏒 EMPTY-NET GOAL — CAR"
+
+    [u] = step(nhl_game("post", "STATUS_FINAL", away=1, home=2, period=3, leaders=True))
+    e = update_embed(u)
+    assert e.title == "🏒 Final" and "Carolina Hurricanes win" in e.description
+    assert "**WSH** A. Tuch — 2 PTS" in e.fields[0].value
+
+
+def test_hockey_overtime_and_shorthanded_labels():
+    from sportsbot.espn import period_label
+    assert [period_label(n, "hockey") for n in (1, 3, 4, 5)] == ["1st", "3rd", "OT", "2OT"]
+    assert [period_label(n) for n in (4, 5)] == ["Q4", "OT"]
+    [p] = parse_scoring_plays({"plays": [nhl_play("x", 0, 1, "Goal", "short-handed")]}, "hockey")
+    assert p.category == "Shorthanded Goal"

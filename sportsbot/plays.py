@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from .espn import Game, ScoringPlay
+from .espn import Game, Goal, GoalDetail, ScoringPlay
 from .tracker import SCORE, Update
 
 log = logging.getLogger(__name__)
@@ -85,3 +85,69 @@ class PlayResolver:
             del self._pending[game.id]
             return [Update(SCORE, game)]
         return []
+
+
+FetchGoalDetails = Callable[[str], Awaitable[list[GoalDetail]]]
+
+# Polls to wait for a soccer goal's assist before posting the goal without it
+# (at the default 30s interval, about a minute).
+ASSIST_ATTEMPTS = 2
+
+
+@dataclass
+class _PendingGoals:
+    update: Update
+    attempts: int = 0
+
+
+class AssistResolver:
+    """Adds the assister to soccer goal updates.
+
+    The scoreboard only names the scorer, so each new goal is looked up in the
+    match details. Goals wait briefly for ESPN to publish those details, then
+    post without the assist rather than being held back.
+    """
+
+    def __init__(self, fetch: FetchGoalDetails) -> None:
+        self._fetch = fetch
+        self._pending: dict[str, _PendingGoals] = {}
+
+    async def resolve(self, games: list[Game], updates: list[Update]) -> list[Update]:
+        others: list[Update] = []
+        for u in updates:
+            if u.kind == SCORE and u.new_goals:
+                waiting = self._pending.get(u.game.id)
+                goals = (waiting.update.new_goals if waiting else ()) + u.new_goals
+                self._pending[u.game.id] = _PendingGoals(replace(u, new_goals=goals))
+            else:
+                others.append(u)
+
+        live = {g.id for g in games}
+        due = {u.game.id for u in others}  # e.g. the final whistle must come after the goal
+        ready: list[Update] = []
+        for game_id in list(self._pending):
+            pending = self._pending[game_id]
+            goals = await self._with_assists(game_id, pending.update.new_goals)
+            pending.attempts += 1
+            if (
+                all(g.assist is not None for g in goals)
+                or pending.attempts >= ASSIST_ATTEMPTS
+                or game_id in due
+                or game_id not in live
+            ):
+                del self._pending[game_id]
+                ready.append(replace(pending.update, new_goals=goals))
+        return ready + others
+
+    async def _with_assists(self, game_id: str, goals: tuple[Goal, ...]) -> tuple[Goal, ...]:
+        try:
+            details = await self._fetch(game_id)
+        except Exception:
+            log.exception("Failed to fetch goal details for game %s", game_id)
+            return goals
+        found = {(d.minute, d.scorer): d for d in details}
+        # assist "" means the goal was found and was unassisted; None means not found yet.
+        return tuple(
+            replace(g, assist=found[(g.minute, g.scorer)].assist or "") if (g.minute, g.scorer) in found else g
+            for g in goals
+        )

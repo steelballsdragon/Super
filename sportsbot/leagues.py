@@ -7,7 +7,7 @@ from dataclasses import dataclass
 class League:
     key: str
     name: str
-    sport: str  # "football", "soccer", "basketball", "baseball" or "cricket"
+    sport: str  # "football", "soccer", "basketball", "baseball", "hockey" or "cricket"
     path: str  # ESPN path segment: /apis/site/v2/sports/{path}/scoreboard
     emoji: str
     # "scoreboard" for a single league; "scorepanel" for ESPN's feed of every
@@ -21,6 +21,7 @@ LEAGUES: dict[str, League] = {
         League("nfl", "NFL", "football", "football/nfl", "🏈"),
         League("nba", "NBA", "basketball", "basketball/nba", "🏀"),
         League("mlb", "MLB", "baseball", "baseball/mlb", "⚾"),
+        League("nhl", "NHL", "hockey", "hockey/nhl", "🏒"),
         League("epl", "Premier League", "soccer", "soccer/eng.1", "⚽"),
         League("laliga", "La Liga", "soccer", "soccer/esp.1", "⚽"),
         League("seriea", "Serie A", "soccer", "soccer/ita.1", "⚽"),

@@ -13,13 +13,13 @@ from discord.ext import tasks
 from .espn import ESPNClient
 from .formatting import scoreboard_embed, update_embed
 from .leagues import LEAGUES
-from .plays import PlayResolver
+from .plays import AssistResolver, PlayResolver
 from .storage import SubscriptionStore
 from .tracker import Tracker
 
 log = logging.getLogger("sportsbot")
 
-PLAY_BY_PLAY_SPORTS = ("football", "baseball")
+PLAY_BY_PLAY_SPORTS = ("football", "baseball", "hockey")
 
 LEAGUE_CHOICES = [app_commands.Choice(name=l.name, value=l.key) for l in LEAGUES.values()]
 
@@ -31,17 +31,26 @@ class SportsBot(discord.Client):
         self.store = store
         self.espn = ESPNClient()
         self.tracker = Tracker()
-        # NFL and MLB scores are posted as the actual scoring plays.
+        # NFL, MLB and NHL scores are posted as the actual scoring plays.
         self.play_resolvers = {
             league.key: PlayResolver(self._plays_fetcher(league))
             for league in LEAGUES.values()
             if league.sport in PLAY_BY_PLAY_SPORTS
         }
+        # Soccer goals get their assister from the match details.
+        self.play_resolvers.update(
+            (league.key, AssistResolver(self._goals_fetcher(league)))
+            for league in LEAGUES.values()
+            if league.sport == "soccer"
+        )
         self.dev_guild = dev_guild
         self.poll.change_interval(seconds=poll_interval)
 
     def _plays_fetcher(self, league):
         return lambda event_id: self.espn.scoring_plays(league, event_id)
+
+    def _goals_fetcher(self, league):
+        return lambda event_id: self.espn.goal_details(league, event_id)
 
     async def setup_hook(self) -> None:
         register_commands(self)
