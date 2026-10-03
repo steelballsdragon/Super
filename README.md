@@ -9,6 +9,10 @@ A Discord bot that posts live **NFL, NBA, MLB, NHL, soccer and cricket** updates
 - `/unfollow <league> [team]`: stops those updates.
 - `/following`: lists what this channel follows.
 - `/status`: shows when the bot last checked each followed league, how many games are live, and any errors.
+- `/scoreboard`: posts a live scoreboard in this channel and pins it. It keeps editing itself with every game the
+  channel follows (live first, then upcoming, then recent results). `/scoreboard enabled:False` removes it.
+- `/threads enabled:True`: puts each game's updates in its own thread. The start and result post in the channel;
+  goals, plays, wickets and ball-by-ball go in the game's thread.
 
 The team option suggests teams as you type, e.g. typing `ind` offers *India* and *West Indies*.
 
@@ -51,7 +55,14 @@ match start, innings break and result, but not the separate wicket and every-5/1
 ## Setup
 
 1. Create an application at https://discord.com/developers/applications, add a **Bot**, and copy its token.
-2. Invite the bot. Under **OAuth2 → URL Generator**, select the `bot` and `applications.commands` scopes and the `Send Messages` and `Embed Links` permissions, then open the URL it generates.
+2. Invite the bot. Under **OAuth2 → URL Generator**, select the `bot` and `applications.commands` scopes and these
+   permissions, then open the URL it generates:
+   - `Send Messages`, `Embed Links`: required
+   - `Create Public Threads`, `Send Messages in Threads`: for `/threads`
+   - `Manage Messages`: to pin the `/scoreboard` message
+
+   If the bot is already in your server, add the extra permissions to its role in **Server Settings → Roles**
+   instead. Without them, `/threads` falls back to posting in the channel and the scoreboard just isn't pinned.
 3. Install and run:
 
    ```bash
@@ -107,7 +118,7 @@ attach a volume and set `DATA_FILE` to a path on it (e.g. `/data/subscriptions.j
 |---|---|---|
 | `DISCORD_TOKEN` | (required) | Bot token |
 | `POLL_INTERVAL` | `10` | Seconds between score checks (minimum 5). ESPN refreshes about every 5–8 seconds. |
-| `DATA_FILE` | `subscriptions.json` | Where channel subscriptions are saved |
+| `DATA_FILE` | `subscriptions.json` | Where channel subscriptions are saved. Channel settings (`settings.json`) and bot state (`state.json`) are kept next to it. |
 | `DEV_GUILD_ID` | (none) | Sync slash commands to one server instantly. Global sync can take up to an hour to appear. |
 
 By default, only members with **Manage Channels** can use `/follow` and `/unfollow`. Server admins can change this under Server Settings → Integrations.
