@@ -1,1 +1,1 @@
-worker: python -m sportsbot
+worker: python main.py
