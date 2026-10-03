@@ -22,6 +22,7 @@ from .espn import start_time
 from .formatting import ball_messages, board_embed, reminder_text, schedule_embed, scoreboard_embed, update_embed
 from .leagues import LEAGUES
 from .odds import OddsBook, grade_text, line_text
+from .research import LeanBook, leans, parse_research, picks_embed, record_embed, report_embed
 from .schedule import COMMON_TIMEZONES, games_on, today
 from .plays import AssistResolver, PlayResolver
 from .settings import SettingsStore, StateStore
@@ -91,6 +92,7 @@ class SportsBot(discord.Client):
         self.state = state or StateStore(Path(store.path).with_name("state.json"))
         self.latest: dict[str, list] = {}  # latest games per league, for scoreboards
         self.odds = OddsBook(self.state)
+        self.leans = LeanBook(self.state)
         self._boards_shown: dict[int, dict] = {}
         self.espn = ESPNClient()
         self.tracker = Tracker()
@@ -157,7 +159,8 @@ class SportsBot(discord.Client):
 
     @tasks.loop(seconds=DEFAULT_POLL_SECONDS)
     async def poll(self) -> None:
-        active = self.store.leagues()
+        # Leagues with research leans still to grade are checked even if no channel follows them.
+        active = self.store.leagues() | self.leans.pending_leagues()
         for key in list(LEAGUES):
             if key not in active:
                 self.tracker.forget(key)
@@ -189,6 +192,8 @@ class SportsBot(discord.Client):
         if LEAGUES[key].sport == "cricket":
             await self._post_balls(self.ball_feeds[key], games, [s for s in subs if s.ball_by_ball])
         for update in updates:
+            if update.kind == FINAL:
+                self.leans.settle(update.game)
             channels = {
                 s.channel_id
                 for s in subs
@@ -303,6 +308,16 @@ class SportsBot(discord.Client):
         for key, entry in self.state.items("threads"):
             if entry.get("at", 0) < cutoff:
                 self.state.delete("threads", key)
+
+    # ----- betting research -----
+
+    async def research(self, game):
+        """The research report and leans for a game; pre-game leans are recorded for grading."""
+        summary = await self.espn.summary(game.path or LEAGUES[game.league_key].path, game.id)
+        r = parse_research(summary, game)
+        found = leans(r) if game.state == "pre" else []
+        self.leans.record(game, found)
+        return r, found
 
     # ----- schedule and reminders -----
 
@@ -615,6 +630,74 @@ def register_commands(bot: SportsBot) -> None:
             msg = ("I can't start an update from here yet. The server sets this up on its next automatic check "
                    f"(within the hour on older setups), so try again later.\n`{detail}`")
         await interaction.response.send_message(msg, ephemeral=True)
+
+    research = app_commands.Group(name="research", description="Betting research from ESPN data, with sources")
+
+    def _find_game(games, team):
+        mine = [g for g in games if g.involves(team) and g.state != "post"]
+        return min(mine, key=lambda g: (g.state != "in", g.start), default=None)
+
+    async def _next_game(lg, team):
+        """The team's live or next game: today's scoreboard, then up to a week ahead."""
+        game = _find_game(await bot.espn.scoreboard(lg), team)
+        if game is None and lg.feed == "scoreboard":
+            from datetime import date, timedelta
+            for ahead in range(1, 8):
+                day = (date.today() + timedelta(days=ahead)).strftime("%Y%m%d")
+                if (game := _find_game(await bot.espn.scoreboard(lg, day), team)) is not None:
+                    break
+        return game
+
+    @research.command(name="game", description="Market, ESPN model, form, injuries and any leans for a team's next game")
+    @app_commands.describe(league="League", team="Team (name or abbreviation)")
+    @app_commands.choices(league=[c for c in LEAGUE_CHOICES if LEAGUES[c.value].sport != "cricket"])
+    async def research_game(interaction: discord.Interaction, league: app_commands.Choice[str], team: str):
+        await interaction.response.defer(thinking=True)
+        try:
+            game = await _next_game(LEAGUES[league.value], team)
+            if game is None:
+                await interaction.followup.send(f"No {league.name} game for **{team}** in the next week on ESPN.")
+                return
+            r, found = await bot.research(game)
+        except Exception:
+            log.exception("Research failed for %s %s", league.value, team)
+            await interaction.followup.send("Couldn't load ESPN's data for that game, try again shortly.")
+            return
+        await interaction.followup.send(embed=report_embed(r, found))
+
+    research_game.autocomplete("team")(team_suggestions)
+
+    @research.command(name="picks", description="Today's games ranked by how strongly the data disagrees with the line")
+    @app_commands.describe(league="League")
+    @app_commands.choices(league=[c for c in LEAGUE_CHOICES if LEAGUES[c.value].sport != "cricket"])
+    async def research_picks(interaction: discord.Interaction, league: app_commands.Choice[str]):
+        await interaction.response.defer(thinking=True)
+        lg = LEAGUES[league.value]
+        try:
+            games = [g for g in await bot.espn.scoreboard(lg) if g.state == "pre"]
+        except Exception:
+            await interaction.followup.send("Couldn't reach ESPN, try again shortly.")
+            return
+        limit = asyncio.Semaphore(5)
+
+        async def one(g):
+            async with limit:
+                try:
+                    return await bot.research(g)
+                except Exception:
+                    log.warning("Research failed for %s", g.id, exc_info=True)
+                    return None
+        reports = [x for x in await asyncio.gather(*(one(g) for g in games[:20])) if x]
+        if not reports:
+            await interaction.followup.send(f"No upcoming {lg.name} games with lines on ESPN right now.")
+            return
+        await interaction.followup.send(embed=picks_embed(lg.name, lg.emoji, reports))
+
+    @research.command(name="record", description="How the research leans have done so far")
+    async def research_record(interaction: discord.Interaction):
+        await interaction.response.send_message(embed=record_embed(bot.leans.summary(), bot.leans.pending()))
+
+    tree.add_command(research)
 
     @tree.command(name="status", description="Show whether the bot is checking scores and when it last succeeded")
     async def status(interaction: discord.Interaction):
