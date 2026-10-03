@@ -22,7 +22,8 @@ from .espn import start_time
 from .formatting import ball_messages, board_embed, reminder_text, schedule_embed, scoreboard_embed, update_embed
 from .leagues import LEAGUES
 from .odds import OddsBook, grade_text, line_text
-from .research import LeanBook, leans, parse_research, picks_embed, record_embed, report_embed
+from .props import PropsClient, build_parlay, injured_names, moneyline_leg, parlay_embed, trend_legs, trends_embed
+from .research import LeanBook, leans, market_chances, parse_research, picks_embed, record_embed, report_embed
 from .schedule import COMMON_TIMEZONES, games_on, today
 from .plays import AssistResolver, PlayResolver
 from .settings import SettingsStore, StateStore
@@ -95,6 +96,7 @@ class SportsBot(discord.Client):
         self.leans = LeanBook(self.state)
         self._boards_shown: dict[int, dict] = {}
         self.espn = ESPNClient()
+        self.props = PropsClient(self.espn)
         self.tracker = Tracker()
         # NFL, MLB and NHL scores are posted as the actual scoring plays.
         self.play_resolvers = {
@@ -310,6 +312,13 @@ class SportsBot(discord.Client):
                 self.state.delete("threads", key)
 
     # ----- betting research -----
+
+    async def game_props(self, game, bigger: bool = False):
+        """Player trends and a moneyline leg for one game."""
+        summary = await self.espn.summary(game.path or LEAGUES[game.league_key].path, game.id)
+        r = parse_research(summary, game)
+        trends = await self.props.game_trends(game, injured_names(summary), bigger)
+        return trends, moneyline_leg(game, market_chances(r), r.odds)
 
     async def research(self, game):
         """The research report and leans for a game; pre-game leans are recorded for grading."""
@@ -692,6 +701,63 @@ def register_commands(bot: SportsBot) -> None:
             await interaction.followup.send(f"No upcoming {lg.name} games with lines on ESPN right now.")
             return
         await interaction.followup.send(embed=picks_embed(lg.name, lg.emoji, reports))
+
+    PROP_LEAGUES = [c for c in LEAGUE_CHOICES if LEAGUES[c.value].sport in ("football", "basketball", "hockey", "baseball")]
+
+    @research.command(name="trends", description="Linemate-style hit rates: each key player's most likely lines for a team's next game")
+    @app_commands.describe(league="League", team="Team (name or abbreviation)")
+    @app_commands.choices(league=PROP_LEAGUES)
+    async def research_trends(interaction: discord.Interaction, league: app_commands.Choice[str], team: str):
+        await interaction.response.defer(thinking=True)
+        try:
+            game = await _next_game(LEAGUES[league.value], team)
+            if game is None:
+                await interaction.followup.send(f"No {league.name} game for **{team}** in the next week on ESPN.")
+                return
+            trends, ml = await bot.game_props(game)
+        except Exception:
+            log.exception("Trends failed for %s %s", league.value, team)
+            await interaction.followup.send("Couldn't load ESPN's data for that game, try again shortly.")
+            return
+        await interaction.followup.send(embed=trends_embed(game, trends, ml))
+
+    research_trends.autocomplete("team")(team_suggestions)
+
+    @research.command(name="parlay", description="Build a parlay from the most likely legs in upcoming games")
+    @app_commands.describe(league="League", legs="Number of legs (2-10, default 4)",
+                           style="Safest: most likely legs (small lines, small payout). Bigger payout: higher lines")
+    @app_commands.choices(league=PROP_LEAGUES, style=[app_commands.Choice(name="Safest", value="safest"),
+                                                       app_commands.Choice(name="Bigger payout", value="bigger")])
+    async def research_parlay(interaction: discord.Interaction, league: app_commands.Choice[str],
+                              legs: app_commands.Range[int, 2, 10] = 4,
+                              style: app_commands.Choice[str] | None = None):
+        bigger = style is not None and style.value == "bigger"
+        await interaction.response.defer(thinking=True)
+        lg = LEAGUES[league.value]
+        try:
+            games = [g for g in await bot.espn.scoreboard(lg) if g.state == "pre"][:16]
+        except Exception:
+            await interaction.followup.send("Couldn't reach ESPN, try again shortly.")
+            return
+        if not games:
+            await interaction.followup.send(f"No upcoming {lg.name} games on ESPN's scoreboard right now.")
+            return
+
+        async def one(g):
+            try:
+                trends, ml = await bot.game_props(g, bigger)
+                return trend_legs(g, trends) + ([ml] if ml and not bigger else [])
+            except Exception:
+                log.warning("Parlay research failed for %s", g.id, exc_info=True)
+                return []
+        candidates = [leg for found in await asyncio.gather(*(one(g) for g in games)) for leg in found]
+        chosen = build_parlay(candidates, legs)
+        if not chosen:
+            await interaction.followup.send("Not enough data in the upcoming games to build a parlay yet.")
+            return
+        embed, slip = parlay_embed(lg.name, lg.emoji, chosen, "Bigger payout" if bigger else "Safest")
+        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(f"📋 Copy or screenshot for your odds bot:\n{slip}")
 
     @research.command(name="record", description="How the research leans have done so far")
     async def research_record(interaction: discord.Interaction):
