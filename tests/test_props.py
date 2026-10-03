@@ -199,8 +199,8 @@ def test_goalscorer_and_assist_bets():
     # Scored in 4 of the last 10, assisted in 3: long shots, but real ones.
     games = soccer_games([1, 0, 1, 0, 0, 1, 0, 0, 1, 0], [0, 1, 0, 0, 1, 0, 0, 1, 0, 0])
     picks = {t.pick: t for t in best_trends("Erling Haaland", "9", "MNC", "ARS", games, "soccer", scorers=True)}
-    assert set(picks) == {"Erling Haaland Anytime Goal", "Erling Haaland To Assist", "Erling Haaland Goal or Assist"}
-    assert 0.3 < picks["Erling Haaland Anytime Goal"].probability < 0.45
+    assert set(picks) == {"Erling Haaland Anytime Goalscorer", "Erling Haaland To Record an Assist", "Erling Haaland To Score or Assist"}
+    assert 0.3 < picks["Erling Haaland Anytime Goalscorer"].probability < 0.45
     # The regular trends skip these: they never reach the usual 75% bar.
     assert [t.pick for t in best_trends("Erling Haaland", "9", "MNC", "ARS", games, "soccer")] == [
         "Erling Haaland Over 2.5 Shots", "Erling Haaland Over 0.5 Shots on Target"]
@@ -221,4 +221,21 @@ def test_scorer_list_skips_goal_or_assist_that_repeats_the_goal_line():
     from sportsbot.props import scorer_lines
     pure_scorer = soccer_games([1, 0, 1, 0, 0, 1, 0, 0, 1, 0], [0] * 10)
     text = scorer_lines(best_trends("Dominic Calvert-Lewin", "7", "LEE", "ARS", pure_scorer, "soccer", scorers=True))
-    assert "Anytime Goal" in text and "Goal or Assist" not in text
+    assert "Anytime Goalscorer" in text and "To Score or Assist" not in text
+
+
+def test_goal_and_assist_slip_like_fanduel():
+    """Two goalscorers and two assisters across games, like a typical FanDuel goal/assist slip."""
+    def g(name, p, game):
+        return Leg(f"{name} Anytime Goalscorer", p, "", "", game, name, "prop", "totalGoals", 1)
+
+    def a(name, p, game):
+        return Leg(f"{name} To Record an Assist", p, "", "", game, name + "-a", "prop", "goalAssists", 1)
+    legs = [g("Erling Haaland", 0.55, "1"), g("Gonçalo Ramos", 0.45, "2"), g("Alexander Isak", 0.44, "3"),
+            g("Kai Havertz", 0.42, "4"), a("Bruno Fernandes", 0.33, "5"), a("Martin Ødegaard", 0.3, "4"),
+            a("Kevin De Bruyne", 0.28, "6")]
+    chosen = build_to_target(legs, TARGETS["lotto"], balance=True)
+    kinds = [leg.stat for leg in chosen]
+    assert kinds.count("totalGoals") == kinds.count("goalAssists") == 2  # not four goalscorers
+    assert 3000 <= int(american(combined(chosen))) <= 20000
+    assert chosen[1].pick == "Bruno Fernandes To Record an Assist"  # the likeliest assister, right after the top scorer

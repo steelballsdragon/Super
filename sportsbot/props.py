@@ -71,15 +71,16 @@ PROPS = {
     "hockey": [
         Prop("Shots on Goal", "shotsTotal", (2, 3, 4, 5)),  # books rarely offer 0.5
         Prop("Points", "points", (1, 2)),
-        Prop("Goals", "goals", (1,), anytime="Anytime Goal"),
-        Prop("Assists", "assists", (1,)),
+        Prop("Goals", "goals", (1,), anytime="Anytime Goalscorer"),
+        Prop("Assists", "assists", (1,), anytime="To Record an Assist"),
     ],
     "soccer": [
         Prop("Shots", "totalShots", (1, 2, 3, 4)),
         Prop("Shots on Target", "shotsOnTarget", (1, 2)),
-        Prop("Goals", "totalGoals", (1,), anytime="Anytime Goal"),
-        Prop("Assists", "goalAssists", (1,), anytime="To Assist"),
-        Prop("Goal or Assist", "goalOrAssist", (1,), anytime="Goal or Assist"),
+        # Named as FanDuel lists them, so a slip can be matched as-is.
+        Prop("Goals", "totalGoals", (1,), anytime="Anytime Goalscorer"),
+        Prop("Assists", "goalAssists", (1,), anytime="To Record an Assist"),
+        Prop("Goal or Assist", "goalOrAssist", (1,), anytime="To Score or Assist"),
         Prop("Fouls Committed", "foulsCommitted", (1, 2)),
     ],
     "baseball": [
@@ -509,12 +510,14 @@ def american(p: float) -> str:
     return f"+{round(100 * (1 - p) / p)}"
 
 
-def build_to_target(legs: list[Leg], target: Target, per_game: int = MAX_LEGS_PER_GAME) -> list[Leg]:
+def build_to_target(legs: list[Leg], target: Target, per_game: int = MAX_LEGS_PER_GAME,
+                    balance: bool = False) -> list[Leg]:
     """Adds the most likely legs until the parlay's estimated odds land in the target range.
 
     Once a leg can land it in range, the one landing closest to the aim (on a
     log scale, so +2400 is as near to +3500 as +5000 is) finishes the parlay.
-    At most `per_game` legs per game and one leg per player.
+    At most `per_game` legs per game and one leg per player. With balance=True
+    the kinds of bet take turns (goalscorer, assist, goalscorer, ...).
     """
     from math import log
     chosen: list[Leg] = []
@@ -527,8 +530,15 @@ def build_to_target(legs: list[Leg], target: Target, per_game: int = MAX_LEGS_PE
     def allowed(leg):
         return counts.get(leg.game_id, 0) < per_game and not (leg.player_id and leg.player_id in players)
 
+    def fewest_of_its_kind(found):
+        if not balance or not found:
+            return found
+        used = {leg.stat: sum(c.stat == leg.stat for c in chosen) for leg in found}
+        least = min(used.values())
+        return [leg for leg in found if used[leg.stat] == least]
+
     while (p > target.high or len(chosen) < target.min_legs) and len(chosen) < target.max_legs:
-        options = [leg for leg in pool if allowed(leg)]
+        options = fewest_of_its_kind([leg for leg in pool if allowed(leg)])
         if not options:
             break
         last = len(chosen) + 1 >= target.min_legs  # this leg can finish the parlay
