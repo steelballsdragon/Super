@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import subprocess
 import time
@@ -17,6 +18,7 @@ from discord import app_commands
 from discord.ext import tasks
 
 from .balls import BallFeed
+from .bankroll import STYLES, BetBook, PlacedButton, bankroll_embed, money, placed_view, units_for
 from .espn import EASTERN, ESPNClient
 from .espn import start_time
 from .formatting import ball_messages, board_embed, reminder_text, schedule_embed, scoreboard_embed, update_embed
@@ -26,7 +28,7 @@ from .odds import OddsBook, grade_text, line_text
 from .cricket_props import CricketHistory
 from .parlays import ParlayBook, record_field, settle
 from .props import (LONGSHOTS, MAX_LEGS, MAX_LEGS_PER_GAME, TARGETS, PropsClient, apply_matchup, build_to_target,
-                    expected_goals, injured_names, moneyline_leg, parlay_embed, pick_round_robin, round_robin_embed,
+                    chance_at_least, combined, expected_goals, injured_names, moneyline_leg, parlay_embed, pick_round_robin, round_robin_embed,
                     scorer_lines, trend_legs, trends_embed)
 from .research import LeanBook, leans, market_chances, parse_research, picks_embed, record_embed, report_embed
 from .schedule import COMMON_TIMEZONES, games_on, today
@@ -128,6 +130,7 @@ class SportsBot(discord.Client):
         # Recorded cricket scorecards get their own file: they're big, and state.json is rewritten often.
         self.cricket = CricketHistory(self.props, StateStore(self.state.path.with_name("cricket.json")))
         self.parlays = ParlayBook(self.records)
+        self.bets = BetBook(self.records)
         self._tasks: set[asyncio.Task] = set()
         self._last_prune = time.monotonic()
         self._last_settle = 0.0
@@ -201,6 +204,7 @@ class SportsBot(discord.Client):
     async def setup_hook(self) -> None:
         self._prune_state()
         register_commands(self)
+        self.add_dynamic_items(PlacedButton)  # "I placed it" buttons on slips keep working after restarts
         self.poll.start()
         try:
             if self.dev_guild:
@@ -960,6 +964,10 @@ def register_commands(bot: SportsBot) -> None:
                                 value=text, inline=False)
         await interaction.followup.send(embed=fit_embed(embed))
 
+    def _units_text(chance: float) -> str:
+        units = units_for(chance)
+        return f"{units:g} unit{'s' if units > 1 else ''} (see /bankroll)"
+
     async def _parlay(interaction, lg, target, games, one_game: bool, scorers: bool = False):
         async def one(g):
             try:
@@ -995,10 +1003,12 @@ def register_commands(bot: SportsBot) -> None:
                                             "Try a smaller payout, or another game.")
             return
         embed, slip = parlay_embed(lg.name, lg.emoji, chosen, target, same_game=same_game)
-        bot.parlays.record(interaction.channel_id, lg.key, target.name, chosen)
+        pid = bot.parlays.record(interaction.channel_id, lg.key, target.name, chosen)
         await interaction.followup.send(embed=embed)
         await interaction.followup.send(f"📋 Copy or screenshot for your odds bot:\n{slip}\n"
-                                        "I'll grade every leg after the games and post the result here.")
+                                        f"💵 Stake: {_units_text(combined(chosen))}. Tap **I placed it** to log your "
+                                        "stake and price.\nI'll grade every leg after the games and post the result here.",
+                                        view=placed_view(pid))
 
     async def _overview(interaction, lg):
         """The league's strongest leans, a safe parlay, and how the research has done."""
@@ -1043,11 +1053,15 @@ def register_commands(bot: SportsBot) -> None:
                                             "yet. Try again closer to game day, or another league.")
             return
         embed, slip = round_robin_embed(lg.name, lg.emoji, chosen, shot, same_game=same_game)
-        bot.parlays.record(interaction.channel_id, lg.key, shot.name, chosen, round_robin=2)
+        pid = bot.parlays.record(interaction.channel_id, lg.key, shot.name, chosen, round_robin=2)
         await interaction.followup.send(embed=embed)
+        pairs = math.comb(len(chosen), 2)
         await interaction.followup.send(f"📋 Copy or screenshot for your odds bot:\n{slip}\n"
-                                        "Bet them as a round robin of 2's. I'll grade every pick after the games "
-                                        "and post how many pairs cashed.")
+                                        f"Bet them as a round robin of 2's. 💵 Stake: "
+                                        f"{_units_text(chance_at_least([leg.probability for leg in chosen], 2))} in total, "
+                                        f"split across the {pairs} bets. Tap **I placed it** to log your stake and "
+                                        "each pick's price.\nI'll grade every pick after the games and post how many "
+                                        "pairs cashed.", view=placed_view(pid))
 
     @tree.command(name="research", description="Betting research: a league's best picks, a team's game, or a parlay")
     @app_commands.describe(
@@ -1145,6 +1159,36 @@ def register_commands(bot: SportsBot) -> None:
             if not q or q in label.lower():
                 out.append(app_commands.Choice(name=label, value=g.id))
         return out[:25]
+
+    @tree.command(name="bankroll", description="Your bankroll, what to stake, and how your logged bets have done")
+    @app_commands.describe(
+        start="Start your bankroll at this amount: the money set aside for betting (starts the tracking over)",
+        add="Add money to your bankroll (a negative amount takes some out)",
+        style="How big a unit is: Careful 1%, Standard 2% or Aggressive 3% of your balance",
+    )
+    @app_commands.choices(style=[app_commands.Choice(name=f"{name} ({share:.0%} per unit)", value=key)
+                                 for key, (name, share) in STYLES.items()])
+    async def bankroll(interaction: discord.Interaction,
+                       start: app_commands.Range[float, 1, 10_000_000] | None = None,
+                       add: app_commands.Range[float, -10_000_000, 10_000_000] | None = None,
+                       style: app_commands.Choice[str] | None = None):
+        uid, notes = interaction.user.id, []
+        if start is not None:
+            bot.bets.set_bankroll(uid, start, style.value if style else None)
+            notes.append(f"Bankroll set to {money(start)}. Results count from now.")
+        elif style is not None and bot.bets.bankroll(uid) is None:
+            notes.append("Set your bankroll first, with `start:`.")
+        elif style is not None:
+            bot.bets.set_style(uid, style.value)
+        if add is not None:
+            if bot.bets.add_money(uid, add) is None:
+                notes.append("Set your bankroll first, with `start:`.")
+            else:
+                notes.append(f"{'Added' if add >= 0 else 'Took out'} {money(abs(add))}.")
+        if style is not None and bot.bets.bankroll(uid):
+            notes.append(f"Style: {STYLES[style.value][0]}.")
+        embed = bankroll_embed(bot.bets, uid, interaction.user.display_name)
+        await interaction.response.send_message(" ".join(dict.fromkeys(notes)) or None, embed=embed, ephemeral=True)
 
     @tree.command(name="record", description="How the research leans and parlays have done so far")
     async def record(interaction: discord.Interaction):
