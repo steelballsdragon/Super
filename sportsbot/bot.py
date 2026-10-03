@@ -19,6 +19,8 @@ from .tracker import Tracker
 
 log = logging.getLogger("sportsbot")
 
+PLAY_BY_PLAY_SPORTS = ("football", "baseball")
+
 LEAGUE_CHOICES = [app_commands.Choice(name=l.name, value=l.key) for l in LEAGUES.values()]
 
 
@@ -29,10 +31,17 @@ class SportsBot(discord.Client):
         self.store = store
         self.espn = ESPNClient()
         self.tracker = Tracker()
-        nfl = LEAGUES["nfl"]
-        self.nfl_plays = PlayResolver(lambda event_id: self.espn.scoring_plays(nfl, event_id))
+        # NFL and MLB scores are posted as the actual scoring plays.
+        self.play_resolvers = {
+            league.key: PlayResolver(self._plays_fetcher(league))
+            for league in LEAGUES.values()
+            if league.sport in PLAY_BY_PLAY_SPORTS
+        }
         self.dev_guild = dev_guild
         self.poll.change_interval(seconds=poll_interval)
+
+    def _plays_fetcher(self, league):
+        return lambda event_id: self.espn.scoring_plays(league, event_id)
 
     async def setup_hook(self) -> None:
         register_commands(self)
@@ -71,8 +80,9 @@ class SportsBot(discord.Client):
             log.exception("Failed to fetch %s scoreboard", key)
             return
         updates = self.tracker.update(key, games)
-        if key == "nfl":
-            updates = await self.nfl_plays.resolve(games, updates)
+        resolver = self.play_resolvers.get(key)
+        if resolver is not None:
+            updates = await resolver.resolve(games, updates)
         if not updates:
             return
         subs = self.store.for_league(key)

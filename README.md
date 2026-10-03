@@ -1,6 +1,6 @@
 # Live Scores Discord Bot
 
-A Discord bot that posts live **NFL** and **soccer** score updates to your channels, using ESPN's free public scoreboard data (you don't need an API key).
+A Discord bot that posts live **NFL, NBA, MLB, soccer and cricket** updates to your channels, using ESPN's free public data (you don't need an API key).
 
 ## Features
 
@@ -9,15 +9,19 @@ A Discord bot that posts live **NFL** and **soccer** score updates to your chann
 - `/unfollow <league> [team]`: stops those updates.
 - `/following`: lists what this channel follows.
 
-Live updates are posted as embeds for:
-- **Kick-off / game start**
-- **Goals / scores.** Soccer goals include the scorer and minute, and are tagged as a penalty or own goal where that applies.
-  NFL scores show the actual scoring play: touchdown, field goal or safety, the players and yards, the extra point
-  or two-point try, and the quarter and clock (e.g. *Roman Wilson 12 Yd pass from Aaron Rodgers (Chris Boswell Kick)*).
-- **Half-time** and **Full-time / Final**, with the result. NFL also lists the game's passing, rushing and receiving leaders.
-- **Score corrections**, such as a goal overturned by VAR
+Each sport posts the moments that matter for it:
 
-Supported leagues: NFL, Premier League, La Liga, Serie A, Bundesliga, Ligue 1, MLS, Champions League, Europa League and the FIFA World Cup. To add more, edit `sportsbot/leagues.py` with any ESPN path, for example `soccer/ned.1`.
+| Sport | Live updates |
+|---|---|
+| ⚽ **Soccer** | Kick-off, every goal (scorer and minute, penalty or own goal), half-time, full-time, and VAR score corrections |
+| 🏈 **NFL** | Game start, every scoring play with the players, yards and extra point or two-point try (e.g. *Roman Wilson 12 Yd pass from Aaron Rodgers (Chris Boswell Kick)*), half-time, and the final with passing, rushing and receiving leaders |
+| ⚾ **MLB** | First pitch, every run with the play (e.g. *Albies homered to right center (419 feet), Riley scored.*), and the final with each team's top performer |
+| 🏀 **NBA** | Tip-off, the score at the end of each quarter, half-time and the final with each team's top performer. It doesn't post every basket. |
+| 🏏 **Cricket** | Match start with the toss, every wicket, the innings break with the target, and the result (e.g. *RCB won by 5 wkts (12b rem)*). It doesn't post every run. |
+
+Supported leagues: NFL, NBA, MLB, Premier League, La Liga, Serie A, Bundesliga, Ligue 1, MLS, Champions League,
+Europa League, FIFA World Cup, IPL, and international cricket (every current Test, ODI and T20I, men's and women's).
+To add more, edit `sportsbot/leagues.py` with any ESPN path, for example `soccer/ned.1`.
 
 ## Setup
 
