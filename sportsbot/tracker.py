@@ -136,5 +136,9 @@ class Tracker:
                 updates.extend(diff_game(prev, game))
         return updates
 
+    def games(self, league_key: str) -> list[Game]:
+        """The league's games as of the last snapshot."""
+        return list(self._games.get(league_key, {}).values())
+
     def forget(self, league_key: str) -> None:
         self._games.pop(league_key, None)

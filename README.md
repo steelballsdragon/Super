@@ -121,8 +121,10 @@ End of over 3: 6 runs
 ```
 
 Balls bowled between two checks are combined into one message. That's still a message every ball or two, so a
-dedicated channel works best. Following mid-match starts from the current ball. Ball-by-ball channels still get the
-match start, innings break and result, but not the separate wicket and every-5/10-overs posts.
+dedicated channel works best. Following mid-match starts from the current ball. A restart (e.g. an update) carries on
+from the last ball posted, with no repeats or gaps; after a long outage it skips ahead to the latest ball rather than
+posting overs of backlog. Ball-by-ball channels still get the match start, innings break and result, but not the
+separate wicket and every-5/10-overs posts.
 
 ## Setup
 
@@ -155,7 +157,9 @@ that restarts automatically after crashes and reboots:
 curl -fsSL https://raw.githubusercontent.com/steelballsdragon/Super/main/deploy/install.sh | sudo bash
 ```
 
-It asks for your bot token once and stores it in `/etc/scorebot.env`, readable only by root.
+It asks for your bot token once and stores it in `/etc/scorebot.env`, readable only by root. The bot runs as its own
+`scorebot` user, which can read but not change the code in `/opt/scorebot` (root runs the update scripts there), and
+keeps its data in `/var/lib/scorebot`.
 The server checks GitHub every 5 minutes and installs new code automatically. To update right away, run `/update` in
 Discord (server admins only) or run the install command again.
 View the logs with `sudo journalctl -u scorebot -f`.
@@ -191,14 +195,27 @@ attach a volume and set `DATA_FILE` to a path on it (e.g. `/data/subscriptions.j
 |---|---|---|
 | `DISCORD_TOKEN` | (required) | Bot token |
 | `POLL_INTERVAL` | `10` | Seconds between score checks (minimum 5). ESPN refreshes about every 5–8 seconds. |
-| `DATA_FILE` | `subscriptions.json` | Where channel subscriptions are saved. Channel settings (`settings.json`) and bot state (`state.json`) are kept next to it. |
+| `DATA_FILE` | `subscriptions.json` | Where channel subscriptions are saved. Channel settings (`settings.json`), bot state (`state.json`), ball-by-ball positions (`balls.json`) and recorded cricket scorecards (`cricket.json`) are kept next to it. |
 | `DEV_GUILD_ID` | (none) | Sync slash commands to one server instantly. Global sync can take up to an hour to appear. |
 
 By default, only members with **Manage Channels** can use `/follow` and `/unfollow`. Server admins can change this under Server Settings → Integrations.
 
 ## How it works
 
-Every `POLL_INTERVAL` seconds, the bot fetches the scoreboard for each league that some channel follows. It compares that scoreboard with the previous one and posts whatever changed. It only polls leagues that are followed. The first fetch after startup is recorded without posting anything, so restarting the bot doesn't repost old results.
+Every `POLL_INTERVAL` seconds, the bot fetches the scoreboard for each league that some channel follows. It compares that scoreboard with the previous one and posts whatever changed. It only polls leagues that are followed. The first fetch after startup is recorded without posting anything, so restarting the bot doesn't repost old results. When ESPN is still showing an earlier day (it can lag well into a game day), today's games are fetched too, so no game's start is missed.
+
+It's built to keep running unattended:
+
+- **One failure never stops the updates.** Each league and each step (scoreboards, grading, reminders, daily
+  schedules) is isolated: an error is logged and that piece is retried on the next check, and the update loop restarts
+  itself if it ever stops. ESPN rate limits and server errors are retried with backoff.
+- **Every post fits Discord's limits.** Long embeds are trimmed at a line break (marked "…") instead of being
+  rejected, and any command that fails still replies instead of leaving "The application did not respond".
+- **Bets always settle.** Leans and parlay legs are graded even if the bot was offline at the final; postponed,
+  cancelled or abandoned games are voided, and anything still unsettled after a week is voided.
+- **Small and steady on a 1 GB server.** Research caches only the stats it uses (about 150 MB of memory in a full
+  test with all 15 leagues followed), old entries in the saved state are pruned hourly, and saved files are written
+  atomically and flushed to disk. A damaged file is set aside (`*.damaged-<time>`) so the bot still starts.
 
 ## Tests
 

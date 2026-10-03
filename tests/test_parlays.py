@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from sportsbot.cricket_props import key_cricketers, parse_scorecard, player_histories
 from sportsbot.espn import parse_scoreboard
 from sportsbot.leagues import LEAGUES
-from sportsbot.parlays import ParlayBook, record_field, result_embed, settle
+from sportsbot.parlays import ParlayBook, record_field, settle
 from sportsbot.props import Leg, PlayerGame
 from sportsbot.settings import StateStore
 
@@ -84,6 +84,30 @@ def test_unfinished_game_waits_and_missing_player_is_voided_later(tmp_path):
     asyncio.run(settle(bot, book))
     assert book.pending()[0]["legs"][0]["status"] == "pending"  # box score may still be updating
     bot.state.set("finals", "nfl:77", time.time() - 13 * 3600)
+    asyncio.run(settle(bot, book))
+    assert book.pending() == [] and bot.sent[0][1].title == "🎟️ ➖ Parlay void: 0/0 legs hit"
+
+
+def test_missing_player_box_score_is_not_reread_every_minute(tmp_path, monkeypatch):
+    import sportsbot.parlays as parlays
+    reads = []
+    bot = FakeBot(tmp_path, [nfl_game()], {})
+    real = bot.props.player_games
+
+    async def counted(path, aid, fresh=False):
+        reads.append(aid)
+        return await real(path, aid, fresh)
+    bot.props.player_games = counted
+    bot.result_lookups = {}
+    book = ParlayBook(bot.state)
+    book.record(9, "nfl", "Safest", legs()[:1])
+    clock = [time.time()]
+    monkeypatch.setattr(parlays.time, "time", lambda: clock[0])
+    for _ in range(10):  # ten one-minute checks
+        asyncio.run(settle(bot, book))
+        clock[0] += 60
+    assert len(reads) == 2  # at the final, then once five minutes later
+    clock[0] += 13 * 3600  # still missing long after the final: they didn't play
     asyncio.run(settle(bot, book))
     assert book.pending() == [] and bot.sent[0][1].title == "🎟️ ➖ Parlay void: 0/0 legs hit"
 

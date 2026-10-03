@@ -17,10 +17,11 @@ from discord import app_commands
 from discord.ext import tasks
 
 from .balls import BallFeed
-from .espn import ESPNClient
+from .espn import EASTERN, ESPNClient
 from .espn import start_time
 from .formatting import ball_messages, board_embed, reminder_text, schedule_embed, scoreboard_embed, update_embed
 from .leagues import LEAGUES
+from .limits import MESSAGE, clip, fit_embed
 from .odds import OddsBook, grade_text, line_text
 from .cricket_props import CricketHistory
 from .parlays import ParlayBook, record_field, settle
@@ -53,6 +54,8 @@ THREAD_KEEP_SECONDS = 4 * 86400
 
 REMINDER_SECONDS = 15 * 60
 SETTLE_SECONDS = 60  # how often finished parlay legs are graded
+PRUNE_SECONDS = 3600  # how often old state entries are cleaned out
+LOOP_RESTART_SECONDS = 5
 # The daily schedule goes out once a day, at the chosen hour or within the next
 # two hours if the bot was restarting right then.
 DAILY_WINDOW_HOURS = 2
@@ -67,15 +70,18 @@ class LeagueHealth:
 
 
 def code_version() -> str:
+    repo = str(Path(__file__).resolve().parent.parent)
     try:
+        # The code is owned by root on the server, so git needs to be told it's safe to read.
         out = subprocess.run(
-            ["git", "-C", str(Path(__file__).resolve().parent.parent), "log", "-1", "--format=%h (%cd)", "--date=short"],
+            ["git", "-c", f"safe.directory={repo}", "-C", repo, "log", "-1", "--format=%h (%cd)", "--date=short"],
             capture_output=True, text=True, timeout=5,
         )
         return out.stdout.strip() or "unknown"
     except Exception:
         return "unknown"
 
+TeamName = app_commands.Range[str, 1, 100]  # Discord would otherwise accept up to 6000 characters
 LEAGUE_CHOICES = [app_commands.Choice(name=l.name, value=l.key) for l in LEAGUES.values()]
 
 
@@ -100,9 +106,13 @@ class SportsBot(discord.Client):
         self._boards_shown: dict[int, dict] = {}
         self.espn = ESPNClient()
         self.props = PropsClient(self.espn)
-        self.cricket = CricketHistory(self.props, self.state)
+        # Recorded cricket scorecards get their own file: they're big, and state.json is rewritten often.
+        self.cricket = CricketHistory(self.props, StateStore(self.state.path.with_name("cricket.json")))
         self.parlays = ParlayBook(self.state)
+        self._tasks: set[asyncio.Task] = set()
+        self._last_prune = time.monotonic()
         self._last_settle = 0.0
+        self.result_lookups: dict[str, float] = {}  # when to next ask ESPN how an off-scoreboard game ended
         self.tracker = Tracker()
         # NFL, MLB and NHL scores are posted as the actual scoring plays.
         self.play_resolvers = {
@@ -116,9 +126,12 @@ class SportsBot(discord.Client):
             for league in LEAGUES.values()
             if league.sport == "soccer"
         )
-        # One ball-by-ball feed per cricket league (IPL, internationals).
+        # One ball-by-ball feed per cricket league (IPL, internationals); where each
+        # match is up to is saved in its own small file so restarts carry on from it.
+        balls_state = StateStore(self.state.path.with_name("balls.json"))
         self.ball_feeds = {
-            league.key: BallFeed(lambda path, event_id, page: self.espn.balls(path, event_id, page))
+            league.key: BallFeed(lambda path, event_id, page: self.espn.balls(path, event_id, page),
+                                 balls_state, league.key)
             for league in LEAGUES.values()
             if league.sport == "cricket"
         }
@@ -145,17 +158,19 @@ class SportsBot(discord.Client):
         return lambda event_id: self.espn.goal_details(league, event_id)
 
     async def setup_hook(self) -> None:
-        self._prune_threads()
-        self._prune_reminders()
-        self.odds.prune()
+        self._prune_state()
         register_commands(self)
-        if self.dev_guild:
-            guild = discord.Object(id=self.dev_guild)
-            self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
-        else:
-            await self.tree.sync()
         self.poll.start()
+        try:
+            if self.dev_guild:
+                guild = discord.Object(id=self.dev_guild)
+                self.tree.copy_global_to(guild=guild)
+                await self.tree.sync(guild=guild)
+            else:
+                await self.tree.sync()
+        except discord.HTTPException:
+            # Commands registered by an earlier start keep working; live updates carry on regardless.
+            log.exception("Couldn't register the slash commands with Discord")
 
     async def close(self) -> None:
         self.poll.cancel()
@@ -167,21 +182,65 @@ class SportsBot(discord.Client):
 
     @tasks.loop(seconds=DEFAULT_POLL_SECONDS)
     async def poll(self) -> None:
-        # Leagues with research leans still to grade are checked even if no channel follows them.
-        active = self.store.leagues() | self.leans.pending_leagues() | self.parlays.pending_leagues()
+        try:
+            await self._poll_once()
+        except Exception:
+            log.exception("Update cycle failed; trying again next cycle")
+
+    async def _poll_once(self) -> None:
+        # Leagues with research leans or parlay legs still to grade are checked even if no channel follows them.
+        active = (self.store.leagues() | self.leans.pending_leagues() | self.parlays.pending_leagues()) & LEAGUES.keys()
         for key in list(LEAGUES):
             if key not in active:
                 self.tracker.forget(key)
-        await asyncio.gather(*(self._poll_league(key) for key in active if key in LEAGUES))
-        await self._refresh_boards()
+                self.latest.pop(key, None)
+        # Every league and every step is isolated: one failure is logged, never fatal to the loop.
+        await asyncio.gather(*(self._guarded(f"{key} update", self._poll_league(key)) for key in active))
+        await self._guarded("scoreboards", self._refresh_boards())
         if time.monotonic() - self._last_settle >= SETTLE_SECONDS:
             self._last_settle = time.monotonic()
-            try:
-                await settle(self, self.parlays)
-            except Exception:
-                log.exception("Grading parlays failed")
-        await self._send_reminders()
-        await self._post_daily_schedules()
+            await self._guarded("grading parlays", settle(self, self.parlays))
+            await self._guarded("grading leans", self.leans.settle_pending(self))
+        await self._guarded("reminders", self._send_reminders())
+        await self._guarded("daily schedules", self._post_daily_schedules())
+        if time.monotonic() - self._last_prune >= PRUNE_SECONDS:
+            self._last_prune = time.monotonic()
+            self._prune_state()
+
+    def _prune_state(self) -> None:
+        """Drops old entries so state.json stays small however long the bot runs."""
+        self._prune_threads()
+        self._prune_reminders()
+        self.odds.prune()
+        now = time.time()
+        self.result_lookups = {k: t for k, t in self.result_lookups.items() if t > now}
+        cutoff = now - 14 * 86400
+        for key, at in self.state.items("finals"):
+            if at < cutoff:
+                self.state.delete("finals", key)
+
+    def _background(self, coro) -> None:
+        """Runs a job alongside the loop, keeping a reference so Python doesn't drop it midway."""
+        task = asyncio.get_running_loop().create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _guarded(self, what: str, step) -> None:
+        try:
+            await step
+        except Exception:
+            log.exception("%s failed; carrying on", what)
+
+    @poll.error
+    async def _poll_error(self, error: BaseException) -> None:
+        # Last resort: if anything still escapes, restart the loop rather than stop posting for good.
+        # The handler runs before the loop has fully stopped, so the restart is scheduled for after.
+        log.error("Update loop crashed; restarting it in %ss", LOOP_RESTART_SECONDS, exc_info=error)
+        asyncio.get_running_loop().call_later(LOOP_RESTART_SECONDS, self._restart_poll)
+
+    def _restart_poll(self) -> None:
+        if not self.poll.is_running() and not self.is_closed():
+            self.poll.start()
 
     @poll.before_loop
     async def _before_poll(self) -> None:
@@ -195,6 +254,7 @@ class SportsBot(discord.Client):
             log.exception("Failed to fetch %s scoreboard", key)
             health.error, health.error_at = f"{type(exc).__name__}: {exc}"[:200], time.time()
             return
+        games = await self._with_vanished_games(LEAGUES[key], games)
         health.checked_at, health.live_games = time.time(), sum(g.state == "in" for g in games)
         self.latest[key] = games
         self.odds.remember(games)
@@ -210,7 +270,7 @@ class SportsBot(discord.Client):
                 self.leans.settle(update.game)
                 if update.game.league.feed == "scorepanel":
                     # ESPN has no international cricket history: keep our own as matches finish.
-                    asyncio.create_task(self.cricket.record(update.game))
+                    self._background(self._guarded("recording a cricket scorecard", self.cricket.record(update.game)))
             channels = {
                 s.channel_id
                 for s in subs
@@ -226,13 +286,31 @@ class SportsBot(discord.Client):
                 embed = with_odds if with_odds and self.settings.get(channel_id).odds else plain
                 await self._deliver(channel_id, update.game, update.kind, embed=embed)
 
-    async def _post_balls(self, feed: BallFeed, games, subs) -> None:
-        live = [g for g in games if g.state == "in"]
-        feed.forget_except({g.id for g in live})
-        for game in live:
-            channels = {s.channel_id for s in subs if s.team is None or game.involves(s.team)}
-            if not channels:
+    async def _with_vanished_games(self, league, games: list) -> list:
+        """Keeps following a live game that dropped off ESPN's scoreboard before it ended (ESPN moved
+        on to the next day, or a glitchy response) by fetching its own day, so its result still posts."""
+        if league.feed != "scoreboard":
+            return games
+        ids = {g.id for g in games}
+        gone = {g.id: g for g in self.tracker.games(league.key) if g.state == "in" and g.id not in ids}
+        days = {start.astimezone(EASTERN).strftime("%Y%m%d") for g in gone.values() if (start := start_time(g))}
+        for day in sorted(days):
+            try:
+                found = await self.espn.scoreboard(league, day)
+            except Exception:
+                log.warning("Couldn't look up %s games from %s that left the scoreboard", league.key, day, exc_info=True)
                 continue
+            games = games + [g for g in found if g.id in gone and g.id not in ids]
+        return games
+
+    async def _post_balls(self, feed: BallFeed, games, subs) -> None:
+        wanted = []
+        for game in (g for g in games if g.state == "in"):
+            if channels := {s.channel_id for s in subs if s.team is None or game.involves(s.team)}:
+                wanted.append((game, channels))
+        # Matches nobody follows ball by ball are dropped, so following again starts from the current ball.
+        feed.forget_except({g.id for g, _ in wanted})
+        for game, channels in wanted:
             balls = await feed.new_balls(game)
             for message in ball_messages(game, balls):
                 for channel_id in channels:
@@ -472,7 +550,7 @@ def register_commands(bot: SportsBot) -> None:
     @tree.command(name="scores", description="Show current scores for a league")
     @app_commands.describe(league="League to show", team="Only show games for this team (name or abbreviation)")
     @app_commands.choices(league=LEAGUE_CHOICES)
-    async def scores(interaction: discord.Interaction, league: app_commands.Choice[str], team: str | None = None):
+    async def scores(interaction: discord.Interaction, league: app_commands.Choice[str], team: TeamName | None = None):
         await interaction.response.defer(thinking=True)
         try:
             games = await bot.espn.scoreboard(LEAGUES[league.value])
@@ -498,7 +576,7 @@ def register_commands(bot: SportsBot) -> None:
     async def follow(
         interaction: discord.Interaction,
         league: app_commands.Choice[str],
-        team: str | None = None,
+        team: TeamName | None = None,
         ball_by_ball: bool = False,
     ):
         if ball_by_ball and LEAGUES[league.value].sport != "cricket":
@@ -520,7 +598,7 @@ def register_commands(bot: SportsBot) -> None:
     @app_commands.choices(league=LEAGUE_CHOICES)
     @app_commands.default_permissions(manage_channels=True)
     @app_commands.guild_only()
-    async def unfollow(interaction: discord.Interaction, league: app_commands.Choice[str], team: str | None = None):
+    async def unfollow(interaction: discord.Interaction, league: app_commands.Choice[str], team: TeamName | None = None):
         target = f"**{team}** in {league.name}" if team else f"all **{league.name}** games"
         if bot.store.remove(interaction.channel_id, league.value, team):
             msg = f"🛑 Stopped updates for {target}."
@@ -689,7 +767,7 @@ def register_commands(bot: SportsBot) -> None:
     @research.command(name="game", description="Market, ESPN model, form, injuries and any leans for a team's next game")
     @app_commands.describe(league="League", team="Team (name or abbreviation)")
     @app_commands.choices(league=[c for c in LEAGUE_CHOICES if LEAGUES[c.value].sport != "cricket"])
-    async def research_game(interaction: discord.Interaction, league: app_commands.Choice[str], team: str):
+    async def research_game(interaction: discord.Interaction, league: app_commands.Choice[str], team: TeamName):
         await interaction.response.defer(thinking=True)
         try:
             game = await _next_game(LEAGUES[league.value], team)
@@ -736,7 +814,7 @@ def register_commands(bot: SportsBot) -> None:
     @research.command(name="trends", description="Linemate-style hit rates: each key player's most likely lines for a team's next game")
     @app_commands.describe(league="League", team="Team (name or abbreviation)")
     @app_commands.choices(league=PROP_LEAGUES)
-    async def research_trends(interaction: discord.Interaction, league: app_commands.Choice[str], team: str):
+    async def research_trends(interaction: discord.Interaction, league: app_commands.Choice[str], team: TeamName):
         await interaction.response.defer(thinking=True)
         try:
             game = await _next_game(LEAGUES[league.value], team)
@@ -795,8 +873,8 @@ def register_commands(bot: SportsBot) -> None:
     async def research_record(interaction: discord.Interaction):
         embed = record_embed(bot.leans.summary(), bot.leans.pending())
         if field := record_field(bot.parlays.summary()):
-            embed.add_field(name=field[0], value=field[1][:1024], inline=False)
-        await interaction.response.send_message(embed=embed)
+            embed.add_field(name=field[0], value=field[1], inline=False)
+        await interaction.response.send_message(embed=fit_embed(embed))
 
     tree.add_command(research)
 
@@ -816,7 +894,7 @@ def register_commands(bot: SportsBot) -> None:
             color=discord.Color.blurple(),
         )
         embed.set_footer(text=f"Version {bot.version} · checks every {bot.poll_interval:g}s")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=fit_embed(embed), ephemeral=True)
 
     @tree.command(name="following", description="List what this channel is following")
     async def following(interaction: discord.Interaction):
@@ -833,7 +911,21 @@ def register_commands(bot: SportsBot) -> None:
             for s in subs
             if s.league in LEAGUES
         ]
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+        await interaction.response.send_message(clip("\n".join(lines), MESSAGE), ephemeral=True)
+
+    @tree.error
+    async def on_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
+        # Without a reply, Discord just shows "The application did not respond".
+        name = interaction.command.qualified_name if interaction.command else "?"
+        log.error("/%s failed", name, exc_info=error)
+        msg = "Something went wrong running that command. Please try again in a moment."
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except discord.HTTPException:
+            pass
 
 
 UPDATE_COMMAND = ("sudo", "-n", "systemctl", "start", "--no-block", "scorebot-update.service")

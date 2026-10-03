@@ -4,7 +4,7 @@ from sportsbot.espn import parse_scoreboard, parse_scorepanel, parse_scoring_pla
 from sportsbot.formatting import game_line, update_embed
 from sportsbot.leagues import LEAGUES
 from sportsbot.plays import PlayResolver
-from sportsbot.tracker import FINAL, HALFTIME, INNINGS, KICKOFF, PERIOD, SCORE, WICKET, Tracker
+from sportsbot.tracker import FINAL, HALFTIME, INNINGS, KICKOFF, PERIOD, WICKET, Tracker
 
 NBA, MLB, IPL, CRICKET = (LEAGUES[k] for k in ("nba", "mlb", "ipl", "cricket"))
 

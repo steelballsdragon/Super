@@ -1,5 +1,3 @@
-from dataclasses import replace
-
 from sportsbot.espn import parse_scoreboard
 from sportsbot.formatting import scoreboard_embed, update_embed
 from sportsbot.leagues import LEAGUES
@@ -142,3 +140,63 @@ def test_espn_requests_retry_when_throttled(monkeypatch):
     monkeypatch.setattr(espn, "RETRY_BASE_SECONDS", 0)
     client = espn.ESPNClient(Session())
     assert asyncio.run(client._get_json("u")) == {"ok": True} and len(calls) == 3
+
+
+def test_scoreboard_adds_todays_games_while_espn_still_shows_an_earlier_day():
+    import asyncio
+    from datetime import datetime
+
+    from sportsbot import espn
+
+    today = datetime.now(espn.EASTERN).date()
+    [old] = event(state="post", name="STATUS_FINAL")["events"]
+    new = {**event()["events"][0], "id": "999"}
+    asked = []
+
+    async def get_json(url, params=None):
+        asked.append(params)
+        if params is None:  # ESPN's default: still a past day
+            return {"day": {"date": "2000-01-01"}, "events": [old]}
+        return {"events": [new, old]}  # today's games (the overlap is only listed once)
+
+    client = espn.ESPNClient()
+    client._get_json = get_json
+    games = asyncio.run(client.scoreboard(LEAGUES["mlb"]))
+    assert [g.id for g in games] == [old["id"], "999"]
+    assert asked == [None, {"dates": f"{today:%Y%m%d}"}]
+
+    # Once ESPN shows today (or a later matchday), there's no extra request.
+    async def current(url, params=None):
+        asked.append(params)
+        return {"day": {"date": today.isoformat()}, "events": [new]}
+    asked.clear()
+    client._get_json = current
+    assert [g.id for g in asyncio.run(client.scoreboard(LEAGUES["mlb"]))] == ["999"]
+    assert asked == [None]
+
+
+def test_a_day_with_no_games_is_not_rechecked_every_cycle(monkeypatch):
+    import asyncio
+
+    from sportsbot import espn
+
+    asked = []
+
+    async def get_json(url, params=None):
+        asked.append((url.split("/")[-2], params))
+        if params is None:
+            return {"day": {"date": "2000-01-01"}, "events": []}
+        return {"events": []}  # nothing on today (off-season)
+
+    client = espn.ESPNClient()
+    client._get_json = get_json
+    clock = [1000.0]
+    monkeypatch.setattr(espn.time, "monotonic", lambda: clock[0])
+    for _ in range(5):
+        asyncio.run(client.scoreboard(LEAGUES["mlb"]))
+        asyncio.run(client.scoreboard(LEAGUES["nhl"]))
+        clock[0] += 10
+    assert [a for a in asked if a[1]] == [("mlb", asked[1][1]), ("nhl", asked[1][1])]  # once each
+    clock[0] += espn.QUIET_DAY_SECONDS
+    asyncio.run(client.scoreboard(LEAGUES["mlb"]))
+    assert len([a for a in asked if a[1]]) == 3  # and again after a while

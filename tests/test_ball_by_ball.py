@@ -104,3 +104,83 @@ def test_sixth_legal_ball_ends_the_over_even_before_espn_flags_it():
                                  item(2, "8.6", "Joseph to Sharma, 1 wide", "wide", 24, 2, ball=6)], 1))
     assert [b.over_complete for b in balls] == [True, False]
     assert "*End of over 8: 2 runs*" in ball_messages(game(), balls[:1])[0]
+
+
+def overs(first, last, inns_runs=0):
+    """Commentary items for every ball from over `first` to `last`, e.g. overs(20, 29)."""
+    return [item(100000 + o * 100 + b, f"{o}.{b}", f"Lawes to Rahul, ball {o}.{b}", "no run", inns_runs, 2, ball=b)
+            for o in range(first, last + 1) for b in range(1, 7)]
+
+
+def feed_with(pages_by_call):
+    """A feed whose fetches answer from whatever `pages_by_call` holds at the time."""
+    async def fetch(path, event_id, p):
+        n = max(pages_by_call)
+        return parse_balls(page(pages_by_call.get(p or 1, []), n))
+    return fetch
+
+
+def test_out_of_date_first_answer_does_not_replay_a_backlog():
+    # ESPN's first answer says the commentary is 2 pages long (up to over 20)...
+    pages = {1: overs(0, 9), 2: overs(10, 20)}
+    feed = BallFeed(feed_with(pages))
+    g = game()
+    assert asyncio.run(feed.new_balls(g)) == []
+    # ...but the match is really at over 29: start from there, don't dump 9 overs.
+    pages[2] = overs(10, 24)
+    pages[3] = overs(25, 29)
+    assert asyncio.run(feed.new_balls(g)) == []
+    pages[3].append(item(103001, "30.1", "Lawes to Rahul, FOUR", "four", 4, 2))
+    assert [b.over for b in asyncio.run(feed.new_balls(g))] == ["30.1"]
+
+
+def test_restart_carries_on_from_the_last_ball_posted(tmp_path):
+    from sportsbot.settings import StateStore
+    pages = {1: overs(0, 4)}
+    state = StateStore(tmp_path / "balls.json")
+    feed = BallFeed(feed_with(pages), state, "cricket")
+    g = game()
+    asyncio.run(feed.new_balls(g))
+    pages[1].append(item(100501, "5.1", "Lawes to Rahul, 1 run", "1 run", 1, 0))
+    assert [b.over for b in asyncio.run(feed.new_balls(g))] == ["5.1"]
+
+    # The bot restarts (e.g. an update) while two more balls are bowled.
+    pages[1] += [item(100502, "5.2", "Lawes to Gill, no run", "no run", 1, 0),
+                 item(100503, "5.3", "Lawes to Gill, SIX", "six", 7, 0)]
+    restarted = BallFeed(feed_with(pages), StateStore(tmp_path / "balls.json"), "cricket")
+    assert [b.over for b in asyncio.run(restarted.new_balls(g))] == ["5.2", "5.3"]  # no repeats, no gap
+
+    # A long outage resumes from the latest ball instead of posting overs of backlog.
+    pages[1] += overs(6, 9)
+    again = BallFeed(feed_with(pages), StateStore(tmp_path / "balls.json"), "cricket")
+    assert asyncio.run(again.new_balls(g)) == []
+
+    # Once the match is over its saved position is dropped.
+    again.forget_except(set())
+    assert StateStore(tmp_path / "balls.json").items("cricket") == []
+
+
+def test_refollowing_ball_by_ball_starts_from_the_current_ball(tmp_path):
+    from sportsbot.bot import SportsBot
+    from sportsbot.storage import Subscription
+    bot = SportsBot(SubscriptionStore(tmp_path / "subscriptions.json"), 10, None)
+    pages = {1: overs(0, 4)}
+    feed = BallFeed(feed_with(pages))
+    following = [Subscription(1, "cricket", None, ball_by_ball=True)]
+    sent = []
+
+    async def deliver(channel_id, game, kind, embed=None, content=None):
+        sent.append(content)
+    bot._deliver = deliver
+    g = game()
+    asyncio.run(bot._post_balls(feed, [g], following))
+    pages[1] += overs(5, 9)
+    # Nobody follows ball by ball for a while: the match is dropped...
+    asyncio.run(bot._post_balls(feed, [g], []))
+    # ...so following again starts from now rather than posting everything since.
+    asyncio.run(bot._post_balls(feed, [g], following))
+    assert sent == []
+    pages[1].append(item(101001, "10.1", "Lawes to Rahul, 1 run", "1 run", 1, 0))
+    asyncio.run(bot._post_balls(feed, [g], following))
+    assert len(sent) == 1 and "10.1" in sent[0]
+    asyncio.run(bot.espn.close())

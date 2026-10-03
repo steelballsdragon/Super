@@ -11,13 +11,18 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import asdict
+from datetime import datetime
 
 import discord
 
 from .leagues import LEAGUES
+from .limits import fitted
 from .props import Leg
 
 VOID_AFTER_SECONDS = 12 * 3600  # a player missing from the box score this long after the final didn't play
+EXPIRE_SECONDS = 7 * 86400  # anything still unresolved a week after it was made is voided
+LOOKUP_SECONDS = 600  # how often a game that's not on the scoreboard is looked up while waiting for it to end
+STATS_RETRY_SECONDS = 300  # how often a finished game's box score is re-read while a player's line is missing
 
 
 class ParlayBook:
@@ -76,6 +81,10 @@ async def settle(bot, book: ParlayBook) -> None:
         for leg in parlay["legs"]:
             if leg["status"] != "pending":
                 continue
+            if time.time() - parlay["created"] > EXPIRE_SECONDS:
+                leg["status"], leg["actual"] = "void", "never settled"
+                changed = True
+                continue
             final = await _final(bot, leg)
             if final is None:
                 continue  # not over yet
@@ -90,31 +99,62 @@ async def settle(bot, book: ParlayBook) -> None:
                 await bot._send(parlay["channel"], result_embed(parlay))
 
 
-async def _final(bot, leg: dict) -> dict | None:
-    """{"home": (id, score), "away": (id, score), "ended": ts} once the leg's game is final."""
-    game = next((g for g in bot.latest.get(leg["league"], []) if g.id == leg["game_id"]), None)
+async def game_result(bot, league: str, game_id: str, path: str = "") -> dict | None:
+    """How a game ended, once it has: scores, whether it was called off, and when we first saw it final.
+
+    {"home": (id, score), "away": (id, score), "called_off": bool, "status": str, "ended": ts}
+    Uses the latest scoreboard when the game is on it, otherwise asks ESPN for the game directly.
+    """
+    from .tracker import CALLED_OFF_WORDS
+    key = f"{league}:{game_id}"
+    game = next((g for g in bot.latest.get(league, []) if g.id == game_id), None)
     if game is not None:
         if game.state != "post":
             return None
-        return {"home": (game.home.id, game.home.score), "away": (game.away.id, game.away.score),
-                "ended": bot.state.get("finals", f"{leg['league']}:{leg['game_id']}") or _mark_final(bot, leg)}
-    try:  # the game left the scoreboard: ask ESPN directly
-        summary = await bot.espn.summary(leg["path"] or LEAGUES[leg["league"]].path, leg["game_id"])
-    except Exception:
+        home, away = (game.home.id, game.home.score), (game.away.id, game.away.score)
+        status, detail = game.status_name, game.detail
+    else:
+        # The game isn't on the scoreboard (another day, or its league isn't being checked): ask ESPN
+        # directly, but not every minute, and not before it starts.
+        lookups = getattr(bot, "result_lookups", {})
+        if time.time() < lookups.get(key, 0):
+            return None
+        lookups[key] = time.time() + LOOKUP_SECONDS
+        try:
+            summary = await bot.espn.summary(path or LEAGUES[league].path, game_id)
+        except Exception:
+            return None
+        comp = ((summary.get("header") or {}).get("competitions") or [{}])[0]
+        stype = (comp.get("status") or {}).get("type") or {}
+        if stype.get("state") != "post":
+            start = _timestamp(comp.get("date"))
+            if start and start > lookups[key]:
+                lookups[key] = start
+            return None
+        lookups.pop(key, None)
+        teams = {c.get("homeAway"): (str((c.get("team") or {}).get("id")), _score(c.get("score")))
+                 for c in comp.get("competitors") or []}
+        home, away = teams.get("home"), teams.get("away")
+        status, detail = stype.get("name") or "", stype.get("shortDetail") or stype.get("detail") or ""
+    if home is None or away is None:
         return None
-    comp = ((summary.get("header") or {}).get("competitions") or [{}])[0]
-    if ((comp.get("status") or {}).get("type") or {}).get("state") != "post":
-        return None
-    teams = {c.get("homeAway"): (str((c.get("team") or {}).get("id")), _score(c.get("score")))
-             for c in comp.get("competitors") or []}
-    return {"home": teams.get("home"), "away": teams.get("away"),
-            "ended": bot.state.get("finals", f"{leg['league']}:{leg['game_id']}") or _mark_final(bot, leg)}
+    ended = bot.state.get("finals", key)
+    if ended is None:
+        ended = time.time()
+        bot.state.set("finals", key, ended)
+    return {"home": home, "away": away, "status": status, "ended": ended,
+            "called_off": any(w in status for w in CALLED_OFF_WORDS), "detail": detail or "Postponed"}
 
 
-def _mark_final(bot, leg: dict) -> float:
-    now = time.time()
-    bot.state.set("finals", f"{leg['league']}:{leg['game_id']}", now)
-    return now
+async def _final(bot, leg: dict) -> dict | None:
+    return await game_result(bot, leg["league"], leg["game_id"], leg.get("path", ""))
+
+
+def _timestamp(iso: str | None) -> float | None:
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return None
 
 
 def _score(value) -> int:
@@ -125,6 +165,8 @@ def _score(value) -> int:
 
 
 async def _grade(bot, leg: dict, final: dict) -> tuple[str | None, str]:
+    if final["called_off"]:
+        return "void", final["detail"]  # postponed/cancelled: books void the leg
     if leg["kind"] == "moneyline":
         (hid, hs), (aid, as_) = final["home"], final["away"]
         if hs == as_:
@@ -133,11 +175,18 @@ async def _grade(bot, leg: dict, final: dict) -> tuple[str | None, str]:
         away, _, home = leg["game"].partition(" @ ")
         score = f"{away} {as_} - {hs} {home}" if home else f"final {as_}-{hs}"
         return ("hit" if winner == leg["side"] else "miss"), score
+    # Box scores (for cricket, the whole match's commentary) aren't re-read every minute while we wait.
+    key = f"stats:{leg['league']}:{leg['game_id']}:{leg.get('player_id')}"
+    lookups = getattr(bot, "result_lookups", {})
+    if time.time() < lookups.get(key, 0):
+        return None, ""
     value = await _player_value(bot, leg)
     if value is None:
         if time.time() - final["ended"] >= VOID_AFTER_SECONDS:
             return "void", "didn't play"
+        lookups[key] = time.time() + STATS_RETRY_SECONDS
         return None, ""  # box score not updated yet
+    lookups.pop(key, None)
     return grade_value(value, leg["line"]), f"{value:g}"
 
 
@@ -166,6 +215,7 @@ async def _player_value(bot, leg: dict) -> float | None:
 ICONS = {"hit": "✅", "miss": "❌", "void": "➖", "pending": "⏳"}
 
 
+@fitted
 def result_embed(parlay: dict) -> discord.Embed:
     legs = parlay["legs"]
     hits = sum(l["status"] == "hit" for l in legs)

@@ -2,27 +2,10 @@
 
 from __future__ import annotations
 
-import json
-import os
-import tempfile
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
-
-def _write_json(path: Path, data) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    with os.fdopen(fd, "w") as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, path)
-
-
-def _read_json(path: Path, default):
-    try:
-        with path.open() as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return default
+from .storage import read_json, write_json
 
 
 @dataclass(frozen=True)
@@ -39,7 +22,7 @@ class SettingsStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         known = {f.name for f in fields(ChannelSettings)}
-        raw = _read_json(self.path, {})
+        raw = read_json(self.path, {})
         self._settings = {
             int(cid): ChannelSettings(**{k: v for k, v in values.items() if k in known})
             for cid, values in raw.items()
@@ -54,7 +37,7 @@ class SettingsStore:
             self._settings.pop(channel_id, None)
         else:
             self._settings[channel_id] = new
-        _write_json(self.path, {str(c): asdict(s) for c, s in sorted(self._settings.items())})
+        write_json(self.path, {str(c): asdict(s) for c, s in sorted(self._settings.items())})
         return new
 
     def channels_with(self, predicate) -> list[tuple[int, ChannelSettings]]:
@@ -66,18 +49,18 @@ class StateStore:
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
-        self._data: dict[str, dict] = _read_json(self.path, {})
+        self._data: dict[str, dict] = read_json(self.path, {})
 
     def get(self, section: str, key: str, default=None):
         return self._data.get(section, {}).get(key, default)
 
     def set(self, section: str, key: str, value) -> None:
         self._data.setdefault(section, {})[key] = value
-        _write_json(self.path, self._data)
+        write_json(self.path, self._data)
 
     def delete(self, section: str, key: str) -> None:
         if self._data.get(section, {}).pop(key, None) is not None:
-            _write_json(self.path, self._data)
+            write_json(self.path, self._data)
 
     def items(self, section: str):
         return list(self._data.get(section, {}).items())

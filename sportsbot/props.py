@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 
 from .espn import Game
@@ -34,6 +34,9 @@ BARS = {
 WEIGHTS = {"l10": 0.45, "season": 0.30, "last": 0.25}
 MIN_GAMES = {"l10": 5, "season": 3, "last": 8}
 CACHE_SECONDS = 6 * 3600
+# The server has 1 GB of memory, so only small, processed results are cached (never raw
+# ESPN responses), the cache is capped, and expired entries are dropped.
+CACHE_MAX_ENTRIES = 4000
 SKIP_STATUSES = ("Out", "Doubtful", "Injured Reserve", "Suspension")
 
 
@@ -271,18 +274,33 @@ class PropsClient:
 
     def __init__(self, espn) -> None:
         self.espn = espn
-        self._cache: dict[str, tuple[float, object]] = {}
+        self._cache: dict[str, tuple[float, float, object]] = {}  # key -> (stored at, ttl, value)
         self._limit = asyncio.Semaphore(8)
 
-    async def _json(self, url: str, params: dict | None = None, ttl: float = CACHE_SECONDS):
-        key = url + str(sorted((params or {}).items()))
-        hit = self._cache.get(key)
-        if hit and time.monotonic() - hit[0] < ttl:
-            return hit[1]
+    async def _json(self, url: str, params: dict | None = None):
+        """Fetches from ESPN (at most 8 at a time). Not cached: callers cache what they keep."""
         async with self._limit:
-            data = await self.espn._get_json(url, params)
-        self._cache[key] = (time.monotonic(), data)
-        return data
+            return await self.espn._get_json(url, params)
+
+    async def cached(self, key: str, ttl: float, make):
+        """make()'s result, reused for ttl seconds. Keep results small: this lives in memory."""
+        now = time.monotonic()
+        hit = self._cache.get(key)
+        if hit and now - hit[0] < hit[1]:
+            return hit[2]
+        value = await make()
+        self._cache[key] = (now, ttl, value)
+        if len(self._cache) > CACHE_MAX_ENTRIES:
+            self._trim(now)
+        return value
+
+    def _trim(self, now: float) -> None:
+        for key in [k for k, (at, ttl, _) in self._cache.items() if now - at >= ttl]:
+            del self._cache[key]
+        overflow = len(self._cache) - CACHE_MAX_ENTRIES
+        if overflow > 0:  # still too many: drop the oldest
+            for key in sorted(self._cache, key=lambda k: self._cache[k][0])[:overflow]:
+                del self._cache[key]
 
     async def key_players(self, league_key: str, team_id: str) -> list[tuple[str, str, str]]:
         """(athlete id, name, position) of a team's key players, from ESPN's team leaders."""
@@ -293,17 +311,12 @@ class PropsClient:
         year = date.today().year
         for season in (year + 1, year, year - 1):  # newest season that has leaders yet
             for kind in LEADER_TYPES:
+                url = LEADERS_URL.format(sport=sport_path, league=league_slug, season=season, type=kind, team=team_id)
                 try:
-                    data = await self._json(LEADERS_URL.format(sport=sport_path, league=league_slug, season=season,
-                                                               type=kind, team=team_id))
+                    found = await self.cached(url, CACHE_SECONDS, lambda url=url: self._leader_ids(url, picks))
                 except Exception:
                     continue
-                cats = {c.get("name"): c.get("leaders") or [] for c in data.get("categories") or []}
-                for cat, count in picks:
-                    for leader in cats.get(cat, [])[:count]:
-                        aid = (leader.get("athlete") or {}).get("$ref", "").split("/athletes/")[-1].split("?")[0]
-                        if aid and aid not in ids:
-                            ids.append(aid)
+                ids += [aid for aid in found if aid not in ids]
                 if ids:
                     break
             if ids:
@@ -316,11 +329,26 @@ class PropsClient:
             players = [p for p in players if p[2] not in ("G", "GK")]  # no goalkeepers
         return players[:MAX_PLAYERS[league.sport]]
 
+    async def _leader_ids(self, url: str, picks) -> list[str]:
+        data = await self._json(url)
+        cats = {c.get("name"): c.get("leaders") or [] for c in data.get("categories") or []}
+        ids: list[str] = []
+        for cat, count in picks:
+            for leader in cats.get(cat, [])[:count]:
+                aid = (leader.get("athlete") or {}).get("$ref", "").split("/athletes/")[-1].split("?")[0]
+                if aid and aid not in ids:
+                    ids.append(aid)
+        return ids
+
     async def _roster(self, path: str, team_id: str) -> dict[str, tuple[str, str]]:
+        url = ROSTER_URL.format(path=path, team=team_id)
         try:
-            data = await self._json(ROSTER_URL.format(path=path, team=team_id))
+            return await self.cached(url, CACHE_SECONDS, lambda: self._roster_now(url))
         except Exception:
             return {}
+
+    async def _roster_now(self, url: str) -> dict[str, tuple[str, str]]:
+        data = await self._json(url)
         groups = data.get("athletes") or []
         items = [i for grp in groups for i in (grp.get("items") or [])] if groups and "items" in groups[0] else groups
         return {str(i.get("id")): (i.get("displayName", "?"), (i.get("position") or {}).get("abbreviation", ""))
@@ -329,10 +357,12 @@ class PropsClient:
     async def player_games(self, path: str, athlete_id: str, fresh: bool = False) -> tuple[list[PlayerGame], bool]:
         """This season's and last season's games for a player (fresh=True skips the cache, for grading)."""
         url = GAMELOG_URL.format(path=path, id=athlete_id)
-        latest = await self._json(url, ttl=0 if fresh else CACHE_SECONDS)
         if fresh:
-            games, pitcher = parse_gamelog(latest)
-            return games, pitcher
+            return _slim(parse_gamelog(await self._json(url)), path)
+        return await self.cached(url, CACHE_SECONDS, lambda: self._both_seasons(url, path))
+
+    async def _both_seasons(self, url: str, path: str) -> tuple[list[PlayerGame], bool]:
+        latest = await self._json(url)
         games, pitcher = parse_gamelog(latest)
         seasons = seasons_from(latest)
         if len(seasons) > 1:
@@ -342,7 +372,7 @@ class PropsClient:
             except Exception:
                 pass
         games.sort(key=lambda g: g.when, reverse=True)
-        return games, pitcher
+        return _slim((games, pitcher), url)
 
     async def game_trends(self, game: Game, injured: set[str] = frozenset(), bigger: bool = False) -> list[Trend]:
         """Every key player's most likely lines for this game, most likely first."""
@@ -368,6 +398,19 @@ class PropsClient:
         for found in await asyncio.gather(*jobs):
             trends += found
         return sorted(trends, key=lambda t: t.probability, reverse=True)
+
+
+def _slim(parsed: tuple[list[PlayerGame], bool], path_or_url: str) -> tuple[list[PlayerGame], bool]:
+    """Keeps only the stats the sport's props use: a player's two seasons drop from ~1 KB to ~0.3 KB a game."""
+    sport_path = path_or_url.split("/sports/")[-1].split("/")[0]
+    sport = {"football": "football", "basketball": "basketball", "hockey": "hockey",
+             "baseball": "baseball", "soccer": "soccer"}.get(sport_path)
+    games, pitcher = parsed
+    if sport is None:
+        return parsed
+    keep = {p.stat for p in PROPS[sport]}
+    return [PlayerGame(g.when, g.season, g.opponent, {k: v for k, v in g.stats.items() if k in keep}, g.event_id)
+            for g in games], pitcher
 
 
 def injured_names(summary: dict) -> set[str]:
@@ -446,10 +489,13 @@ def combined(legs: list[Leg]) -> float:
 
 import discord  # noqa: E402
 
+from .limits import fitted  # noqa: E402
+
 NOTE = ("~% = past hit rate adjusted for sample size. It's history, not odds, and books price these trends in. "
         "Check prices (e.g. your odds bot) before betting.")
 
 
+@fitted
 def trends_embed(game: Game, trends: list[Trend], ml: Leg | None) -> discord.Embed:
     a, b = game.teams
     legend = ["L10 = last 10 games"]
@@ -483,10 +529,12 @@ def trends_embed(game: Game, trends: list[Trend], ml: Leg | None) -> discord.Emb
     return embed
 
 
+@fitted
 def parlay_embed(league_name: str, emoji: str, legs: list[Leg], style: str = "Safest",
                  requested: int | None = None) -> tuple[discord.Embed, str]:
     """The parlay with its evidence, plus a plain slip to copy or screenshot."""
-    embed = discord.Embed(title=f"🎟️ {emoji} {league_name} parlay: {len(legs)} legs ({style})", color=discord.Color.purple())
+    count = f"{len(legs)} leg" + ("" if len(legs) == 1 else "s")
+    embed = discord.Embed(title=f"🎟️ {emoji} {league_name} parlay: {count} ({style})", color=discord.Color.purple())
     lines = [f"**{i}. {leg.pick}** ({leg.game})\n  ~{leg.probability:.0%} · {leg.evidence}" for i, leg in enumerate(legs, 1)]
     if requested and len(legs) < requested:
         lines.append(f"\n*Only {len(legs)} of {requested} legs: there aren't enough games right now "

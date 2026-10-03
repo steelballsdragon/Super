@@ -8,6 +8,7 @@ import discord
 
 from .espn import Ball, Game, Goal, ScoringPlay, Team, period_label
 from .leagues import LEAGUES
+from .limits import fitted
 from .tracker import CALLED_OFF, FINAL, HALFTIME, INNINGS, KICKOFF, OVERS, PERIOD, SCORE, WICKET, Update
 
 COLORS = {
@@ -65,6 +66,7 @@ def _play_team(game: Game, play: ScoringPlay) -> Team | None:
     )
 
 
+@fitted
 def play_embed(game: Game, play: ScoringPlay) -> discord.Embed:
     league = game.league
     team = _play_team(game, play)
@@ -134,6 +136,7 @@ def _result(game: Game) -> str:
     return f"{winner.name} win"
 
 
+@fitted
 def update_embed(update: Update) -> discord.Embed:
     game = update.game
     if update.play is not None:
@@ -173,6 +176,7 @@ def game_line(game: Game, time_style: str = "f") -> str:
     return f"{icon} {a.abbrev} **{a.score} - {b.score}** {b.abbrev} · {game.detail}"
 
 
+@fitted
 def scoreboard_embed(league_key: str, games: list[Game], team: str | None = None) -> discord.Embed:
     league = LEAGUES[league_key]
     order = {"in": 0, "pre": 1, "post": 2}
@@ -229,6 +233,7 @@ BOARD_FINISHED = 6
 EMBED_LIMIT = 4000
 
 
+@fitted
 def board_embed(sections: list[tuple[str, list[Game]]]) -> discord.Embed:
     """The always-on live scoreboard: one section per followed league."""
     blocks = []
@@ -255,6 +260,7 @@ def board_embed(sections: list[tuple[str, list[Game]]]) -> discord.Embed:
     return embed
 
 
+@fitted
 def schedule_embed(day_label: str, sections: list[tuple[str, list[Game]]]) -> discord.Embed | None:
     """Today's games per followed league; None when there's nothing on."""
     blocks = []
