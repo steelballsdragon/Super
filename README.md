@@ -67,6 +67,30 @@ lists the **most likely results** by the market (with the reminder that likely i
 -110 prices is about 52.4%, so judge the leans by this record, not by how convincing they sound. It's research,
 not advice, and it can't guarantee winners.
 
+### Player trends and parlays (Linemate-style)
+
+`/research trends <league> <team>` shows each key player's **most likely line** for every stat in the team's next
+game, with how often it hit: last 10 games, this season, last season and against this opponent, from ESPN's game
+logs, e.g. *~92% Josh Downs Over 1.5 Receptions · L10 10/10 · 2026 3/3 · 2025 15/16*. Key players come from ESPN's
+team leaders; players listed Out, Doubtful or on IR are skipped.
+
+- NFL: passing yards and TDs, rushing yards, receptions, receiving yards, anytime TD
+- NBA: points, rebounds, assists, 3-pointers, points + rebounds + assists
+- NHL: shots on goal, points, goals, assists
+- MLB (batters): hits, total bases, runs, RBIs, home runs
+
+The **~%** is the hit rate adjusted for sample size (10/10 becomes about 92%, so nothing is ever "certain"),
+weighted toward the last 10 games. A line needs about 75% (and 7 of the last 10) to be shown. MLB hitting is far less
+consistent, so its bar is about 60%; its estimates are shown either way.
+
+`/research parlay <league> legs:4 style:Safest|Bigger payout` builds a parlay from the upcoming games: the most likely
+legs, at most two per game and one per player (legs in the same game move together), plus clear moneyline favorites.
+*Safest* takes the most likely lines, often small ones that pay little; *Bigger payout* skips each stat's smallest
+line. It shows each leg's evidence, an estimate of the chance all legs hit (optimistic: it assumes independence),
+and a plain slip to copy or screenshot for an odds bot.
+
+These are historical frequencies, not odds, and books price these trends in; check prices before betting.
+
 ### Cricket ball by ball
 
 `/follow` → a cricket league → `ball_by_ball: True` posts every delivery from ESPNcricinfo's commentary, e.g.
