@@ -183,7 +183,7 @@ def test_nhl_goals_periods_and_final():
     e = update_embed(u)
     assert e.title == "🏒 GOAL — WSH"
     assert "Washington Capitals 1 - 0 Carolina Hurricanes" in e.description
-    assert "assists: Pierre-Luc Dubois (1), Alex Ovechkin (1)" in e.description
+    assert "Alex Tuch Goal (1) Wrist Shot\n🅰️ Assists: Pierre-Luc Dubois (1), Alex Ovechkin (1)" in e.description
     assert e.footer.text == "NHL · 1st 6:33"
 
     [u] = step(nhl_game(name="STATUS_END_PERIOD", away=1))

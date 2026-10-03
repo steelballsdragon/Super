@@ -40,7 +40,19 @@ def _timestamp(iso: str) -> str:
 
 def _goal_line(game: Game, goal: Goal) -> str:
     team = next((t.abbrev for t in game.teams if t.id == goal.team_id), None)
-    return f"⚽ {goal.describe()}" + (f" ({team})" if team else "")
+    line = f"⚽ {goal.describe()}" + (f" ({team})" if team else "")
+    if goal.assist:
+        line += f"\n🅰️ Assist: {goal.assist}"
+    return line
+
+
+def _hockey_text(text: str) -> str:
+    """Puts an NHL goal's assists on their own line."""
+    main, sep, assists = text.partition(", assists: ")
+    if sep:
+        return f"{main}\n🅰️ Assists: {assists}"
+    head, sep, _ = text.partition(", Unassisted")
+    return f"{head}\n🅰️ Unassisted" if sep else text
 
 
 def _play_team(game: Game, play: ScoringPlay) -> Team | None:
@@ -56,7 +68,8 @@ def play_embed(game: Game, play: ScoringPlay) -> discord.Embed:
     abbrev = play.team_abbrev or (team.abbrev if team else "")
     title = f"{league.emoji} {(play.category or 'Score').upper()}" + (f" — {abbrev}" if abbrev else "")
     score = f"**{game.away.name} {play.away_score} - {play.home_score} {game.home.name}**"
-    desc = f"{score}\n*{play.kind}*\n{play.text}" if play.kind else f"{score}\n{play.text}"
+    text = _hockey_text(play.text) if league.sport == "hockey" else play.text
+    desc = f"{score}\n*{play.kind}*\n{text}" if play.kind else f"{score}\n{text}"
     embed = discord.Embed(title=title, description=desc, color=COLORS[SCORE])
     embed.set_footer(text=f"{league.name} · {play.when}" if play.when else league.name)
     if team and team.logo:

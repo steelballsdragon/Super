@@ -50,6 +50,7 @@ class Goal:
     scorer: str
     penalty: bool = False
     own_goal: bool = False
+    assist: str | None = None  # filled in from the match details when ESPN has it
 
     def describe(self) -> str:
         tag = " (pen)" if self.penalty else " (OG)" if self.own_goal else ""
@@ -320,6 +321,34 @@ def _parse_hockey_plays(summary: dict) -> list[ScoringPlay]:
     return plays
 
 
+@dataclass(frozen=True)
+class GoalDetail:
+    """A goal as described in a soccer match's details, which name the assister."""
+
+    minute: str
+    scorer: str
+    assist: str | None
+
+
+def parse_goal_details(summary: dict) -> list[GoalDetail]:
+    details = []
+    for k in summary.get("keyEvents") or []:
+        if not k.get("scoringPlay"):
+            continue
+        names = [(p.get("athlete") or {}).get("displayName", "") for p in _list(k.get("participants"))]
+        if not names:
+            continue
+        own_goal = "own goal" in ((k.get("type") or {}).get("text") or "").lower()
+        details.append(
+            GoalDetail(
+                minute=(k.get("clock") or {}).get("displayValue", ""),
+                scorer=names[0],
+                assist=names[1] if len(names) > 1 and not own_goal else None,
+            )
+        )
+    return details
+
+
 def _parse_event(event: dict, league: League) -> Game | None:
     comps = event.get("competitions") or []
     if not comps:
@@ -406,6 +435,10 @@ class ESPNClient:
     async def scoring_plays(self, league: League, event_id: str) -> list[ScoringPlay]:
         data = await self._get_json(SUMMARY_URL.format(path=league.path), {"event": event_id})
         return parse_scoring_plays(data, league.sport)
+
+    async def goal_details(self, league: League, event_id: str) -> list[GoalDetail]:
+        data = await self._get_json(SUMMARY_URL.format(path=league.path), {"event": event_id})
+        return parse_goal_details(data)
 
     async def close(self) -> None:
         if self._owns_session and self._session and not self._session.closed:
