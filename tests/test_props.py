@@ -75,6 +75,9 @@ def test_moneyline_leg_only_for_clear_favorites_and_not_soccer():
     assert (leg.pick, leg.evidence) == ("Washington Commanders Moneyline", "DraftKings -205 → 64% implied (no-vig)")
     assert moneyline_leg(g, {"28": 0.55, "11": 0.45}, odds) is None
     assert moneyline_leg(g, {"28": 0.6, "11": 0.2, "draw": 0.2}, odds) is None
+    dog = moneyline_leg(g, {"28": 0.64, "11": 0.36}, odds, underdog=True)
+    assert (dog.pick, dog.side, dog.probability) == ("Indianapolis Colts Moneyline", "11", 0.36)
+    assert moneyline_leg(g, {"28": 0.8, "11": 0.2}, odds, underdog=True) is None  # too long a shot
 
 
 def leg(pick, p, game_id, player=None):
@@ -118,6 +121,29 @@ def test_big_parlay_lands_between_1000_and_10000():
 def test_mixed_legs_finish_close_to_the_aim():
     legs = [leg(f"L{i}", q, str(i), f"p{i}") for i, q in enumerate((0.92, 0.9, 0.88, 0.75, 0.66, 0.6, 0.55))]
     assert 0.45 <= combined(build_to_target(legs, TARGETS["safe"])) <= 0.55
+
+
+def test_lotto_lands_between_3000_and_20000_in_4_to_10_legs():
+    for p in (0.7, 0.65, 0.6, 0.5, 0.4):
+        chosen = build_to_target(strong_legs(10, p), TARGETS["lotto"])
+        odds = int(american(combined(chosen)))
+        assert 3000 <= odds <= 20000 and 4 <= len(chosen) <= 10, (p, odds, len(chosen))
+    # Mixed with underdog moneylines it still lands in range, within 10 legs.
+    legs = strong_legs(8, 0.7) + [leg(f"Dog{g}", 0.35, f"d{g}") for g in range(4)]
+    chosen = build_to_target(legs, TARGETS["lotto"])
+    assert 3000 <= int(american(combined(chosen))) <= 20000 and 4 <= len(chosen) <= 10
+
+
+def test_lotto_never_goes_past_10_legs_and_says_how_close_it_got():
+    chosen = build_to_target(strong_legs(10, 0.85), TARGETS["lotto"])  # 0.85^10 is only about +408
+    assert len(chosen) == 10
+    assert "Closest I could get is +" in parlay_embed("NFL", "🏈", chosen, TARGETS["lotto"])[0].description
+
+
+def test_lotto_needs_at_least_4_legs():
+    legs = [leg("Dog1", 0.18, "1"), leg("Dog2", 0.16, "2"), leg("A", 0.7, "3"), leg("B", 0.7, "4"), leg("C", 0.7, "5")]
+    chosen = build_to_target(legs, TARGETS["lotto"])
+    assert len(chosen) >= 4
 
 
 def test_big_payout_prefers_the_better_paying_legs():
