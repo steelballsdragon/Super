@@ -54,6 +54,7 @@ CHANNEL_KINDS = (KICKOFF, FINAL, CALLED_OFF)
 THREAD_KEEP_SECONDS = 4 * 86400
 
 REMINDER_SECONDS = 15 * 60
+PARLAY_GAMES = 8  # parlays look ahead (up to a week) until there are at least this many games to build from
 SETTLE_SECONDS = 60  # how often finished parlay legs are graded
 PRUNE_SECONDS = 3600  # how often old state entries are cleaned out
 LOOP_RESTART_SECONDS = 5
@@ -821,16 +822,19 @@ def register_commands(bot: SportsBot) -> None:
         mine = [g for g in games if g.involves(team) and g.state != "post"]
         return min(mine, key=lambda g: (g.state != "in", g.start), default=None)
 
-    async def _upcoming(lg, days_ahead: int = 3):
-        """Today's games that haven't started, or the next day's (up to a few days ahead)."""
+    async def _upcoming(lg, want: int = 1, days_ahead: int = 3):
+        """Games that haven't started: today's, then the following days' until there are at least `want`
+        (soccer can have a single midweek game before a full weekend), soonest first."""
         games = [g for g in await bot.espn.scoreboard(lg) if g.state == "pre"]
-        if not games and lg.feed == "scoreboard":
+        if len(games) < want and lg.feed == "scoreboard":
             from datetime import date, timedelta
-            for ahead in range(1, days_ahead + 1):
+            for ahead in range(0, days_ahead + 1):
                 day = (date.today() + timedelta(days=ahead)).strftime("%Y%m%d")
-                if games := [g for g in await bot.espn.scoreboard(lg, day) if g.state == "pre"]:
+                known = {g.id for g in games}
+                games += [g for g in await bot.espn.scoreboard(lg, day) if g.state == "pre" and g.id not in known]
+                if len(games) >= want:
                     break
-        return games[:16]
+        return sorted(games, key=lambda g: g.start)[:16]
 
     async def _next_game(lg, team):
         """The team's live or next game: today's scoreboard, then up to a week ahead."""
@@ -862,8 +866,8 @@ def register_commands(bot: SportsBot) -> None:
             if not games:
                 await interaction.followup.send(f"No upcoming {lg.name} game for **{team}** to build a parlay from.")
                 return
-        elif not (games := await _upcoming(lg)):
-            await interaction.followup.send(f"No {lg.name} games in the next few days on ESPN.")
+        elif not (games := await _upcoming(lg, want=PARLAY_GAMES, days_ahead=7)):
+            await interaction.followup.send(f"No {lg.name} games in the next week on ESPN.")
             return
 
         async def one(g):
@@ -882,8 +886,11 @@ def register_commands(bot: SportsBot) -> None:
         candidates = {(leg.pick, leg.game_id): leg for found in await asyncio.gather(*(one(g) for g in games))
                       for leg in found}
         chosen = build_to_target(list(candidates.values()), target, per_game=MAX_LEGS if team else MAX_LEGS_PER_GAME)
-        if len(chosen) < 2:
-            await interaction.followup.send(f"Not enough strong legs in the upcoming {lg.name} games for a parlay yet.")
+        if len(chosen) < max(2, target.min_legs):
+            count = f"{len(games)} game" + ("" if len(games) == 1 else "s")
+            await interaction.followup.send(
+                f"Not enough strong legs for a {target.name} parlay: {lg.name} has only {count} coming up in the "
+                f"next week{' for that team' if team else ''}. Try a smaller payout, or another league.")
             return
         embed, slip = parlay_embed(lg.name, lg.emoji, chosen, target)
         bot.parlays.record(interaction.channel_id, lg.key, target.name, chosen)

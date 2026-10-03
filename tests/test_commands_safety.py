@@ -213,3 +213,50 @@ def test_unfollow_without_a_league(tmp_path):
     asyncio.run(unfollow(i, None, None))  # now only MLB is left
     assert i.sent == ["🛑 Stopped updates for all **MLB** games."] and bot.store.for_channel(7) == []
     asyncio.run(bot.espn.close())
+
+
+def soccer_game(gid, home, away, day):
+    from sportsbot.espn import parse_scoreboard
+    from sportsbot.leagues import LEAGUES
+    comp = {"status": {"type": {"state": "pre", "name": "STATUS_SCHEDULED", "shortDetail": ""}},
+            "competitors": [{"homeAway": "home", "score": "0", "team": {"id": home, "abbreviation": home, "displayName": home}},
+                            {"homeAway": "away", "score": "0", "team": {"id": away, "abbreviation": away, "displayName": away}}]}
+    [g] = parse_scoreboard({"events": [{"id": gid, "date": f"{day}T19:00Z", "competitions": [comp]}]}, LEAGUES["mls"])
+    return g
+
+
+def test_parlays_look_past_a_lone_midweek_game_and_never_fake_a_lotto(tmp_path):
+    from datetime import date, timedelta
+
+    from sportsbot.props import Leg
+    bot = bot_with_teams(tmp_path)
+    lone = soccer_game("1", "CHI", "VAN", "2026-10-06")
+    weekend = [soccer_game(str(10 + i), f"H{i}", f"A{i}", "2026-10-10") for i in range(8)]
+    in_four_days = (date.today() + timedelta(days=4)).strftime("%Y%m%d")
+
+    async def scoreboard(league, day=None):
+        return weekend if day == in_four_days else [lone] if day is None else []
+    bot.espn.scoreboard = scoreboard
+
+    async def game_props(game, bigger=False, underdog=False):
+        if underdog:
+            return [], None
+        legs = [Leg(f"{game.home.name} P{i} Over 0.5 Shots", 0.62, "", "", game.id, f"{game.id}-{i}") for i in range(2)]
+        return [SimpleNamespace(**{"pick": l.pick, "probability": l.probability, "evidence": "", "player_id": l.player_id,
+                                   "prop": SimpleNamespace(stat="shots"), "line": 1}) for l in legs], None
+    bot.game_props = game_props
+    bot.store.add(7, "mls")
+    research = bot.tree.get_command("research").callback
+    i = Inter()
+    asyncio.run(research(i, None, None, SimpleNamespace(value="lotto")))
+    assert i.sent[0].startswith("🎟️ ⚽ MLS · Lotto") and "Closest" not in i.sent[0]
+
+    # Only the lone game exists: no 2-leg "lotto", it says why instead.
+    async def only_lone(league, day=None):
+        return [lone] if day is None else []
+    bot.espn.scoreboard = only_lone
+    i = Inter()
+    asyncio.run(research(i, None, None, SimpleNamespace(value="lotto")))
+    assert i.sent == ["Not enough strong legs for a Lotto (4-10 legs, +3000 to +20000) parlay: MLS has only 1 game "
+                      "coming up in the next week. Try a smaller payout, or another league."]
+    asyncio.run(bot.espn.close())
