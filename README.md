@@ -44,6 +44,29 @@ Results are reported correctly in tricky cases too: penalty shootouts (*Paraguay
 extra time, NHL shootouts, and postponed, suspended or cancelled games (posted as **Postponed** etc., never as a result).
 When a game ends on a score, such as a walk-off home run, the winning play is posted before the final result.
 
+### Betting research
+
+`/research game <league> <team>` builds a report on the team's live or next game (looking up to a week ahead), with
+every number labelled by source:
+
+- **Market (DraftKings via ESPN):** spread, total and moneyline, the implied chance of each result with the
+  bookmaker's margin removed, and how the line has moved since it opened.
+- **ESPN Matchup Predictor** (where ESPN publishes one, e.g. NFL and MLB) next to the market's number.
+- **Last 5 games** with points scored and allowed, records against the spread, and **injuries** (QBs first).
+- **Leans**, only when the data disagrees with the line: ESPN's model at least 5 points above the market's no-vig
+  chance, or a projected total (from recent scoring) clearly off the over/under. Each lean lists the numbers behind
+  it, a Low/Medium/High label, and ⚠️ cautions when the data may be misleading: a starting QB out, a big line move
+  against the lean since the open, or a gap so large it usually means the model is missing news. Leans with
+  cautions are always Low; totals from recent form top out at Medium.
+
+`/research picks <league>` ranks the upcoming games by how strongly the data disagrees with the line, and separately
+lists the **most likely results** by the market (with the reminder that likely isn't the same as good value).
+
+`/research record` shows how the leans have actually done. Every pre-game lean is saved and graded at the final
+(win/loss/push, units at the recorded price), broken down by market and by confidence. Break-even at standard
+-110 prices is about 52.4%, so judge the leans by this record, not by how convincing they sound. It's research,
+not advice, and it can't guarantee winners.
+
 ### Cricket ball by ball
 
 `/follow` → a cricket league → `ball_by_ball: True` posts every delivery from ESPNcricinfo's commentary, e.g.

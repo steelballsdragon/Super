@@ -547,6 +547,10 @@ class ESPNClient:
             raw = [t.get("team") or {} for s in _list(data.get("sports")) for l in _list(s.get("leagues")) for t in _list(l.get("teams"))]
         return sorted({(t.get("displayName", ""), t.get("abbreviation", "")) for t in raw if t.get("displayName")})
 
+    async def summary(self, path: str, event_id: str) -> dict:
+        """A game's full ESPN summary (odds, predictor, form, injuries, ...)."""
+        return await self._get_json(SUMMARY_URL.format(path=path), {"event": event_id})
+
     async def balls(self, path: str, event_id: str, page: int | None = None) -> tuple[list[Ball], int]:
         params = {"event": event_id}
         if page:
