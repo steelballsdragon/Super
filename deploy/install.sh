@@ -66,7 +66,6 @@ if [ -n "$token" ]; then
   cat > "$ENV_FILE" <<ENV
 DISCORD_TOKEN=$token
 DATA_FILE=/var/lib/scorebot/subscriptions.json
-POLL_INTERVAL=30
 ENV
   chmod 600 "$ENV_FILE"
 fi

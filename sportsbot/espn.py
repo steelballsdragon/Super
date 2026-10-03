@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 
 import aiohttp
@@ -14,6 +15,16 @@ log = logging.getLogger(__name__)
 BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
 SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/summary"
 SCOREPANEL_URL = "https://site.web.api.espn.com/apis/site/v2/sports/{path}/scorepanel"
+TEAMS_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/teams"
+
+# ESPN has no team list for international cricket, so team suggestions start
+# from the national sides and add any team currently playing.
+INTERNATIONAL_CRICKET_TEAMS = (
+    "Afghanistan", "Australia", "Bangladesh", "Canada", "England", "India", "Ireland",
+    "Namibia", "Nepal", "Netherlands", "New Zealand", "Oman", "Pakistan", "Scotland",
+    "South Africa", "Sri Lanka", "United Arab Emirates", "United States of America",
+    "West Indies", "Zimbabwe",
+)
 
 
 @dataclass(frozen=True)
@@ -35,10 +46,18 @@ class Team:
     logo: str | None = None
     score_text: str = ""  # cricket, e.g. "161/5 (18/20 ov, target 156)"
     innings: tuple[Innings, ...] = ()
+    winner: bool = False  # set by ESPN once a game is decided
+    shootout: int | None = None  # soccer penalty shootout goals
 
     @property
     def wickets(self) -> int:
         return sum(i.wickets for i in self.innings)
+
+    @property
+    def max_overs(self) -> int | None:
+        """Overs per innings in limited-overs cricket, e.g. 20 from "51/1 (3.4/20 ov)"."""
+        m = re.search(r"/(\d+) ov", self.score_text)
+        return int(m.group(1)) if m else None
 
 
 @dataclass(frozen=True)
@@ -169,6 +188,8 @@ def _parse_team(competitor: dict, sport: str) -> Team:
         logo=team.get("logo"),
         score_text=score_text,
         innings=innings,
+        winner=competitor.get("winner") is True,
+        shootout=competitor.get("shootoutScore") if isinstance(competitor.get("shootoutScore"), int) else None,
     )
 
 
@@ -435,6 +456,20 @@ class ESPNClient:
     async def scoring_plays(self, league: League, event_id: str) -> list[ScoringPlay]:
         data = await self._get_json(SUMMARY_URL.format(path=league.path), {"event": event_id})
         return parse_scoring_plays(data, league.sport)
+
+    async def teams(self, league: League) -> list[tuple[str, str]]:
+        """(name, abbreviation) of every team in the league, for suggestions."""
+        if league.feed == "scorepanel":
+            names = dict.fromkeys(INTERNATIONAL_CRICKET_TEAMS, "")
+            names.update((t.name, t.abbrev) for g in await self.scoreboard(league) for t in g.teams)
+            return sorted(names.items())
+        if league.sport == "cricket":
+            data = await self._get_json(BASE_URL.format(path=league.path))
+            raw = _list(data.get("teams"))
+        else:
+            data = await self._get_json(TEAMS_URL.format(path=league.path))
+            raw = [t.get("team") or {} for s in _list(data.get("sports")) for l in _list(s.get("leagues")) for t in _list(l.get("teams"))]
+        return sorted({(t.get("displayName", ""), t.get("abbreviation", "")) for t in raw if t.get("displayName")})
 
     async def goal_details(self, league: League, event_id: str) -> list[GoalDetail]:
         data = await self._get_json(SUMMARY_URL.format(path=league.path), {"event": event_id})

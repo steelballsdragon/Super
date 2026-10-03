@@ -8,21 +8,28 @@ A Discord bot that posts live **NFL, NBA, MLB, NHL, soccer and cricket** updates
 - `/follow <league> [team]`: posts live updates in this channel for a whole league or for one team.
 - `/unfollow <league> [team]`: stops those updates.
 - `/following`: lists what this channel follows.
+- `/status`: shows when the bot last checked each followed league, how many games are live, and any errors.
+
+The team option suggests teams as you type, e.g. typing `ind` offers *India* and *West Indies*.
 
 Each sport posts the moments that matter for it:
 
 | Sport | Live updates |
 |---|---|
 | ⚽ **Soccer** | Kick-off, every goal (scorer, minute and assist, marked as a penalty or own goal), half-time, full-time, and VAR score corrections |
-| 🏈 **NFL** | Game start, every scoring play with the players, yards and extra point or two-point try (e.g. *Roman Wilson 12 Yd pass from Aaron Rodgers (Chris Boswell Kick)*), half-time, and the final with passing, rushing and receiving leaders |
+| 🏈 **NFL** | Game start, every scoring play with the players, yards and extra point or two-point try (e.g. *Roman Wilson 12 Yd pass from Aaron Rodgers (Chris Boswell Kick)*), the score at the end of each quarter, half-time, and the final with passing, rushing and receiving leaders |
 | ⚾ **MLB** | First pitch, every run with the play (e.g. *Albies homered to right center (419 feet), Riley scored.*), and the final with each team's top performer |
 | 🏒 **NHL** | Puck drop, every goal with the scorer, shot type and assists (on their own line; marked as power-play, shorthanded or empty-net), the score at the end of each period, and the final with each team's top scorer |
 | 🏀 **NBA** | Tip-off, the score at the end of each quarter, half-time and the final with each team's top performer. It doesn't post every basket. |
-| 🏏 **Cricket** | Match start with the toss, every wicket, the innings break with the target, and the result (e.g. *RCB won by 5 wkts (12b rem)*). It doesn't post every run. |
+| 🏏 **Cricket** | Match start with the toss, every wicket, the score every 5 overs (T20) or 10 overs (ODI and Test) with the chase equation, the innings break, and the result (e.g. *RCB won by 5 wkts (12b rem)*). It doesn't post every run. |
 
 Supported leagues: NFL, NBA, MLB, NHL, Premier League, La Liga, Serie A, Bundesliga, Ligue 1, MLS, Champions League,
 Europa League, FIFA World Cup, IPL, and international cricket (every current Test, ODI and T20I, men's and women's).
 To add more, edit `sportsbot/leagues.py` with any ESPN path, for example `soccer/ned.1`.
+
+Results are reported correctly in tricky cases too: penalty shootouts (*Paraguay win 4-3 on penalties*),
+extra time, NHL shootouts, and postponed, suspended or cancelled games (posted as **Postponed** etc., never as a result).
+When a game ends on a score, such as a walk-off home run, the winning play is posted before the final result.
 
 ## Setup
 
@@ -82,7 +89,7 @@ attach a volume and set `DATA_FILE` to a path on it (e.g. `/data/subscriptions.j
 | Variable | Default | Description |
 |---|---|---|
 | `DISCORD_TOKEN` | (required) | Bot token |
-| `POLL_INTERVAL` | `30` | Seconds between score checks |
+| `POLL_INTERVAL` | `10` | Seconds between score checks (minimum 5). ESPN refreshes about every 5–8 seconds. |
 | `DATA_FILE` | `subscriptions.json` | Where channel subscriptions are saved |
 | `DEV_GUILD_ID` | (none) | Sync slash commands to one server instantly. Global sync can take up to an hour to appear. |
 

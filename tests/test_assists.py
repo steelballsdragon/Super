@@ -3,7 +3,7 @@ import asyncio
 from sportsbot.espn import parse_goal_details, parse_scoreboard
 from sportsbot.formatting import _hockey_text, update_embed
 from sportsbot.leagues import LEAGUES
-from sportsbot.plays import ASSIST_ATTEMPTS, AssistResolver
+from sportsbot.plays import ASSIST_WAIT_SECONDS, AssistResolver
 from sportsbot.tracker import FINAL, SCORE, Tracker
 
 EPL = LEAGUES["epl"]
@@ -74,10 +74,14 @@ def test_waits_briefly_for_assist_then_posts_anyway():
     [u] = step(match(home=1, goals=[CHERKI]))
     assert "Assist: Antoine Semenyo" in update_embed(u).description
 
-    feed2, step2 = setup()
-    results = [step2(match(home=1, goals=[CHERKI]))] + [step2(match(home=1, goals=[CHERKI])) for _ in range(ASSIST_ATTEMPTS - 1)]
-    assert results[0] == [] and len(results[-1]) == 1
-    assert "29' Rayan Cherki" in update_embed(results[-1][0]).description
+    now = [0.0]
+    t, r = Tracker(), AssistResolver(Feed(), clock=lambda: now[0])
+    step2 = lambda games: asyncio.run(r.resolve(games, t.update("epl", games)))
+    step2(match())
+    assert step2(match(home=1, goals=[CHERKI])) == []
+    now[0] = ASSIST_WAIT_SECONDS
+    [u] = step2(match(home=1, goals=[CHERKI]))
+    assert "29' Rayan Cherki" in update_embed(u).description and "Assist" not in update_embed(u).description
 
 
 def test_goal_is_posted_before_the_final_whistle():

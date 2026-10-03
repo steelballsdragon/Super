@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from .espn import Game, Goal, GoalDetail, ScoringPlay
-from .tracker import SCORE, Update
+from .tracker import FINAL, SCORE, Update
 
 log = logging.getLogger(__name__)
 
-# How many polls to wait for ESPN to publish a scoring play before falling
-# back to a plain score update (at the default 30s interval, about 2 minutes).
-MAX_ATTEMPTS = 4
+# How long to wait for ESPN to publish a scoring play before falling back to a
+# plain score update.
+PLAY_WAIT_SECONDS = 120
+# Once the game is over, hold the final result at most this long for the
+# winning play (e.g. a walk-off home run) so the play is posted first.
+FINAL_HOLD_SECONDS = 60
+
+Clock = Callable[[], float]
 
 FetchPlays = Callable[[str], Awaitable[list[ScoringPlay]]]
 
@@ -21,7 +27,8 @@ FetchPlays = Callable[[str], Awaitable[list[ScoringPlay]]]
 @dataclass
 class _Pending:
     base_total: int
-    attempts: int = 0
+    since: float
+    held: list[Update] = field(default_factory=list)  # e.g. the final, posted after the play
 
 
 class PlayResolver:
@@ -33,8 +40,9 @@ class PlayResolver:
     extra point is added a moment later.
     """
 
-    def __init__(self, fetch: FetchPlays) -> None:
+    def __init__(self, fetch: FetchPlays, clock: Clock = time.monotonic) -> None:
         self._fetch = fetch
+        self._clock = clock
         self._posted: dict[str, set[str]] = {}
         self._pending: dict[str, _Pending] = {}
 
@@ -44,16 +52,25 @@ class PlayResolver:
         for u in updates:
             if u.kind == SCORE and not u.score_decreased:
                 pending = self._pending.get(u.game.id)
-                base = u.prev_total if pending is None else min(pending.base_total, u.prev_total)
-                self._pending[u.game.id] = _Pending(base)
+                if pending is None:
+                    self._pending[u.game.id] = _Pending(u.prev_total, self._clock())
+                else:
+                    pending.base_total = min(pending.base_total, u.prev_total)
             else:
                 others.append(u)
+
+        # Anything else about a game with a score still pending (like the final
+        # whistle after a walk-off) waits so it's posted after the scoring play.
+        ready = []
+        for u in others:
+            pending = self._pending.get(u.game.id)
+            (pending.held if pending else ready).append(u)
 
         by_id = {g.id: g for g in games}
         for game_id in list(self._pending):
             game = by_id.get(game_id)
             if game is None:
-                del self._pending[game_id]
+                resolved.extend(self._pending.pop(game_id).held)
                 continue
             resolved.extend(await self._check(game, self._pending[game_id]))
 
@@ -61,7 +78,7 @@ class PlayResolver:
         for game_id in list(self._posted):
             if game_id not in by_id:
                 del self._posted[game_id]
-        return resolved + others
+        return resolved + ready
 
     async def _check(self, game: Game, pending: _Pending) -> list[Update]:
         try:
@@ -75,29 +92,30 @@ class PlayResolver:
         if new:
             posted.update(p.id for p in new)
             del self._pending[game.id]
-            return [Update(SCORE, game, play=p) for p in new]
+            return [Update(SCORE, game, play=p) for p in new] + pending.held
         if any(p.total == current_total and p.id in posted for p in plays):
             # The change was e.g. an extra point added to a touchdown already posted.
             del self._pending[game.id]
-            return []
-        pending.attempts += 1
-        if pending.attempts >= MAX_ATTEMPTS:
+            return pending.held
+        final_held = any(u.kind == FINAL for u in pending.held)
+        waited = self._clock() - pending.since
+        if waited >= PLAY_WAIT_SECONDS or (final_held and waited >= FINAL_HOLD_SECONDS):
             del self._pending[game.id]
-            return [Update(SCORE, game)]
+            # The final already shows the score, so a bare score update would only repeat it.
+            return pending.held if final_held else [Update(SCORE, game)] + pending.held
         return []
 
 
 FetchGoalDetails = Callable[[str], Awaitable[list[GoalDetail]]]
 
-# Polls to wait for a soccer goal's assist before posting the goal without it
-# (at the default 30s interval, about a minute).
-ASSIST_ATTEMPTS = 2
+# How long a soccer goal waits for its assist before posting without it.
+ASSIST_WAIT_SECONDS = 45
 
 
 @dataclass
 class _PendingGoals:
     update: Update
-    attempts: int = 0
+    since: float
 
 
 class AssistResolver:
@@ -108,8 +126,9 @@ class AssistResolver:
     post without the assist rather than being held back.
     """
 
-    def __init__(self, fetch: FetchGoalDetails) -> None:
+    def __init__(self, fetch: FetchGoalDetails, clock: Clock = time.monotonic) -> None:
         self._fetch = fetch
+        self._clock = clock
         self._pending: dict[str, _PendingGoals] = {}
 
     async def resolve(self, games: list[Game], updates: list[Update]) -> list[Update]:
@@ -118,7 +137,8 @@ class AssistResolver:
             if u.kind == SCORE and u.new_goals:
                 waiting = self._pending.get(u.game.id)
                 goals = (waiting.update.new_goals if waiting else ()) + u.new_goals
-                self._pending[u.game.id] = _PendingGoals(replace(u, new_goals=goals))
+                since = waiting.since if waiting else self._clock()
+                self._pending[u.game.id] = _PendingGoals(replace(u, new_goals=goals), since)
             else:
                 others.append(u)
 
@@ -128,10 +148,9 @@ class AssistResolver:
         for game_id in list(self._pending):
             pending = self._pending[game_id]
             goals = await self._with_assists(game_id, pending.update.new_goals)
-            pending.attempts += 1
             if (
                 all(g.assist is not None for g in goals)
-                or pending.attempts >= ASSIST_ATTEMPTS
+                or self._clock() - pending.since >= ASSIST_WAIT_SECONDS
                 or game_id in due
                 or game_id not in live
             ):
