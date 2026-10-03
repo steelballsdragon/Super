@@ -21,12 +21,11 @@ def _values(rows, indent="        "):
     return ",\n".join(indent + "(" + ", ".join(_lit(v) for v in r) + ")" for r in rows)
 
 
-def demo_block(inventory=demo_data.INVENTORY, locations=demo_data.LOCATIONS):
+def demo_block(raw=demo_data.RAW):
+    """raw: (item, location, current qty, available capacity, max qty, location type) rows."""
     return (
-        "    INSERT INTO #stock (item_number, location, quantity) VALUES\n"
-        + _values(inventory) + ";\n"
-        + "    INSERT INTO #locations (location, zone, max_capacity) VALUES\n"
-        + _values(locations) + ";\n"
+        "    INSERT INTO #raw (prtnum, stoloc, curqvl, fp_available, maxqvl, typcod) VALUES\n"
+        + _values(raw) + ";\n"
     )
 
 

@@ -1,17 +1,27 @@
 /*==============================================================================
   STOCK CONSOLIDATION PLAN  (SQL Server 2012 or later)
 
-  Finds items stored in more than one location and works out how many units
-  to move from which location to which, so that locations can be emptied.
+  Reads the location report (Prtnum, Stoloc, Curqvl, Fp Available, Maxqvl,
+  Typcod), cleans it, finds items stored in more than one location and works
+  out how many units to move from which location to which, so that locations
+  can be emptied.
 
   Result 1 - one row per move:
       item_number, from_location, quantity_to_move, to_location,
-      target_open_capacity, target_max_capacity, target_zone,
-      from_zone, target_open_after_move
+      target_open_capacity, target_max_capacity, target_location_type,
+      from_location_type, target_open_after_move
   Result 2 - locations of multi-location items that could not be emptied
-  Result 3 - summary
+  Result 3 - summary (including how many report rows were removed and why)
+  Result 4 - the cleaned data (when @ShowCleanData = 1)
 
-  The rules (Stock_Consolidation.xlsm applies exactly the same ones):
+  Cleaning:
+    - only Prtnum, Stoloc, Curqvl, Fp Available, Maxqvl and Typcod are used;
+    - rows with 0 or a negative current qty, max qty or available capacity are
+      removed (available capacity only while @RemoveNoCapacity = 1);
+    - locations whose max qty is over @MaxLocationQty (23) are removed;
+    - the same item and location listed twice is kept once (largest values).
+
+  Planning (Stock_Consolidation.xlsm applies exactly the same rules):
     1. Only items sitting in 2 or more locations are looked at.
     2. Locations are emptied smallest quantity first.
     3. Stock only goes to locations that already hold the same item.
@@ -22,205 +32,183 @@
            with the most room first.
     5. A location that is emptied never receives stock, and a location that
        receives stock is never emptied.
-    6. Open capacity = max_capacity - everything in the location (all items),
-       and goes down as moves are planned.
+    6. Open capacity starts at Fp Available and goes down as moves are
+       planned (and up when a location is emptied), shared by all items in
+       the location.
 
   HOW TO USE
-    1. Edit the two INSERTs in section 1 so they read your own tables.
+    1. Edit the INSERT in section 1 so it reads your own table or view.
     2. Run. (Set @UseDemoData = 1 to try it on the built-in sample first.)
-    3. To feed the Excel workbook instead, set @ShowInputs = 1, copy the two
-       extra result grids (with headers) into the Inventory and Locations
-       sheets, and press "Build Consolidation Plan".
 ==============================================================================*/
 SET NOCOUNT ON;
 
 --------------------------------------------------------------------------------
 -- SETTINGS
 --------------------------------------------------------------------------------
-DECLARE @SameZoneOnly bit           = 0;        -- 1 = only move within the source location's zone
-DECLARE @AllowSplit   bit           = 1;        -- 1 = a location may be emptied into several locations
-DECLARE @ExcludeZones varchar(4000) = 'STAGE';  -- comma-separated zones to ignore completely
-DECLARE @UseDemoData  bit           = 0;        -- 1 = ignore your tables and use the sample data below
-DECLARE @ShowInputs   bit           = 0;        -- 1 = also return the input data (to paste into Excel)
+DECLARE @MaxLocationQty   decimal(18,4) = 23;   -- only locations whose max qty is at most this
+DECLARE @RemoveNoCapacity bit           = 1;    -- 1 = also remove rows with 0 / negative available capacity
+DECLARE @SameTypeOnly     bit           = 0;    -- 1 = only move between locations of the same type (Typcod)
+DECLARE @AllowSplit       bit           = 1;    -- 1 = a location may be emptied into several locations
+DECLARE @ExcludeTypes     varchar(4000) = '';   -- comma-separated location types to ignore, e.g. 'CONS'
+DECLARE @UseDemoData      bit           = 0;    -- 1 = ignore your table and use the sample data below
+DECLARE @ShowCleanData    bit           = 1;    -- 1 = also return the cleaned data (result 4)
 
 --------------------------------------------------------------------------------
 -- 1. INPUT
 --------------------------------------------------------------------------------
-IF OBJECT_ID('tempdb..#stock')     IS NOT NULL DROP TABLE #stock;
-IF OBJECT_ID('tempdb..#locations') IS NOT NULL DROP TABLE #locations;
+IF OBJECT_ID('tempdb..#raw') IS NOT NULL DROP TABLE #raw;
 
-CREATE TABLE #stock (            -- on-hand stock: one or more rows per item per location
-    item_number varchar(100)  NULL,
-    location    varchar(100)  NULL,
-    quantity    decimal(18,4) NULL
-);
-CREATE TABLE #locations (        -- location master
-    location     varchar(100)  NULL,
-    zone         varchar(100)  NULL,
-    max_capacity decimal(18,4) NULL   -- most units the location can hold; NULL = unknown
+CREATE TABLE #raw (
+    prtnum       varchar(100)  NULL,   -- item number
+    stoloc       varchar(100)  NULL,   -- location
+    curqvl       decimal(18,4) NULL,   -- current quantity
+    fp_available decimal(18,4) NULL,   -- available capacity (NULL = maxqvl - curqvl)
+    maxqvl       decimal(18,4) NULL,   -- max quantity the location can hold
+    typcod       varchar(100)  NULL    -- location type
 );
 
 IF @UseDemoData = 0
 BEGIN
-    /* >>>>>>>>>>>>>>>> CHANGE THESE TWO QUERIES TO MATCH YOUR TABLES <<<<<<<<<<<<<<<< */
-    INSERT INTO #stock (item_number, location, quantity)
-    SELECT  inv.item_number,
-            inv.location,
-            inv.quantity
-    FROM    dbo.inventory_on_hand AS inv
- -- WHERE   inv.warehouse = 'WH1'          -- one warehouse at a time
- --   AND   inv.status    = 'AVAILABLE'    -- only stock that can be moved
+    /* >>>>>>>>>>>>>>>>>> CHANGE THIS QUERY TO MATCH YOUR TABLE OR VIEW <<<<<<<<<<<<<<<<<< */
+    INSERT INTO #raw (prtnum, stoloc, curqvl, fp_available, maxqvl, typcod)
+    SELECT  r.prtnum,
+            r.stoloc,
+            r.curqvl,
+            r.fp_available,
+            r.maxqvl,
+            r.typcod
+    FROM    dbo.location_report AS r
+ -- WHERE   r.wh_id = 'WH1'                 -- one warehouse at a time
     ;
-
-    INSERT INTO #locations (location, zone, max_capacity)
-    SELECT  loc.location,
-            loc.zone,
-            loc.max_capacity
-    FROM    dbo.location_master AS loc
- -- WHERE   loc.warehouse = 'WH1'
-    ;
-    /* >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>><<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< */
+    /* >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>><<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< */
 END
 ELSE
 BEGIN
     -- DEMO DATA START (generated from generator/demo_data.py - same rows as the workbook)
-    INSERT INTO #stock (item_number, location, quantity) VALUES
-        ('5794400', 'ZA186', 5),
-        ('5794400', 'AOF5', 6),
-        ('5794411', 'AOF1', 3),
-        ('5794411', 'AOF2', 8),
-        ('5794411', 'ZA181', 9),
-        ('5794422', 'STG1', 10),
-        ('5794422', 'AOF3', 4),
-        ('5794433', 'AOF10', 2),
-        ('5794433', 'AOF11', 3),
-        ('5794433', 'ZA184', 9),
-        ('5794433', 'AOF12', 10),
-        ('6100025', 'ZA183', 14),
-        ('6100025', 'ZB12', 30),
-        ('6100025', 'ZB13', 34),
-        ('6100031', 'ZB17', 7),
-        ('6100031', 'ZB17', 2),
-        ('6100031', 'ZB18', 25),
-        ('7002210', 'ZA190', 18),
-        ('7002210', 'ZA191', 19),
-        ('7300001', 'X99', 4),
-        ('7300001', 'AOF9', 2),
-        ('8800100', 'BLK01', 120),
-        ('8800100', 'ZB15', 15),
-        ('8800200', 'BLK01', 60),
-        ('8800200', 'ZB16', 12),
-        ('8800200', 'BLK02', 190),
-        ('9100001', 'ZA195', 3),
-        ('9100001', 'ZC01', 10),
-        ('9100002', 'ZC02', 5),
-        ('9100002', 'ZC03', 6),
-        ('4410078', 'AOF4', 9),
-        ('4410078', 'AOF6', 2),
-        ('4410078', 'ZA187', 1),
-        ('4410090', 'ZB10', 22),
-        ('4410090', 'ZB11', 6),
-        ('4410090', 'ZA188', 4),
-        ('4410105', 'AOF7', 11),
-        ('4410105', 'AOF8', 3),
-        ('3300512', 'ZA182', 7),
-        ('3300512', 'ZA185', 6),
-        ('3300512', 'BLK03', 150),
-        ('3300527', 'ZB14', 40),
-        ('3300527', 'ZB19', 1),
-        ('3300527', 'ZB20', 38),
-        ('5000001', 'ZA189', 16),
-        ('5000001', 'ZA192', 2),
-        ('5000001', 'ZA193', 5),
-        ('5000001', 'ZA194', 15);
-    INSERT INTO #locations (location, zone, max_capacity) VALUES
-        ('AOF1', 'CONSOF', 15),
-        ('AOF2', 'CONSOF', 15),
-        ('AOF3', 'CONSOF', 15),
-        ('AOF4', 'CONSOF', 15),
-        ('AOF5', 'CONSOF', 15),
-        ('AOF6', 'CONSOF', 15),
-        ('AOF7', 'CONSOF', 15),
-        ('AOF8', 'CONSOF', 15),
-        ('AOF9', 'CONSOF', 15),
-        ('AOF10', 'CONSOF', 15),
-        ('AOF11', 'CONSOF', 15),
-        ('AOF12', 'CONSOF', 15),
-        ('ZA180', 'ZA', 20),
-        ('ZA181', 'ZA', 20),
-        ('ZA182', 'ZA', 20),
-        ('ZA183', 'ZA', 20),
-        ('ZA184', 'ZA', 20),
-        ('ZA185', 'ZA', 20),
-        ('ZA186', 'ZA', 20),
-        ('ZA187', 'ZA', 20),
-        ('ZA188', 'ZA', 20),
-        ('ZA189', 'ZA', 20),
-        ('ZA190', 'ZA', 20),
-        ('ZA191', 'ZA', 20),
-        ('ZA192', 'ZA', 20),
-        ('ZA193', 'ZA', 20),
-        ('ZA194', 'ZA', 20),
-        ('ZA195', 'ZA', 20),
-        ('ZB10', 'ZB', 40),
-        ('ZB11', 'ZB', 40),
-        ('ZB12', 'ZB', 40),
-        ('ZB13', 'ZB', 40),
-        ('ZB14', 'ZB', 40),
-        ('ZB15', 'ZB', 40),
-        ('ZB16', 'ZB', 40),
-        ('ZB17', 'ZB', 40),
-        ('ZB18', 'ZB', 40),
-        ('ZB19', 'ZB', 40),
-        ('ZB20', 'ZB', 40),
-        ('BLK01', 'BULK', 200),
-        ('BLK02', 'BULK', 200),
-        ('BLK03', 'BULK', 200),
-        ('ZC01', 'ZC', NULL),
-        ('ZC02', 'ZC', NULL),
-        ('ZC03', 'ZC', NULL),
-        ('STG1', 'STAGE', 999);    -- DEMO DATA END
+    INSERT INTO #raw (prtnum, stoloc, curqvl, fp_available, maxqvl, typcod) VALUES
+        ('0100520', 'EB141', 9, 2, 11, 'KCP'),
+        ('0105202', 'Q097', 5, 6, 11, 'KCP'),
+        ('0108006', 'EA111', 4, 7, 11, 'KCP'),
+        ('0151003', 'EC140', 6, 5, 11, 'KCP'),
+        ('0170002', 'F129', 4, 5, 9, 'KCP'),
+        ('0170103', 'F103', 10, 1, 11, 'KCP'),
+        ('0180401', 'EA132', 3, 6, 9, 'KCP'),
+        ('0180401', 'EA141', 7, 2, 9, 'KCP'),
+        ('0180703', 'EC137', 10, 1, 11, 'KCP'),
+        ('0200000', 'F108', 6, 5, 11, 'KCP'),
+        ('0204601', 'EB140', 9, 2, 11, 'KCP'),
+        ('0314830', 'G143', 4, 7, 11, 'KCP'),
+        ('0390419', 'T105', 3, 6, 9, 'CONS'),
+        ('0390421', 'Y183', 6, 3, 9, 'CONS'),
+        ('0390604', 'R128', 4, 7, 11, 'CONS'),
+        ('0390605', 'ZA166', 3, 8, 11, 'CONS'),
+        ('0400703', 'EB127', 9, 2, 11, 'KCP'),
+        ('0400703', 'G134', 1, 8, 9, 'KCP');    -- DEMO DATA END
 END;
 
-IF @ShowInputs = 1
+--------------------------------------------------------------------------------
+-- 2. CLEAN
+--------------------------------------------------------------------------------
+IF OBJECT_ID('tempdb..#tagged')    IS NOT NULL DROP TABLE #tagged;
+IF OBJECT_ID('tempdb..#locstate')  IS NOT NULL DROP TABLE #locstate;
+IF OBJECT_ID('tempdb..#work')      IS NOT NULL DROP TABLE #work;
+IF OBJECT_ID('tempdb..#moves')     IS NOT NULL DROP TABLE #moves;
+IF OBJECT_ID('tempdb..#not_moved') IS NOT NULL DROP TABLE #not_moved;
+
+-- Ignored location types
+DECLARE @ExcludedType TABLE (type_key varchar(100) COLLATE Latin1_General_BIN2 PRIMARY KEY);
+DECLARE @rest varchar(4001) = ISNULL(@ExcludeTypes, '') + ',', @comma int, @t varchar(4000);
+SET @comma = CHARINDEX(',', @rest);
+WHILE @comma > 0
 BEGIN
-    SELECT item_number, location, quantity FROM #stock;
-    SELECT location, zone, max_capacity    FROM #locations;
+    SET @t = UPPER(LTRIM(RTRIM(LEFT(@rest, @comma - 1))));
+    IF @t <> '' AND NOT EXISTS (SELECT 1 FROM @ExcludedType WHERE type_key = @t)
+        INSERT INTO @ExcludedType (type_key) VALUES (@t);
+    SET @rest  = SUBSTRING(@rest, @comma + 1, 4001);
+    SET @comma = CHARINDEX(',', @rest);
 END;
 
---------------------------------------------------------------------------------
--- 2. PREPARE
---------------------------------------------------------------------------------
-IF OBJECT_ID('tempdb..#locstate')   IS NOT NULL DROP TABLE #locstate;
-IF OBJECT_ID('tempdb..#work')       IS NOT NULL DROP TABLE #work;
-IF OBJECT_ID('tempdb..#moves')      IS NOT NULL DROP TABLE #moves;
-IF OBJECT_ID('tempdb..#not_moved')  IS NOT NULL DROP TABLE #not_moved;
-
+-- Every report row with the reason it is dropped (NULL = kept).
 -- Keys are trimmed and upper-cased, and compared/sorted byte by byte, so the
--- order of work is the same whatever the server collation (and the same as Excel).
-CREATE TABLE #locstate (
-    loc_key      varchar(100) COLLATE Latin1_General_BIN2 NOT NULL PRIMARY KEY,
-    zone         varchar(100) NOT NULL,
-    zone_key     varchar(100) COLLATE Latin1_General_BIN2 NOT NULL,
-    max_capacity decimal(18,4) NULL,
-    total_qty    decimal(18,4) NOT NULL          -- everything in the location, all items
-);
+-- result is the same whatever the server collation (and the same as Excel).
+SELECT  UPPER(x.item) COLLATE Latin1_General_BIN2 AS item_key,
+        UPPER(x.loc)  COLLATE Latin1_General_BIN2 AS loc_key,
+        x.item COLLATE Latin1_General_BIN2         AS item_number,
+        x.loc  COLLATE Latin1_General_BIN2         AS location,
+        x.curqvl,
+        x.avail,
+        x.maxqvl,
+        x.typ COLLATE Latin1_General_BIN2          AS location_type,
+        CASE WHEN x.curqvl IS NULL OR x.curqvl <= 0
+               OR x.maxqvl IS NULL OR x.maxqvl <= 0
+               OR (@RemoveNoCapacity = 1 AND (x.avail IS NULL OR x.avail <= 0)) THEN 1
+             WHEN x.maxqvl > @MaxLocationQty                                    THEN 2
+             WHEN EXISTS (SELECT 1 FROM @ExcludedType AS e
+                          WHERE e.type_key = UPPER(x.typ) COLLATE Latin1_General_BIN2) THEN 3
+        END AS dropped
+INTO    #tagged
+FROM   (SELECT LTRIM(RTRIM(prtnum))               AS item,
+               LTRIM(RTRIM(stoloc))               AS loc,
+               LTRIM(RTRIM(ISNULL(typcod, '')))   AS typ,
+               curqvl,
+               maxqvl,
+               ISNULL(fp_available, maxqvl - curqvl) AS avail
+        FROM   #raw) AS x
+WHERE   ISNULL(x.item, '') <> '' AND ISNULL(x.loc, '') <> '';
 
 CREATE TABLE #work (
-    row_id      int IDENTITY(1,1) PRIMARY KEY,
-    item_key    varchar(100) COLLATE Latin1_General_BIN2 NOT NULL,
-    loc_key     varchar(100) COLLATE Latin1_General_BIN2 NOT NULL,
-    item_number varchar(100) NOT NULL,
-    location    varchar(100) NOT NULL,
-    start_qty   decimal(18,4) NOT NULL,
-    cur_qty     decimal(18,4) NOT NULL,
-    zone        varchar(100) NULL,                -- NULL = not in the location master
-    zone_key    varchar(100) COLLATE Latin1_General_BIN2 NULL,
-    eligible    bit NOT NULL,                     -- 0 = in an excluded zone
-    state       tinyint NOT NULL DEFAULT 0,       -- 0 untouched, 1 emptied, 2 received stock
-    src_order   int NULL                          -- order in which locations are tried
+    row_id        int IDENTITY(1,1) PRIMARY KEY,
+    item_key      varchar(100) COLLATE Latin1_General_BIN2 NOT NULL,
+    loc_key       varchar(100) COLLATE Latin1_General_BIN2 NOT NULL,
+    item_number   varchar(100) NOT NULL,
+    location      varchar(100) NOT NULL,
+    current_qty   decimal(18,4) NOT NULL,
+    available     decimal(18,4) NOT NULL,
+    max_qty       decimal(18,4) NOT NULL,
+    location_type varchar(100) NOT NULL,
+    cur_qty       decimal(18,4) NOT NULL,          -- quantity as moves are planned
+    state         tinyint NOT NULL DEFAULT 0,      -- 0 untouched, 1 emptied, 2 received stock
+    src_order     int NULL                         -- order in which locations are tried
 );
 
+-- Kept rows; the same item and location twice keeps the largest values
+INSERT INTO #work (item_key, loc_key, item_number, location, current_qty, available, max_qty,
+                   location_type, cur_qty)
+SELECT  item_key, loc_key, MIN(item_number), MIN(location), MAX(curqvl), MAX(ISNULL(avail, 0)),
+        MAX(maxqvl), MAX(location_type), MAX(curqvl)
+FROM    #tagged
+WHERE   dropped IS NULL
+GROUP BY item_key, loc_key
+ORDER BY item_key, loc_key;
+
+-- Location level: capacity is shared by every item in the location
+CREATE TABLE #locstate (
+    loc_key       varchar(100) COLLATE Latin1_General_BIN2 NOT NULL PRIMARY KEY,
+    location_type varchar(100) NOT NULL,
+    type_key      varchar(100) COLLATE Latin1_General_BIN2 NOT NULL,
+    max_qty       decimal(18,4) NOT NULL,
+    open_cap      decimal(18,4) NOT NULL
+);
+INSERT INTO #locstate (loc_key, location_type, type_key, max_qty, open_cap)
+SELECT  loc_key, MAX(location_type), UPPER(MAX(location_type)), MAX(max_qty), MAX(available)
+FROM    #work
+GROUP BY loc_key;
+
+-- Order of work: by item, then smallest quantity first
+UPDATE w
+SET    src_order = o.rn
+FROM   #work AS w
+JOIN  (SELECT row_id, ROW_NUMBER() OVER (ORDER BY item_key, current_qty, loc_key) AS rn
+       FROM   #work
+       WHERE  item_key IN (SELECT item_key FROM #work GROUP BY item_key HAVING COUNT(*) >= 2)) AS o
+       ON o.row_id = w.row_id;
+
+CREATE INDEX ix_work_item  ON #work (item_key) INCLUDE (state, loc_key, cur_qty);
+CREATE INDEX ix_work_order ON #work (src_order);
+
+--------------------------------------------------------------------------------
+-- 3. PLAN THE MOVES
+--------------------------------------------------------------------------------
 CREATE TABLE #moves (
     move_seq               int IDENTITY(1,1) PRIMARY KEY,
     item_number            varchar(100),
@@ -229,8 +217,8 @@ CREATE TABLE #moves (
     to_location            varchar(100),
     target_open_capacity   decimal(18,4),
     target_max_capacity    decimal(18,4),
-    target_zone            varchar(100),
-    from_zone              varchar(100),
+    target_location_type   varchar(100),
+    from_location_type     varchar(100),
     target_open_after_move decimal(18,4)
 );
 
@@ -241,79 +229,6 @@ CREATE TABLE #not_moved (
     reason         varchar(100) NOT NULL
 );
 
--- Excluded zones
-DECLARE @ExcludedZone TABLE (zone_key varchar(100) COLLATE Latin1_General_BIN2 PRIMARY KEY);
-DECLARE @rest varchar(4001) = ISNULL(@ExcludeZones, '') + ',', @comma int, @z varchar(4000);
-SET @comma = CHARINDEX(',', @rest);
-WHILE @comma > 0
-BEGIN
-    SET @z = UPPER(LTRIM(RTRIM(LEFT(@rest, @comma - 1))));
-    IF @z <> '' AND NOT EXISTS (SELECT 1 FROM @ExcludedZone WHERE zone_key = @z)
-        INSERT INTO @ExcludedZone (zone_key) VALUES (@z);
-    SET @rest  = SUBSTRING(@rest, @comma + 1, 4001);
-    SET @comma = CHARINDEX(',', @rest);
-END;
-
--- Location master (a duplicated location keeps its largest zone and capacity)
-INSERT INTO #locstate (loc_key, zone, zone_key, max_capacity, total_qty)
-SELECT  l.loc_key,
-        MAX(l.zone),
-        UPPER(MAX(l.zone)),
-        MAX(l.max_capacity),
-        0
-FROM   (SELECT UPPER(LTRIM(RTRIM(location))) COLLATE Latin1_General_BIN2         AS loc_key,
-               LTRIM(RTRIM(ISNULL(zone, ''))) COLLATE Latin1_General_BIN2       AS zone,
-               max_capacity
-        FROM   #locations
-        WHERE  LTRIM(RTRIM(ISNULL(location, ''))) <> '') AS l
-GROUP BY l.loc_key;
-
--- Stock summed per item per location
-INSERT INTO #work (item_key, loc_key, item_number, location, start_qty, cur_qty, zone, zone_key, eligible)
-SELECT  s.item_key, s.loc_key, s.item_number, s.location, s.qty, s.qty,
-        l.zone, l.zone_key,
-        CASE WHEN x.zone_key IS NULL THEN 1 ELSE 0 END
-FROM   (SELECT  k.item_key, k.loc_key,
-                MIN(k.item_number) AS item_number,
-                MIN(k.location)    AS location,
-                SUM(k.quantity)    AS qty
-        FROM   (SELECT UPPER(LTRIM(RTRIM(item_number))) COLLATE Latin1_General_BIN2 AS item_key,
-                       UPPER(LTRIM(RTRIM(location)))    COLLATE Latin1_General_BIN2 AS loc_key,
-                       LTRIM(RTRIM(item_number))        COLLATE Latin1_General_BIN2 AS item_number,
-                       LTRIM(RTRIM(location))           COLLATE Latin1_General_BIN2 AS location,
-                       quantity
-                FROM   #stock
-                WHERE  LTRIM(RTRIM(ISNULL(item_number, ''))) <> ''
-                  AND  LTRIM(RTRIM(ISNULL(location, '')))    <> ''
-                  AND  quantity IS NOT NULL) AS k
-        GROUP BY k.item_key, k.loc_key
-        HAVING SUM(k.quantity) > 0) AS s
-LEFT JOIN #locstate     AS l ON l.loc_key  = s.loc_key
-LEFT JOIN @ExcludedZone AS x ON x.zone_key = l.zone_key;
-
-UPDATE l
-SET    total_qty = t.qty
-FROM   #locstate AS l
-JOIN  (SELECT loc_key, SUM(start_qty) AS qty FROM #work GROUP BY loc_key) AS t
-       ON t.loc_key = l.loc_key;
-
--- Order of work: by item, then smallest quantity first
-UPDATE w
-SET    src_order = o.rn
-FROM   #work AS w
-JOIN  (SELECT row_id, ROW_NUMBER() OVER (ORDER BY item_key, start_qty, loc_key) AS rn
-       FROM   #work
-       WHERE  eligible = 1
-         AND  item_key IN (SELECT item_key FROM #work WHERE eligible = 1
-                           GROUP BY item_key HAVING COUNT(*) >= 2)) AS o
-       ON o.row_id = w.row_id;
-
-CREATE INDEX ix_work_item  ON #work (item_key) INCLUDE (state, eligible, zone_key, loc_key, cur_qty);
-CREATE INDEX ix_work_order ON #work (src_order);
-
---------------------------------------------------------------------------------
--- 3. PLAN THE MOVES
---------------------------------------------------------------------------------
 DECLARE @cand  TABLE (row_id int PRIMARY KEY,
                       loc_key varchar(100) COLLATE Latin1_General_BIN2 NOT NULL,
                       cur_qty decimal(18,4) NOT NULL,
@@ -322,37 +237,32 @@ DECLARE @alloc TABLE (seq int PRIMARY KEY, row_id int NOT NULL, take decimal(18,
 
 DECLARE @i int = 1,
         @n int = ISNULL((SELECT MAX(src_order) FROM #work), 0),
-        @src int, @item varchar(100), @src_loc varchar(100), @src_zone varchar(100),
+        @src int, @item varchar(100), @src_loc varchar(100), @src_type varchar(100),
         @need decimal(18,4), @state tinyint,
-        @n_other int, @n_cap int, @sum_open decimal(18,4), @max_open decimal(18,4),
-        @best int;
+        @n_other int, @sum_open decimal(18,4), @max_open decimal(18,4), @best int;
 
 WHILE @i <= @n
 BEGIN
-    SELECT @src = row_id, @item = item_key, @src_loc = loc_key, @src_zone = zone_key,
-           @need = start_qty, @state = state
-    FROM   #work
-    WHERE  src_order = @i;
+    SELECT @src = w.row_id, @item = w.item_key, @src_loc = w.loc_key, @src_type = l.type_key,
+           @need = w.current_qty, @state = w.state
+    FROM   #work AS w
+    JOIN   #locstate AS l ON l.loc_key = w.loc_key
+    WHERE  w.src_order = @i;
     SET @i += 1;
 
     IF @state <> 0 CONTINUE;          -- has received stock, so it stays
 
     -- Other locations of the item that may receive stock
-    SELECT @n_other = COUNT(*),
-           @n_cap   = COUNT(l.max_capacity)
-    FROM   #work AS t
-    LEFT JOIN #locstate AS l ON l.loc_key = t.loc_key
-    WHERE  t.item_key = @item AND t.row_id <> @src AND t.state <> 1 AND t.eligible = 1
-      AND (@SameZoneOnly = 0 OR t.zone_key = @src_zone);
-
     DELETE FROM @cand;
     INSERT INTO @cand (row_id, loc_key, cur_qty, open_cap)
-    SELECT t.row_id, t.loc_key, t.cur_qty, l.max_capacity - l.total_qty
+    SELECT t.row_id, t.loc_key, t.cur_qty, l.open_cap
     FROM   #work AS t
     JOIN   #locstate AS l ON l.loc_key = t.loc_key
-    WHERE  t.item_key = @item AND t.row_id <> @src AND t.state <> 1 AND t.eligible = 1
-      AND (@SameZoneOnly = 0 OR t.zone_key = @src_zone)
-      AND  l.max_capacity - l.total_qty > 0;
+    WHERE  t.item_key = @item AND t.row_id <> @src AND t.state <> 1
+      AND (@SameTypeOnly = 0 OR l.type_key = @src_type);
+
+    SET @n_other = (SELECT COUNT(*) FROM @cand);
+    DELETE FROM @cand WHERE open_cap <= 0;
 
     SELECT @sum_open = ISNULL(SUM(open_cap), 0),
            @max_open = ISNULL(MAX(open_cap), 0)
@@ -383,8 +293,7 @@ BEGIN
         INSERT INTO #not_moved (row_id, room_elsewhere, reason)
         VALUES (@src,
                 CASE WHEN @AllowSplit = 1 THEN @sum_open ELSE @max_open END,
-                CASE WHEN @n_other = 0    THEN 'No other location of this item in the same zone'
-                     WHEN @n_cap = 0      THEN 'Other locations of this item have no max capacity set'
+                CASE WHEN @n_other = 0    THEN 'No other location of this item with the same location type'
                      WHEN @AllowSplit = 1 THEN 'Not enough room in the item''s other locations'
                      ELSE                      'No single location of this item has room for all of it'
                 END);
@@ -392,19 +301,21 @@ BEGIN
     END;
 
     INSERT INTO #moves (item_number, from_location, quantity_to_move, to_location,
-                        target_open_capacity, target_max_capacity, target_zone,
-                        from_zone, target_open_after_move)
+                        target_open_capacity, target_max_capacity, target_location_type,
+                        from_location_type, target_open_after_move)
     SELECT s.item_number, s.location, a.take, t.location,
-           l.max_capacity - l.total_qty, l.max_capacity, l.zone,
-           s.zone, l.max_capacity - l.total_qty - a.take
+           l.open_cap, l.max_qty, l.location_type,
+           s.location_type, l.open_cap - a.take
     FROM   @alloc AS a
     JOIN   #work     AS t ON t.row_id  = a.row_id
     JOIN   #locstate AS l ON l.loc_key = t.loc_key
-    CROSS JOIN (SELECT item_number, location, zone FROM #work WHERE row_id = @src) AS s
+    CROSS JOIN (SELECT w.item_number, w.location, ls.location_type
+                FROM   #work AS w JOIN #locstate AS ls ON ls.loc_key = w.loc_key
+                WHERE  w.row_id = @src) AS s
     ORDER BY a.seq;
 
     UPDATE l
-    SET    total_qty = l.total_qty + a.take
+    SET    open_cap = l.open_cap - a.take
     FROM   #locstate AS l
     JOIN   #work AS t ON t.loc_key = l.loc_key
     JOIN   @alloc AS a ON a.row_id = t.row_id;
@@ -414,42 +325,59 @@ BEGIN
     FROM   #work AS t
     JOIN   @alloc AS a ON a.row_id = t.row_id;
 
-    UPDATE #work     SET cur_qty = 0, state = 1         WHERE row_id  = @src;
-    UPDATE #locstate SET total_qty = total_qty - @need  WHERE loc_key = @src_loc;
+    UPDATE #work     SET cur_qty = 0, state = 1        WHERE row_id  = @src;
+    UPDATE #locstate SET open_cap = open_cap + @need   WHERE loc_key = @src_loc;
 END;
 
 --------------------------------------------------------------------------------
 -- 4. RESULTS
 --------------------------------------------------------------------------------
--- Moves
+-- 1: Moves
 SELECT  item_number,
         from_location,
         quantity_to_move,
         to_location,
         target_open_capacity,
         target_max_capacity,
-        target_zone,
-        from_zone,
+        target_location_type,
+        from_location_type,
         target_open_after_move
 FROM    #moves
 ORDER BY move_seq;
 
--- Locations that stay (could not be emptied)
+-- 2: Locations that stay (could not be emptied)
 SELECT  w.item_number,
         w.location,
-        w.zone,
-        w.start_qty AS quantity,
+        l.location_type,
+        w.current_qty AS quantity,
         n.room_elsewhere,
         n.reason
 FROM    #not_moved AS n
-JOIN    #work      AS w ON w.row_id = n.row_id
+JOIN    #work      AS w ON w.row_id  = n.row_id
+JOIN    #locstate  AS l ON l.loc_key = w.loc_key
 WHERE   w.state = 0
 ORDER BY n.seq;
 
--- Summary
-SELECT  (SELECT COUNT(DISTINCT item_key) FROM #work WHERE src_order IS NOT NULL)        AS items_in_multiple_locations,
-        (SELECT COUNT(*) FROM #work WHERE state = 1)                                    AS locations_emptied,
-        (SELECT COUNT(*) FROM #moves)                                                   AS moves,
-        (SELECT ISNULL(SUM(quantity_to_move), 0) FROM #moves)                           AS units_to_move,
+-- 3: Summary
+SELECT  (SELECT COUNT(*) FROM #tagged)                                                AS rows_read,
+        (SELECT COUNT(*) FROM #tagged WHERE dropped = 1)                              AS removed_zero_or_negative,
+        (SELECT COUNT(*) FROM #tagged WHERE dropped = 2)                              AS removed_over_max_qty,
+        (SELECT COUNT(*) FROM #tagged WHERE dropped = 3)                              AS removed_ignored_type,
+        (SELECT COUNT(*) FROM #work)                                                  AS rows_kept,
+        (SELECT COUNT(DISTINCT item_key) FROM #work WHERE src_order IS NOT NULL)      AS items_in_multiple_locations,
+        (SELECT COUNT(*) FROM #work WHERE state = 1)                                  AS locations_emptied,
+        (SELECT COUNT(*) FROM #moves)                                                 AS moves,
+        (SELECT ISNULL(SUM(quantity_to_move), 0) FROM #moves)                         AS units_to_move,
         (SELECT COUNT(*) FROM #not_moved AS n JOIN #work AS w ON w.row_id = n.row_id
-         WHERE w.state = 0)                                                             AS locations_not_emptied;
+         WHERE w.state = 0)                                                           AS locations_not_emptied;
+
+-- 4: Cleaned data
+IF @ShowCleanData = 1
+    SELECT  item_number,
+            location,
+            current_qty,
+            available     AS available_capacity,
+            max_qty,
+            location_type
+    FROM    #work
+    ORDER BY item_key, loc_key;

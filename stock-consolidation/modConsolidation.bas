@@ -2,10 +2,20 @@ Attribute VB_Name = "modConsolidation"
 '==============================================================================
 ' STOCK CONSOLIDATION PLANNER
 '
-' Finds items stored in more than one location and works out how many units
+' Reads the location report pasted into "Raw Data", keeps only Prtnum, Stoloc,
+' Curqvl, Fp Available, Maxqvl and Typcod, cleans it into "Clean Data", then
+' finds items stored in more than one location and works out how many units
 ' to move from which location to which, so that locations can be emptied.
 ' It uses exactly the same rules as consolidation_plan.sql, so for the same
-' data both give the same moves:
+' data both give the same moves.
+'
+' Cleaning:
+'   - rows with 0 or a negative current qty, max qty or available capacity
+'     are removed (available capacity only while that setting is Yes);
+'   - locations whose max qty is over the limit (23) are removed;
+'   - the same item and location listed twice is kept once (largest values).
+'
+' Planning:
 '   1. Only items sitting in 2 or more locations are looked at.
 '   2. Locations are emptied smallest quantity first.
 '   3. Stock only goes to locations that already hold the same item.
@@ -16,13 +26,12 @@ Attribute VB_Name = "modConsolidation"
 '          locations with the most room first.
 '   5. A location that is emptied never receives stock, and a location that
 '      receives stock is never emptied.
-'   6. Open capacity = max capacity - everything in the location (all items),
-'      and goes down as moves are planned.
+'   6. Open capacity starts at Fp Available and goes down as moves are
+'      planned (and up when a location is emptied), shared by all items in
+'      the location.
 '
-' Input : sheet "Inventory"  (item_number, location, quantity)
-'         sheet "Locations"  (location, zone, max_capacity)
-'         Columns are found by their header in row 1, in any order.
-' Output: sheets "Consolidation Plan" and "Not Consolidated"
+' Raw Data columns are found by their header in row 1 ("Prtnum", "Stoloc",
+' "Max of Curqvl", ...), in any order; other columns are ignored.
 '==============================================================================
 Option Explicit
 Option Compare Binary
@@ -30,46 +39,58 @@ Option Compare Binary
 Private Const EPS As Double = 0.000001
 Private Const HEADER_ROW As Long = 4
 Private Const FIRST_ROW As Long = 5
+Private Const CLEAN_COLS As Long = 6
 Private Const PLAN_COLS As Long = 9
 Private Const FAIL_COLS As Long = 6
 
-Private Const ITEM_HEADERS As String = "item_number,item,item_no,item_code,part_number,part_no,part,sku"
-Private Const LOC_HEADERS As String = "location,location_id,loc,bin,bin_location"
-Private Const QTY_HEADERS As String = "quantity,qty,actual_qty,on_hand,on_hand_qty,qty_on_hand"
-Private Const ZONE_HEADERS As String = "zone,zone_id,location_zone"
-Private Const CAP_HEADERS As String = "max_capacity,capacity,max_qty,maximum_capacity,location_capacity"
+' Accepted headers (lower case, spaces as _, without a "Max of"/"Sum of" prefix)
+Private Const ITEM_HEADERS As String = "prtnum,item_number,item,item_no,part_number,part_no,part,sku"
+Private Const LOC_HEADERS As String = "stoloc,location,location_id,loc,bin"
+Private Const QTY_HEADERS As String = "curqvl,current_qty,current_quantity,quantity,qty"
+Private Const AVAIL_HEADERS As String = "fp_available,available_capacity,available,open_capacity"
+Private Const MAX_HEADERS As String = "maxqvl,max_qty,max_quantity,max_capacity,capacity"
+Private Const TYPE_HEADERS As String = "typcod,location_type,loc_type,type"
 
-Private Const REASON_ZONE As String = "No other location of this item in the same zone"
-Private Const REASON_NO_CAP As String = "Other locations of this item have no max capacity set"
+Private Const REASON_TYPE As String = "No other location of this item with the same location type"
 Private Const REASON_ROOM As String = "Not enough room in the item's other locations"
 Private Const REASON_SINGLE As String = "No single location of this item has room for all of it"
 
 ' Settings
-Private mSameZoneOnly As Boolean
+Private mMaxLocationQty As Double
+Private mRemoveNoCapacity As Boolean
+Private mSameTypeOnly As Boolean
 Private mAllowSplit As Boolean
 Private mExcludeText As String
 Private mExcluded As Collection
 Private mShowMessages As Boolean
 
-' Locations from the location master (1 To locCount)
-Private locCount As Long
-Private locIndex As Collection          ' upper-case location -> index
-Private lZone() As String
-Private lZoneKey() As String
-Private lCap() As Double
-Private lHasCap() As Boolean
-Private lTotal() As Double              ' everything in the location, all items
+' Cleaning counts
+Private statRead As Long
+Private statZero As Long
+Private statOverMax As Long
+Private statType As Long
 
-' Stock summed per item per location (1 To rowCount)
+' Cleaned item-location rows (1 To rowCount), sorted by item then location
 Private rowCount As Long
 Private rItem() As String
 Private rItemKey() As String
 Private rLoc() As String
 Private rLocKey() As String
-Private rQty() As Double                ' quantity before any move
+Private rQty() As Double                ' current qty before any move
+Private rAvail() As Double
+Private rMax() As Double
+Private rType() As String
 Private rCur() As Double                ' quantity as moves are planned
-Private rLocIdx() As Long               ' 0 = not in the location master
+Private rLocIdx() As Long
 Private rState() As Integer             ' 0 untouched, 1 emptied, 2 received stock
+Private rMulti() As Boolean             ' item sits in 2+ locations
+
+' Locations (1 To locCount); capacity is shared by every item in a location
+Private locCount As Long
+Private lOpen() As Double
+Private lMax() As Double
+Private lType() As String
+Private lTypeKey() As String
 
 ' Results
 Private moveList() As Variant
@@ -89,6 +110,11 @@ End Sub
 
 Public Sub ClearResults()
     Dim ws As Worksheet
+    Set ws = GetSheet("shtClean", "Clean Data")
+    If Not ws Is Nothing Then
+        StartSheet ws, "Clean Data", "Press 'Build Consolidation Plan' on the Start sheet."
+        WriteHeaders ws, CleanHeaders()
+    End If
     Set ws = GetSheet("shtPlan", "Consolidation Plan")
     If Not ws Is Nothing Then
         StartSheet ws, "Consolidation Plan", "Press 'Build Consolidation Plan' on the Start sheet."
@@ -113,21 +139,22 @@ Public Sub RunConsolidation(ByVal showMessages As Boolean)
     On Error GoTo Failed
 
     LoadSettings
-    If LoadLocations() Then
-        If LoadInventory() Then
-            PlanMoves
-            WritePlan
-            WriteNotMoved
-            SetStatus "Last run " & Format$(Now, "dd-mmm-yyyy hh:mm") & ": " & moveCount & " moves, " & _
-                      EmptiedCount() & " locations emptied, " & RemainingFailures() & " cannot be emptied"
-            GetSheet("shtPlan", "Consolidation Plan").Activate
-            If mShowMessages Then
-                MsgBox "Plan ready." & vbCrLf & vbCrLf & _
-                       moveCount & " moves will empty " & EmptiedCount() & " locations (" & _
-                       FormatQty(TotalMoved()) & " units)." & vbCrLf & _
-                       RemainingFailures() & " locations cannot be emptied - see 'Not Consolidated'.", _
-                       vbInformation, "Stock consolidation"
-            End If
+    If LoadRawData() Then
+        PlanMoves
+        WriteCleanData
+        WritePlan
+        WriteNotMoved
+        SetStatus "Last run " & Format$(Now, "dd-mmm-yyyy hh:mm") & ": " & rowCount & " rows kept, " & _
+                  moveCount & " moves, " & EmptiedCount() & " locations emptied, " & _
+                  RemainingFailures() & " cannot be emptied"
+        GetSheet("shtPlan", "Consolidation Plan").Activate
+        If mShowMessages Then
+            MsgBox "Plan ready." & vbCrLf & vbCrLf & _
+                   statRead & " report rows read, " & rowCount & " kept after cleaning." & vbCrLf & _
+                   moveCount & " moves will empty " & EmptiedCount() & " locations (" & _
+                   FormatQty(TotalMoved()) & " units)." & vbCrLf & _
+                   RemainingFailures() & " locations cannot be emptied - see 'Not Consolidated'.", _
+                   vbInformation, "Stock consolidation"
         End If
     End If
 
@@ -144,104 +171,47 @@ Failed:
 End Sub
 
 '------------------------------------------------------------------------------
-' Input
+' Input and cleaning
 '------------------------------------------------------------------------------
 Private Sub LoadSettings()
-    Dim part As Variant, z As String
-    mSameZoneOnly = IsYes(SettingText("SameZoneOnly", "No"))
+    Dim part As Variant, t As String
+    mMaxLocationQty = SettingNumber("MaxLocationQty", 23)
+    mRemoveNoCapacity = IsYes(SettingText("RemoveNoCapacity", "Yes"))
+    mSameTypeOnly = IsYes(SettingText("SameTypeOnly", "No"))
     mAllowSplit = IsYes(SettingText("AllowSplit", "Yes"))
-    mExcludeText = SettingText("ExcludeZones", "")
+    mExcludeText = SettingText("ExcludeTypes", "")
     Set mExcluded = New Collection
     For Each part In Split(mExcludeText, ",")
-        z = UCase$(Trim$(CStr(part)))
-        If Len(z) > 0 Then
-            If Lookup(mExcluded, z) = 0 Then mExcluded.Add 1, z
+        t = UCase$(Trim$(CStr(part)))
+        If Len(t) > 0 Then
+            If Lookup(mExcluded, t) = 0 Then mExcluded.Add 1, t
         End If
     Next part
 End Sub
 
-Private Function LoadLocations() As Boolean
-    Dim ws As Worksheet, data As Variant, v As Variant
-    Dim lastCol As Long, lastRow As Long, n As Long, r As Long, idx As Long
-    Dim cLoc As Long, cZone As Long, cCap As Long
-    Dim key As String, zone As String
+Private Function LoadRawData() As Boolean
+    Dim ws As Worksheet, data As Variant, rowIndex As Collection, locIndex As Collection
+    Dim lastCol As Long, lastRow As Long, n As Long, r As Long, idx As Long, li As Long, dropped As Long
+    Dim cItem As Long, cLoc As Long, cQty As Long, cAvail As Long, cMax As Long, cType As Long
+    Dim item As String, loc As String, typ As String, key As String
+    Dim qty As Double, avail As Double, mx As Double
+    Dim hasQty As Boolean, hasAvail As Boolean, hasMax As Boolean
 
-    Set ws = GetSheet("shtLocations", "Locations")
+    Set ws = GetSheet("shtRaw", "Raw Data")
     If ws Is Nothing Then
-        Report "The 'Locations' sheet is missing."
-        Exit Function
-    End If
-    lastCol = FindLastColumn(ws)
-    cLoc = FindColumn(ws, lastCol, LOC_HEADERS)
-    cZone = FindColumn(ws, lastCol, ZONE_HEADERS)
-    cCap = FindColumn(ws, lastCol, CAP_HEADERS)
-    If cLoc = 0 Or cZone = 0 Or cCap = 0 Then
-        Report "The 'Locations' sheet needs these headers in row 1: location, zone, max_capacity."
-        Exit Function
-    End If
-
-    lastRow = FindLastRow(ws, cLoc, cZone, cCap)
-    n = lastRow - 1
-    If n < 1 Then n = 1
-    ReDim lZone(1 To n)
-    ReDim lZoneKey(1 To n)
-    ReDim lCap(1 To n)
-    ReDim lHasCap(1 To n)
-    ReDim lTotal(1 To n)
-    Set locIndex = New Collection
-    locCount = 0
-
-    If lastRow >= 2 Then
-        data = ws.Range(ws.Cells(2, 1), ws.Cells(lastRow, lastCol)).Value
-        For r = 1 To UBound(data, 1)
-            key = UCase$(CellText(data(r, cLoc)))
-            If Len(key) > 0 Then
-                zone = CellText(data(r, cZone))
-                idx = Lookup(locIndex, key)
-                If idx = 0 Then
-                    locCount = locCount + 1
-                    idx = locCount
-                    locIndex.Add idx, key
-                    lZone(idx) = zone
-                ElseIf zone > lZone(idx) Then
-                    lZone(idx) = zone           ' duplicated location: keep the largest
-                End If
-                v = data(r, cCap)
-                If IsNumber(v) Then
-                    If Not lHasCap(idx) Then
-                        lCap(idx) = CDbl(v)
-                        lHasCap(idx) = True
-                    ElseIf CDbl(v) > lCap(idx) Then
-                        lCap(idx) = CDbl(v)
-                    End If
-                End If
-            End If
-        Next r
-    End If
-    For idx = 1 To locCount
-        lZoneKey(idx) = UCase$(lZone(idx))
-    Next idx
-    LoadLocations = True
-End Function
-
-Private Function LoadInventory() As Boolean
-    Dim ws As Worksheet, data As Variant, v As Variant
-    Dim lastCol As Long, lastRow As Long, n As Long, r As Long, idx As Long
-    Dim cItem As Long, cLoc As Long, cQty As Long
-    Dim item As String, loc As String, key As String
-    Dim rowIndex As Collection
-
-    Set ws = GetSheet("shtInventory", "Inventory")
-    If ws Is Nothing Then
-        Report "The 'Inventory' sheet is missing."
+        Report "The 'Raw Data' sheet is missing."
         Exit Function
     End If
     lastCol = FindLastColumn(ws)
     cItem = FindColumn(ws, lastCol, ITEM_HEADERS)
     cLoc = FindColumn(ws, lastCol, LOC_HEADERS)
     cQty = FindColumn(ws, lastCol, QTY_HEADERS)
-    If cItem = 0 Or cLoc = 0 Or cQty = 0 Then
-        Report "The 'Inventory' sheet needs these headers in row 1: item_number, location, quantity."
+    cAvail = FindColumn(ws, lastCol, AVAIL_HEADERS)
+    cMax = FindColumn(ws, lastCol, MAX_HEADERS)
+    cType = FindColumn(ws, lastCol, TYPE_HEADERS)
+    If cItem = 0 Or cLoc = 0 Or cQty = 0 Or cMax = 0 Then
+        Report "The 'Raw Data' sheet needs these headers in row 1: Prtnum, Stoloc, Max of Curqvl, " & _
+               "Max of Maxqvl (and ideally Max of Fp Available and Typcod)."
         Exit Function
     End If
 
@@ -253,54 +223,169 @@ Private Function LoadInventory() As Boolean
     ReDim rLoc(1 To n)
     ReDim rLocKey(1 To n)
     ReDim rQty(1 To n)
-    ReDim rCur(1 To n)
-    ReDim rLocIdx(1 To n)
-    ReDim rState(1 To n)
+    ReDim rAvail(1 To n)
+    ReDim rMax(1 To n)
+    ReDim rType(1 To n)
     Set rowIndex = New Collection
     rowCount = 0
+    statRead = 0
+    statZero = 0
+    statOverMax = 0
+    statType = 0
 
     If lastRow >= 2 Then
         data = ws.Range(ws.Cells(2, 1), ws.Cells(lastRow, lastCol)).Value
         For r = 1 To UBound(data, 1)
             item = CellText(data(r, cItem))
             loc = CellText(data(r, cLoc))
-            v = data(r, cQty)
-            If Len(item) > 0 And Len(loc) > 0 And IsNumber(v) Then
-                key = UCase$(item) & vbTab & UCase$(loc)
-                idx = Lookup(rowIndex, key)
-                If idx = 0 Then
-                    rowCount = rowCount + 1
-                    idx = rowCount
-                    rowIndex.Add idx, key
-                    rItem(idx) = item
-                    rItemKey(idx) = UCase$(item)
-                    rLoc(idx) = loc
-                    rLocKey(idx) = UCase$(loc)
-                Else
-                    If item < rItem(idx) Then rItem(idx) = item
-                    If loc < rLoc(idx) Then rLoc(idx) = loc
+            If Len(item) > 0 And Len(loc) > 0 Then
+                statRead = statRead + 1
+                typ = ""
+                If cType > 0 Then typ = CellText(data(r, cType))
+                hasQty = IsNumber(data(r, cQty))
+                hasMax = IsNumber(data(r, cMax))
+                hasAvail = False
+                If cAvail > 0 Then hasAvail = IsNumber(data(r, cAvail))
+                If hasQty Then qty = CDbl(data(r, cQty))
+                If hasMax Then mx = CDbl(data(r, cMax))
+                If hasAvail Then
+                    avail = CDbl(data(r, cAvail))
+                ElseIf hasQty And hasMax Then
+                    avail = mx - qty                ' no Fp Available: max - current
+                    hasAvail = True
                 End If
-                rQty(idx) = rQty(idx) + CDbl(v)
+
+                dropped = 0
+                If Not hasQty Or Not hasMax Then
+                    dropped = 1
+                ElseIf qty <= 0 Or mx <= 0 Then
+                    dropped = 1
+                ElseIf mRemoveNoCapacity And Not hasAvail Then
+                    dropped = 1
+                ElseIf mRemoveNoCapacity And avail <= 0 Then
+                    dropped = 1
+                ElseIf mx > mMaxLocationQty Then
+                    dropped = 2
+                ElseIf Lookup(mExcluded, UCase$(typ)) > 0 Then
+                    dropped = 3
+                End If
+                If Not hasAvail Then avail = 0
+
+                Select Case dropped
+                Case 1
+                    statZero = statZero + 1
+                Case 2
+                    statOverMax = statOverMax + 1
+                Case 3
+                    statType = statType + 1
+                Case Else
+                    key = UCase$(item) & vbTab & UCase$(loc)
+                    idx = Lookup(rowIndex, key)
+                    If idx = 0 Then
+                        rowCount = rowCount + 1
+                        idx = rowCount
+                        rowIndex.Add idx, key
+                        rItem(idx) = item
+                        rItemKey(idx) = UCase$(item)
+                        rLoc(idx) = loc
+                        rLocKey(idx) = UCase$(loc)
+                        rQty(idx) = qty
+                        rAvail(idx) = avail
+                        rMax(idx) = mx
+                        rType(idx) = typ
+                    Else                            ' listed twice: keep the largest values
+                        If item < rItem(idx) Then rItem(idx) = item
+                        If loc < rLoc(idx) Then rLoc(idx) = loc
+                        If qty > rQty(idx) Then rQty(idx) = qty
+                        If avail > rAvail(idx) Then rAvail(idx) = avail
+                        If mx > rMax(idx) Then rMax(idx) = mx
+                        If typ > rType(idx) Then rType(idx) = typ
+                    End If
+                End Select
             End If
         Next r
     End If
 
+    SortByItemAndLocation
+
+    ' Location level values
+    ReDim rCur(1 To n)
+    ReDim rLocIdx(1 To n)
+    ReDim rState(1 To n)
+    ReDim rMulti(1 To n)
+    ReDim lOpen(1 To n)
+    ReDim lMax(1 To n)
+    ReDim lType(1 To n)
+    ReDim lTypeKey(1 To n)
+    Set locIndex = New Collection
+    locCount = 0
     For idx = 1 To rowCount
         rCur(idx) = rQty(idx)
-        rState(idx) = 0
-        rLocIdx(idx) = Lookup(locIndex, rLocKey(idx))
-        If rQty(idx) > EPS And rLocIdx(idx) > 0 Then
-            lTotal(rLocIdx(idx)) = lTotal(rLocIdx(idx)) + rQty(idx)
+        li = Lookup(locIndex, rLocKey(idx))
+        If li = 0 Then
+            locCount = locCount + 1
+            li = locCount
+            locIndex.Add li, rLocKey(idx)
+            lOpen(li) = rAvail(idx)
+            lMax(li) = rMax(idx)
+            lType(li) = rType(idx)
+        Else
+            If rAvail(idx) > lOpen(li) Then lOpen(li) = rAvail(idx)
+            If rMax(idx) > lMax(li) Then lMax(li) = rMax(idx)
+            If rType(idx) > lType(li) Then lType(li) = rType(idx)
         End If
+        rLocIdx(idx) = li
     Next idx
-    LoadInventory = True
+    For li = 1 To locCount
+        lTypeKey(li) = UCase$(lType(li))
+    Next li
+    LoadRawData = True
 End Function
+
+' Puts the cleaned rows in item, then location order
+Private Sub SortByItemAndLocation()
+    Dim ord() As Long, i As Long
+    Dim a1() As String, a2() As String, a3() As String, a4() As String, a5() As String
+    Dim b1() As Double, b2() As Double, b3() As Double
+    If rowCount < 2 Then Exit Sub
+    ReDim ord(1 To rowCount)
+    For i = 1 To rowCount
+        ord(i) = i
+    Next i
+    SortIndex ord, 1, rowCount, 1
+    ReDim a1(1 To rowCount)
+    ReDim a2(1 To rowCount)
+    ReDim a3(1 To rowCount)
+    ReDim a4(1 To rowCount)
+    ReDim a5(1 To rowCount)
+    ReDim b1(1 To rowCount)
+    ReDim b2(1 To rowCount)
+    ReDim b3(1 To rowCount)
+    For i = 1 To rowCount
+        a1(i) = rItem(ord(i))
+        a2(i) = rItemKey(ord(i))
+        a3(i) = rLoc(ord(i))
+        a4(i) = rLocKey(ord(i))
+        a5(i) = rType(ord(i))
+        b1(i) = rQty(ord(i))
+        b2(i) = rAvail(ord(i))
+        b3(i) = rMax(ord(i))
+    Next i
+    rItem = a1
+    rItemKey = a2
+    rLoc = a3
+    rLocKey = a4
+    rType = a5
+    rQty = b1
+    rAvail = b2
+    rMax = b3
+End Sub
 
 '------------------------------------------------------------------------------
 ' Planning
 '------------------------------------------------------------------------------
 Private Sub PlanMoves()
-    Dim ord() As Long, n As Long, i As Long, g1 As Long, g2 As Long
+    Dim ord() As Long, i As Long, k As Long, g1 As Long, g2 As Long
 
     moveCount = 0
     failCount = 0
@@ -313,24 +398,23 @@ Private Sub PlanMoves()
 
     ReDim ord(1 To rowCount)
     For i = 1 To rowCount
-        If IsEligible(i) Then
-            n = n + 1
-            ord(n) = i
-        End If
+        ord(i) = i
     Next i
-    If n = 0 Then Exit Sub
-    SortRows ord, 1, n
+    SortIndex ord, 1, rowCount, 2
 
     ' Walk through the items; within an item, smallest quantity first
     g1 = 1
-    Do While g1 <= n
+    Do While g1 <= rowCount
         g2 = g1
-        Do While g2 < n
+        Do While g2 < rowCount
             If rItemKey(ord(g2 + 1)) <> rItemKey(ord(g1)) Then Exit Do
             g2 = g2 + 1
         Loop
         If g2 > g1 Then
             itemsMulti = itemsMulti + 1
+            For k = g1 To g2
+                rMulti(ord(k)) = True
+            Next k
             For i = g1 To g2
                 If rState(ord(i)) = 0 Then TryToEmpty ord, g1, g2, ord(i)
             Next i
@@ -341,7 +425,7 @@ End Sub
 
 ' Tries to empty row s into the other locations of the same item (ord(g1..g2)).
 Private Sub TryToEmpty(ord() As Long, ByVal g1 As Long, ByVal g2 As Long, ByVal s As Long)
-    Dim cand() As Long, nc As Long, nOther As Long, nWithCap As Long
+    Dim cand() As Long, nc As Long, nOther As Long
     Dim i As Long, k As Long, t As Long, best As Long
     Dim need As Double, room As Double, sumOpen As Double, maxOpen As Double
     Dim remaining As Double, take As Double
@@ -351,24 +435,19 @@ Private Sub TryToEmpty(ord() As Long, ByVal g1 As Long, ByVal g2 As Long, ByVal 
     For i = g1 To g2
         t = ord(i)
         If t <> s And rState(t) <> 1 Then
-            If SameZoneOk(s, t) Then
+            If SameTypeOk(s, t) Then
                 nOther = nOther + 1
-                If rLocIdx(t) > 0 Then
-                    If lHasCap(rLocIdx(t)) Then
-                        nWithCap = nWithCap + 1
-                        room = OpenCap(t)
-                        If room > EPS Then
-                            nc = nc + 1
-                            cand(nc) = t
-                            sumOpen = sumOpen + room
-                            If room > maxOpen Then maxOpen = room
-                            If room >= need - EPS Then
-                                If best = 0 Then
-                                    best = t
-                                ElseIf SingleBefore(t, best) Then
-                                    best = t
-                                End If
-                            End If
+                room = OpenCap(t)
+                If room > EPS Then
+                    nc = nc + 1
+                    cand(nc) = t
+                    sumOpen = sumOpen + room
+                    If room > maxOpen Then maxOpen = room
+                    If room >= need - EPS Then
+                        If best = 0 Then
+                            best = t
+                        ElseIf SingleBefore(t, best) Then
+                            best = t
                         End If
                     End If
                 End If
@@ -393,9 +472,7 @@ Private Sub TryToEmpty(ord() As Long, ByVal g1 As Long, ByVal g2 As Long, ByVal 
         failRow(failCount) = s
         If mAllowSplit Then failRoom(failCount) = sumOpen Else failRoom(failCount) = maxOpen
         If nOther = 0 Then
-            failReason(failCount) = REASON_ZONE
-        ElseIf nWithCap = 0 Then
-            failReason(failCount) = REASON_NO_CAP
+            failReason(failCount) = REASON_TYPE
         ElseIf mAllowSplit Then
             failReason(failCount) = REASON_ROOM
         Else
@@ -404,56 +481,48 @@ Private Sub TryToEmpty(ord() As Long, ByVal g1 As Long, ByVal g2 As Long, ByVal 
         Exit Sub
     End If
 
-    ' The source location is now empty
+    ' The source location is now empty, so its space is free again
     rState(s) = 1
     rCur(s) = 0
-    If rLocIdx(s) > 0 Then lTotal(rLocIdx(s)) = lTotal(rLocIdx(s)) - need
+    lOpen(rLocIdx(s)) = lOpen(rLocIdx(s)) + need
 End Sub
 
 Private Sub AddMove(ByVal s As Long, ByVal t As Long, ByVal qty As Double)
     Dim li As Long, before As Double
     li = rLocIdx(t)
-    before = OpenCap(t)
+    before = lOpen(li)
     moveCount = moveCount + 1
     moveList(moveCount, 1) = rItem(s)
     moveList(moveCount, 2) = rLoc(s)
     moveList(moveCount, 3) = qty
     moveList(moveCount, 4) = rLoc(t)
     moveList(moveCount, 5) = before
-    moveList(moveCount, 6) = lCap(li)
-    moveList(moveCount, 7) = lZone(li)
-    If rLocIdx(s) > 0 Then moveList(moveCount, 8) = lZone(rLocIdx(s)) Else moveList(moveCount, 8) = Empty
+    moveList(moveCount, 6) = lMax(li)
+    moveList(moveCount, 7) = lType(li)
+    moveList(moveCount, 8) = lType(rLocIdx(s))
     moveList(moveCount, 9) = before - qty
-    lTotal(li) = lTotal(li) + qty
+    lOpen(li) = before - qty
     rCur(t) = rCur(t) + qty
     rState(t) = 2
 End Sub
 
-Private Function IsEligible(ByVal i As Long) As Boolean
-    If rQty(i) <= EPS Then Exit Function
-    If rLocIdx(i) > 0 Then
-        If Lookup(mExcluded, lZoneKey(rLocIdx(i))) > 0 Then Exit Function
-    End If
-    IsEligible = True
-End Function
-
-Private Function SameZoneOk(ByVal s As Long, ByVal t As Long) As Boolean
-    If Not mSameZoneOnly Then
-        SameZoneOk = True
-    ElseIf rLocIdx(s) > 0 And rLocIdx(t) > 0 Then
-        SameZoneOk = (lZoneKey(rLocIdx(s)) = lZoneKey(rLocIdx(t)))
+Private Function SameTypeOk(ByVal s As Long, ByVal t As Long) As Boolean
+    If mSameTypeOnly Then
+        SameTypeOk = (lTypeKey(rLocIdx(s)) = lTypeKey(rLocIdx(t)))
+    Else
+        SameTypeOk = True
     End If
 End Function
 
 Private Function OpenCap(ByVal t As Long) As Double
-    OpenCap = lCap(rLocIdx(t)) - lTotal(rLocIdx(t))
+    OpenCap = lOpen(rLocIdx(t))
 End Function
 
-' Order of work: item, then smallest quantity, then location
-Private Function RowBefore(ByVal a As Long, ByVal b As Long) As Boolean
+' Sort orders: 1 = item, location (clean data)   2 = item, smallest qty, location (order of work)
+Private Function RowBefore(ByVal a As Long, ByVal b As Long, ByVal order As Long) As Boolean
     If rItemKey(a) <> rItemKey(b) Then
         RowBefore = (rItemKey(a) < rItemKey(b))
-    ElseIf Abs(rQty(a) - rQty(b)) > EPS Then
+    ElseIf order = 2 And Abs(rQty(a) - rQty(b)) > EPS Then
         RowBefore = (rQty(a) < rQty(b))
     Else
         RowBefore = (rLocKey(a) < rLocKey(b))
@@ -482,17 +551,17 @@ Private Function SplitBefore(ByVal a As Long, ByVal b As Long) As Boolean
     End If
 End Function
 
-Private Sub SortRows(arr() As Long, ByVal lo As Long, ByVal hi As Long)
+Private Sub SortIndex(arr() As Long, ByVal lo As Long, ByVal hi As Long, ByVal order As Long)
     Dim i As Long, j As Long, p As Long, tmp As Long
     Do While lo < hi
         i = lo
         j = hi
         p = arr((lo + hi) \ 2)
         Do While i <= j
-            Do While RowBefore(arr(i), p)
+            Do While RowBefore(arr(i), p, order)
                 i = i + 1
             Loop
-            Do While RowBefore(p, arr(j))
+            Do While RowBefore(p, arr(j), order)
                 j = j - 1
             Loop
             If i <= j Then
@@ -504,10 +573,10 @@ Private Sub SortRows(arr() As Long, ByVal lo As Long, ByVal hi As Long)
             End If
         Loop
         If j - lo < hi - i Then
-            If lo < j Then SortRows arr, lo, j
+            If lo < j Then SortIndex arr, lo, j, order
             lo = i
         Else
-            If i < hi Then SortRows arr, i, hi
+            If i < hi Then SortIndex arr, i, hi, order
             hi = j
         End If
     Loop
@@ -531,15 +600,80 @@ End Sub
 '------------------------------------------------------------------------------
 ' Output
 '------------------------------------------------------------------------------
+Private Function CleanHeaders() As Variant
+    CleanHeaders = Array("Item Number", "Location", "Current Qty", "Available Capacity", _
+                         "Max Qty", "Location Type")
+End Function
+
 Private Function PlanHeaders() As Variant
     PlanHeaders = Array("Item Number", "From Location", "Qty to Move", "To Location", _
-                        "Target Open Capacity", "Target Max Capacity", "Target Zone", _
-                        "From Zone", "Target Open After Move")
+                        "Target Open Capacity", "Target Max Capacity", "Target Location Type", _
+                        "From Location Type", "Target Open After Move")
 End Function
 
 Private Function FailHeaders() As Variant
-    FailHeaders = Array("Item Number", "Location", "Zone", "Quantity", "Room Elsewhere", "Reason")
+    FailHeaders = Array("Item Number", "Location", "Location Type", "Quantity", "Room Elsewhere", "Reason")
 End Function
+
+Private Sub WriteCleanData()
+    Dim ws As Worksheet, out() As Variant, r As Long, lastRow As Long, fmt As String
+
+    Set ws = GetSheet("shtClean", "Clean Data")
+    StartSheet ws, "Clean Data", "Rows read: " & statRead & _
+               "   |   Removed - zero or negative qty/capacity: " & statZero & _
+               "   |   Removed - max qty over " & FormatQty(mMaxLocationQty) & ": " & statOverMax & _
+               "   |   Removed - ignored type: " & statType & _
+               "   |   Kept: " & rowCount
+    WriteHeaders ws, CleanHeaders()
+
+    If rowCount > 0 Then
+        ReDim out(1 To rowCount, 1 To CLEAN_COLS)
+        fmt = "#,##0"
+        For r = 1 To rowCount
+            out(r, 1) = rItem(r)
+            out(r, 2) = rLoc(r)
+            out(r, 3) = rQty(r)
+            out(r, 4) = rAvail(r)
+            out(r, 5) = rMax(r)
+            out(r, 6) = rType(r)
+            If NotWhole(rQty(r)) Or NotWhole(rAvail(r)) Or NotWhole(rMax(r)) Then fmt = "#,##0.00"
+        Next r
+        lastRow = FIRST_ROW + rowCount - 1
+        TextColumns ws, lastRow, Array(1, 2, 6)
+        ws.Range(ws.Cells(FIRST_ROW, 1), ws.Cells(lastRow, CLEAN_COLS)).Value = out
+        With ws.Range(ws.Cells(FIRST_ROW, 1), ws.Cells(lastRow, CLEAN_COLS))
+            .Font.Size = 10
+            .VerticalAlignment = xlCenter
+            .HorizontalAlignment = xlCenter
+            .Borders.LineStyle = xlContinuous
+            .Borders.Color = RGB(217, 217, 217)
+        End With
+        ws.Range(ws.Cells(FIRST_ROW, 1), ws.Cells(lastRow, 1)).HorizontalAlignment = xlLeft
+        ws.Range(ws.Cells(FIRST_ROW, 3), ws.Cells(lastRow, 5)).NumberFormat = fmt
+        ' Highlight the items that sit in 2 or more locations
+        For r = 1 To rowCount
+            If rMulti(r) Then
+                ws.Range(ws.Cells(FIRST_ROW + r - 1, 1), ws.Cells(FIRST_ROW + r - 1, CLEAN_COLS)).Interior.Color = RGB(255, 242, 204)
+                ws.Cells(FIRST_ROW + r - 1, 1).Font.Bold = True
+            End If
+        Next r
+    Else
+        NoRowsMessage ws, "No rows left after cleaning - check the Raw Data sheet and the settings."
+    End If
+
+    ws.Range("H4").Value = "Item in 2+ locations"
+    With ws.Range("H4")
+        .Interior.Color = RGB(255, 242, 204)
+        .Font.Bold = True
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+        .Borders.LineStyle = xlContinuous
+        .Borders.Color = RGB(217, 217, 217)
+    End With
+
+    SetWidths ws, Array(14, 12, 12, 13, 10, 13, 3, 22)
+    FinishSheet ws, CLEAN_COLS, rowCount
+End Sub
 
 Private Sub WritePlan()
     Dim ws As Worksheet, out() As Variant, r As Long, c As Long, lastRow As Long
@@ -586,7 +720,7 @@ Private Sub WritePlan()
         .Color = RGB(200, 206, 216)
     End With
 
-    SetWidths ws, Array(14, 15, 12, 14, 13, 13, 12, 12, 14, 3, 22, 10)
+    SetWidths ws, Array(14, 15, 12, 14, 13, 13, 13, 13, 14, 3, 22, 10)
     FinishSheet ws, PLAN_COLS, moveCount
 End Sub
 
@@ -613,7 +747,7 @@ Private Sub WriteNotMoved()
             s = failRow(idx(i))
             out(i, 1) = rItem(s)
             out(i, 2) = rLoc(s)
-            If rLocIdx(s) > 0 Then out(i, 3) = lZone(rLocIdx(s)) Else out(i, 3) = Empty
+            out(i, 3) = lType(rLocIdx(s))
             out(i, 4) = rQty(s)
             out(i, 5) = failRoom(idx(i))
             out(i, 6) = failReason(idx(i))
@@ -626,7 +760,7 @@ Private Sub WriteNotMoved()
         NoRowsMessage ws, "Every multi-location item can be consolidated."
     End If
 
-    SetWidths ws, Array(14, 14, 12, 12, 14, 52)
+    SetWidths ws, Array(14, 14, 13, 12, 14, 56)
     FinishSheet ws, FAIL_COLS, n
 End Sub
 
@@ -689,7 +823,7 @@ Private Sub FormatTable(ByVal ws As Worksheet, out() As Variant, ByVal n As Long
     fmt = "#,##0"
     For Each c In qtyCols
         For r = 1 To n
-            If Abs(out(r, c) - Fix(out(r, c))) > EPS Then fmt = "#,##0.00"
+            If NotWhole(out(r, c)) Then fmt = "#,##0.00"
         Next r
     Next c
     For Each c In qtyCols
@@ -765,9 +899,10 @@ Private Function SettingsLine() As String
     ex = mExcludeText
     If Len(ex) = 0 Then ex = "none"
     SettingsLine = "Built " & Format$(Now, "dd-mmm-yyyy hh:mm") & _
-                   "   |   Same zone only: " & YesNo(mSameZoneOnly) & _
+                   "   |   Max qty up to " & FormatQty(mMaxLocationQty) & _
+                   "   |   Same type only: " & YesNo(mSameTypeOnly) & _
                    "   |   Split moves: " & YesNo(mAllowSplit) & _
-                   "   |   Excluded zones: " & ex
+                   "   |   Ignored types: " & ex
 End Function
 
 '------------------------------------------------------------------------------
@@ -822,6 +957,15 @@ UseFallback:
     SettingText = fallback
 End Function
 
+Private Function SettingNumber(ByVal settingName As String, ByVal fallback As Double) As Double
+    Dim v As Variant
+    SettingNumber = fallback
+    On Error GoTo Done
+    v = ThisWorkbook.Names(settingName).RefersToRange.Value
+    If IsNumber(v) Then SettingNumber = CDbl(v)
+Done:
+End Function
+
 Private Sub SetStatus(ByVal msg As String)
     On Error Resume Next
     ThisWorkbook.Names("LastRun").RefersToRange.Value = msg
@@ -834,10 +978,13 @@ End Sub
 
 ' Column whose row-1 header matches one of the comma-separated names
 Private Function FindColumn(ByVal ws As Worksheet, ByVal lastCol As Long, ByVal aliases As String) As Long
-    Dim c As Long, h As String, nm As Variant
+    Dim c As Long, h As String, nm As Variant, prefix As Variant
     For c = 1 To lastCol
         h = LCase$(CellText(ws.Cells(1, c).Value))
-        h = Replace(Replace(h, " ", "_"), "-", "_")
+        For Each prefix In Array("max of ", "sum of ", "min of ", "average of ", "count of ")
+            If Left$(h, Len(prefix)) = prefix Then h = Mid$(h, Len(prefix) + 1)
+        Next prefix
+        h = Replace(Replace(Trim$(h), " ", "_"), "-", "_")
         For Each nm In Split(aliases, ",")
             If h = nm Then
                 FindColumn = c
@@ -888,8 +1035,12 @@ Private Function YesNo(ByVal b As Boolean) As String
     If b Then YesNo = "Yes" Else YesNo = "No"
 End Function
 
+Private Function NotWhole(ByVal v As Double) As Boolean
+    NotWhole = (Abs(v - Fix(v)) > EPS)
+End Function
+
 Private Function QtyFormat(ByVal v As Double) As String
-    If Abs(v - Fix(v)) > EPS Then QtyFormat = "#,##0.00" Else QtyFormat = "#,##0"
+    If NotWhole(v) Then QtyFormat = "#,##0.00" Else QtyFormat = "#,##0"
 End Function
 
 Private Function FormatQty(ByVal v As Double) As String
