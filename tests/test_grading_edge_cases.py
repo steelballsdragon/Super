@@ -79,10 +79,10 @@ def test_unresolved_leans_and_parlays_expire_after_a_week(tmp_path):
     bot.leans.record(game("pre", "STATUS_SCHEDULED"), [OVER])
     bot.parlays.record(1, "mlb", "Safest", [ML])
     old = time.time() - EXPIRE_SECONDS - 60
-    for key, lean in bot.state.items("leans"):
-        bot.state.set("leans", key, {**lean, "at": old})
-    for key, p in bot.state.items("parlays"):
-        bot.state.set("parlays", key, {**p, "created": old})
+    for key, lean in bot.records.items("leans"):
+        bot.records.set("leans", key, {**lean, "at": old})
+    for key, p in bot.records.items("parlays"):
+        bot.records.set("parlays", key, {**p, "created": old})
 
     async def never_final(path, event_id):
         return {"header": {"competitions": [{"status": {"type": {"state": "pre"}}}]}}

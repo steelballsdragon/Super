@@ -89,3 +89,13 @@ class StateStore:
             if not self._held and self._dirty:
                 self._dirty = False
                 write_json(self.path, self._data)
+
+
+def move_sections(source: StateStore, target: StateStore, sections) -> None:
+    """Moves whole sections from one store to another (e.g. when a section gets its own file), once."""
+    with source.batch(), target.batch():
+        for section in sections:
+            for key, value in source.items(section):
+                if target.get(section, key) is None:
+                    target.set(section, key, value)
+                source.delete(section, key)

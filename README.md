@@ -253,7 +253,7 @@ attach a volume and set `DATA_FILE` to a path on it (e.g. `/data/subscriptions.j
 |---|---|---|
 | `DISCORD_TOKEN` | (required) | Bot token |
 | `POLL_INTERVAL` | `10` | Seconds between score checks (minimum 5). ESPN refreshes about every 5–8 seconds. |
-| `DATA_FILE` | `subscriptions.json` | Where channel subscriptions are saved. Channel settings (`settings.json`), bot state (`state.json`), ball-by-ball positions (`balls.json`) and recorded cricket scorecards (`cricket.json`) are kept next to it. |
+| `DATA_FILE` | `subscriptions.json` | Where channel subscriptions are saved. Channel settings (`settings.json`), bot state (`state.json`), the betting record for `/record` (`record.json`), ball-by-ball positions (`balls.json`) and recorded cricket scorecards (`cricket.json`) are kept next to it. |
 | `DEV_GUILD_ID` | (none) | Sync slash commands to one server instantly. Global sync can take up to an hour to appear. |
 
 By default, only members with **Manage Channels** can use `/follow` and `/unfollow`. Server admins can change this under Server Settings → Integrations.

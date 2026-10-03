@@ -30,7 +30,7 @@ from .props import (MAX_LEGS, MAX_LEGS_PER_GAME, TARGETS, PropsClient, apply_mat
 from .research import LeanBook, leans, market_chances, parse_research, picks_embed, record_embed, report_embed
 from .schedule import COMMON_TIMEZONES, games_on, today
 from .plays import AssistResolver, PlayResolver
-from .settings import SettingsStore, StateStore
+from .settings import SettingsStore, StateStore, move_sections
 from .storage import SubscriptionStore
 from .tracker import CALLED_OFF, FINAL, KICKOFF, OVERS, WICKET, Tracker
 
@@ -116,13 +116,17 @@ class SportsBot(discord.Client):
         self.state = state or StateStore(Path(store.path).with_name("state.json"))
         self.latest: dict[str, list] = {}  # latest games per league, for scoreboards
         self.odds = OddsBook(self.state)
-        self.leans = LeanBook(self.state)
+        # The betting record (every lean and parlay, kept for /record) grows over months, so it has its own
+        # file: state.json is saved far more often and stays small.
+        self.records = StateStore(self.state.path.with_name("record.json"))
+        move_sections(self.state, self.records, ("leans", "parlays"))
+        self.leans = LeanBook(self.records)
         self._boards_shown: dict[int, dict] = {}
         self.espn = ESPNClient()
         self.props = PropsClient(self.espn)
         # Recorded cricket scorecards get their own file: they're big, and state.json is rewritten often.
         self.cricket = CricketHistory(self.props, StateStore(self.state.path.with_name("cricket.json")))
-        self.parlays = ParlayBook(self.state)
+        self.parlays = ParlayBook(self.records)
         self._tasks: set[asyncio.Task] = set()
         self._last_prune = time.monotonic()
         self._last_settle = 0.0
@@ -245,7 +249,7 @@ class SportsBot(discord.Client):
 
     async def _poll_once(self) -> None:
         # One save of the state at the end of the cycle, not one per change (dozens when lines move).
-        with self.state.batch(), self.ball_state.batch():
+        with self.state.batch(), self.records.batch(), self.ball_state.batch():
             await self._poll_cycle()
 
     async def _poll_cycle(self) -> None:
