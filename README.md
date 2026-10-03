@@ -11,8 +11,10 @@ A Discord bot that posts live **NFL** and **soccer** score updates to your chann
 
 Live updates are posted as embeds for:
 - **Kick-off / game start**
-- **Goals / scores.** Soccer goals include the scorer and minute, and are tagged as a penalty or own goal where that applies. NFL scores include the scoring play.
-- **Half-time** and **Full-time / Final**, with the result
+- **Goals / scores.** Soccer goals include the scorer and minute, and are tagged as a penalty or own goal where that applies.
+  NFL scores show the actual scoring play: touchdown, field goal or safety, the players and yards, the extra point
+  or two-point try, and the quarter and clock (e.g. *Roman Wilson 12 Yd pass from Aaron Rodgers (Chris Boswell Kick)*).
+- **Half-time** and **Full-time / Final**, with the result. NFL also lists the game's passing, rushing and receiving leaders.
 - **Score corrections**, such as a goal overturned by VAR
 
 Supported leagues: NFL, Premier League, La Liga, Serie A, Bundesliga, Ligue 1, MLS, Champions League, Europa League and the FIFA World Cup. To add more, edit `sportsbot/leagues.py` with any ESPN path, for example `soccer/ned.1`.
@@ -42,7 +44,8 @@ curl -fsSL https://raw.githubusercontent.com/steelballsdragon/Super/main/deploy/
 ```
 
 It asks for your bot token once and stores it in `/etc/scorebot.env`, readable only by root.
-Run the same command again to update to the latest code. View the logs with `sudo journalctl -u scorebot -f`.
+The server checks GitHub every hour and installs new code automatically. Run the same command again to update right away.
+View the logs with `sudo journalctl -u scorebot -f`.
 
 **No terminal? (e.g. setting up from a phone)** When creating the server, paste this as its startup script
 (on Oracle: *Create instance → Show advanced options → Management → Initialization script → Paste cloud-init script*).
