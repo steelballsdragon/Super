@@ -8,12 +8,26 @@ from .espn import Game, Goal, ScoringPlay
 
 KICKOFF = "kickoff"
 SCORE = "score"
-PERIOD = "period"  # basketball/hockey: end of a quarter or period
+PERIOD = "period"  # football/basketball/hockey: end of a quarter or period
 HALFTIME = "halftime"
 WICKET = "wicket"
 INNINGS = "innings"  # cricket: innings break
 OVERS = "overs"  # cricket: score every 5 (T20) or 10 (ODI/Test) overs
 FINAL = "final"
+CALLED_OFF = "called_off"  # postponed, cancelled, suspended or abandoned
+
+# ESPN marks games that won't be played (or finished) today as over ("post"),
+# so these must not be reported as a final result.
+CALLED_OFF_WORDS = ("POSTPONED", "CANCEL", "SUSPENDED", "ABANDON")
+
+def called_off(game: Game) -> bool:
+    return any(w in game.status_name for w in CALLED_OFF_WORDS)
+
+
+def _shootout_decided(game: Game) -> bool:
+    """NHL games settled by a shootout: ESPN adds one 'goal' to the winner."""
+    return game.league.sport == "hockey" and game.state == "post" and "SO" in game.detail.split("/")
+
 
 # Statuses meaning a basketball quarter or hockey period just ended.
 END_OF_PERIOD = ("STATUS_END_PERIOD", "STATUS_INTERMISSION")
@@ -73,7 +87,11 @@ def diff_game(prev: Game, cur: Game) -> list[Update]:
     updates: list[Update] = []
     if prev.state == "pre" and cur.state == "in":
         updates.append(Update(KICKOFF, cur))
-    if sport in PER_SCORE_SPORTS and (prev.home.score, prev.away.score) != (cur.home.score, cur.away.score):
+    if (
+        sport in PER_SCORE_SPORTS
+        and (prev.home.score, prev.away.score) != (cur.home.score, cur.away.score)
+        and not _shootout_decided(cur)  # the final post names the shootout winner
+    ):
         prev_total = prev.home.score + prev.away.score
         decreased = cur.home.score + cur.away.score < prev_total
         new_goals = () if decreased else cur.goals[len(prev.goals):]
@@ -87,12 +105,12 @@ def diff_game(prev: Game, cur: Game) -> list[Update]:
         elif fallen <= 0 and (milestone := overs_milestone(prev, cur)):
             # A wicket post already shows the score, so skip the over update then.
             updates.append(Update(OVERS, cur, count=milestone))
-    if sport in ("basketball", "hockey") and cur.status_name in END_OF_PERIOD and prev.status_name not in END_OF_PERIOD:
+    if sport in ("football", "basketball", "hockey") and cur.status_name in END_OF_PERIOD and prev.status_name not in END_OF_PERIOD:
         updates.append(Update(PERIOD, cur))
     if cur.status_name == "STATUS_HALFTIME" and prev.status_name != "STATUS_HALFTIME":
         updates.append(Update(HALFTIME, cur))
     if prev.state != "post" and cur.state == "post":
-        updates.append(Update(FINAL, cur))
+        updates.append(Update(CALLED_OFF if called_off(cur) else FINAL, cur))
     return updates
 
 

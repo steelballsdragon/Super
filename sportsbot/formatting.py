@@ -8,7 +8,7 @@ import discord
 
 from .espn import Game, Goal, ScoringPlay, Team, period_label
 from .leagues import LEAGUES
-from .tracker import FINAL, HALFTIME, INNINGS, KICKOFF, OVERS, PERIOD, SCORE, WICKET, Update
+from .tracker import CALLED_OFF, FINAL, HALFTIME, INNINGS, KICKOFF, OVERS, PERIOD, SCORE, WICKET, Update
 
 COLORS = {
     KICKOFF: discord.Color.blue(),
@@ -19,6 +19,7 @@ COLORS = {
     INNINGS: discord.Color.gold(),
     OVERS: discord.Color.teal(),
     FINAL: discord.Color.dark_grey(),
+    CALLED_OFF: discord.Color.orange(),
 }
 
 KICKOFF_TITLES = {
@@ -108,6 +109,8 @@ def _title(update: Update) -> str:
         text = "Innings break"
     elif kind == OVERS:
         text = f"After {update.count} overs"
+    elif kind == CALLED_OFF:
+        text = game.detail or "Postponed"
     else:
         text = {"soccer": "Full-time", "cricket": "Result"}.get(sport, "Final")
     return f"{game.league.emoji} {text}"
@@ -116,10 +119,17 @@ def _title(update: Update) -> str:
 def _result(game: Game) -> str:
     if game.league.sport == "cricket":
         return game.summary
-    winner = max(game.teams, key=lambda t: t.score)
-    loser = min(game.teams, key=lambda t: t.score)
-    if winner.score == loser.score:
+    flagged = [t for t in game.teams if t.winner]
+    winner = flagged[0] if len(flagged) == 1 else max(game.teams, key=lambda t: t.score)
+    loser = next(t for t in game.teams if t is not winner)
+    if winner.shootout is not None and loser.shootout is not None:
+        return f"{winner.name} win {winner.shootout}-{loser.shootout} on penalties"
+    if winner.score == loser.score and not flagged:
         return "Draw" if game.league.sport == "soccer" else "Tie"
+    if "AET" in game.status_name or game.detail == "AET":
+        return f"{winner.name} win after extra time"
+    if "SO" in game.detail.split("/"):
+        return f"{winner.name} win in a shootout"
     return f"{winner.name} win"
 
 
@@ -129,6 +139,8 @@ def update_embed(update: Update) -> discord.Embed:
         return play_embed(game, update.play)
 
     lines = [f"**{game.scoreline()}**"]
+    if update.kind == CALLED_OFF and game.league.sport != "cricket" and game.home.score == game.away.score == 0:
+        lines = [f"**{' vs '.join(t.name for t in game.teams)}**"]  # never started, so no score to show
     if update.kind == SCORE:
         if update.new_goals:
             lines += [_goal_line(game, g) for g in update.new_goals]

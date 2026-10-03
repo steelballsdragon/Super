@@ -5,16 +5,19 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from .espn import Game, Goal, GoalDetail, ScoringPlay
-from .tracker import SCORE, Update
+from .tracker import FINAL, SCORE, Update
 
 log = logging.getLogger(__name__)
 
 # How long to wait for ESPN to publish a scoring play before falling back to a
 # plain score update.
 PLAY_WAIT_SECONDS = 120
+# Once the game is over, hold the final result at most this long for the
+# winning play (e.g. a walk-off home run) so the play is posted first.
+FINAL_HOLD_SECONDS = 60
 
 Clock = Callable[[], float]
 
@@ -25,6 +28,7 @@ FetchPlays = Callable[[str], Awaitable[list[ScoringPlay]]]
 class _Pending:
     base_total: int
     since: float
+    held: list[Update] = field(default_factory=list)  # e.g. the final, posted after the play
 
 
 class PlayResolver:
@@ -55,11 +59,18 @@ class PlayResolver:
             else:
                 others.append(u)
 
+        # Anything else about a game with a score still pending (like the final
+        # whistle after a walk-off) waits so it's posted after the scoring play.
+        ready = []
+        for u in others:
+            pending = self._pending.get(u.game.id)
+            (pending.held if pending else ready).append(u)
+
         by_id = {g.id: g for g in games}
         for game_id in list(self._pending):
             game = by_id.get(game_id)
             if game is None:
-                del self._pending[game_id]
+                resolved.extend(self._pending.pop(game_id).held)
                 continue
             resolved.extend(await self._check(game, self._pending[game_id]))
 
@@ -67,7 +78,7 @@ class PlayResolver:
         for game_id in list(self._posted):
             if game_id not in by_id:
                 del self._posted[game_id]
-        return resolved + others
+        return resolved + ready
 
     async def _check(self, game: Game, pending: _Pending) -> list[Update]:
         try:
@@ -81,14 +92,17 @@ class PlayResolver:
         if new:
             posted.update(p.id for p in new)
             del self._pending[game.id]
-            return [Update(SCORE, game, play=p) for p in new]
+            return [Update(SCORE, game, play=p) for p in new] + pending.held
         if any(p.total == current_total and p.id in posted for p in plays):
             # The change was e.g. an extra point added to a touchdown already posted.
             del self._pending[game.id]
-            return []
-        if self._clock() - pending.since >= PLAY_WAIT_SECONDS:
+            return pending.held
+        final_held = any(u.kind == FINAL for u in pending.held)
+        waited = self._clock() - pending.since
+        if waited >= PLAY_WAIT_SECONDS or (final_held and waited >= FINAL_HOLD_SECONDS):
             del self._pending[game.id]
-            return [Update(SCORE, game)]
+            # The final already shows the score, so a bare score update would only repeat it.
+            return pending.held if final_held else [Update(SCORE, game)] + pending.held
         return []
 
 

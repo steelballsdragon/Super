@@ -46,6 +46,8 @@ class Team:
     logo: str | None = None
     score_text: str = ""  # cricket, e.g. "161/5 (18/20 ov, target 156)"
     innings: tuple[Innings, ...] = ()
+    winner: bool = False  # set by ESPN once a game is decided
+    shootout: int | None = None  # soccer penalty shootout goals
 
     @property
     def wickets(self) -> int:
@@ -186,6 +188,8 @@ def _parse_team(competitor: dict, sport: str) -> Team:
         logo=team.get("logo"),
         score_text=score_text,
         innings=innings,
+        winner=competitor.get("winner") is True,
+        shootout=competitor.get("shootoutScore") if isinstance(competitor.get("shootoutScore"), int) else None,
     )
 
 
