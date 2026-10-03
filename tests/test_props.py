@@ -239,3 +239,60 @@ def test_goal_and_assist_slip_like_fanduel():
     assert kinds.count("totalGoals") == kinds.count("goalAssists") == 2  # not four goalscorers
     assert 3000 <= int(american(combined(chosen))) <= 20000
     assert chosen[1].pick == "Bruno Fernandes To Record an Assist"  # the likeliest assister, right after the top scorer
+
+
+def arsenal_leeds():
+    from sportsbot.espn import parse_scoreboard
+    comp = {"status": {"type": {"state": "pre", "name": "STATUS_SCHEDULED", "shortDetail": ""}},
+            "competitors": [{"homeAway": "home", "score": "0", "team": {"id": "359", "abbreviation": "ARS", "displayName": "Arsenal"}},
+                            {"homeAway": "away", "score": "0", "team": {"id": "357", "abbreviation": "LEE", "displayName": "Leeds United"}}]}
+    [g] = parse_scoreboard({"events": [{"id": "1", "date": "2026-10-10T11:30Z", "competitions": [comp]}]}, LEAGUES["epl"])
+    return g
+
+
+def form(scored, allowed):
+    from sportsbot.research import Form
+    return Form([], scored, allowed, 5)
+
+
+def test_expected_goals_from_the_betting_line_or_form():
+    from sportsbot.props import expected_goals
+    g = arsenal_leeds()
+    usual = {"359": form(1.8, 1.2), "357": form(1.8, 1.8)}
+    # Arsenal -260 / draw +390 / Leeds +650 (no-vig 68/19/13) with the total at 2.5.
+    m = expected_goals(g, {"359": 0.682, "draw": 0.193, "357": 0.126}, 2.5, usual)
+    assert m.source == "market" and round(m.expected["359"], 2) == 1.88 and round(m.expected["357"], 2) == 0.62
+    # No line: Arsenal's scoring averaged with what Leeds concede.
+    m = expected_goals(g, None, None, usual)
+    assert m.source == "form" and m.expected == {"359": 1.8, "357": 1.5}
+    assert expected_goals(g, None, None, {}) is None  # no form either: nothing to go on
+
+
+def scorer(name, team, p):
+    from sportsbot.props import PROPS, Rate, Trend
+    prop = next(x for x in PROPS["soccer"] if x.stat == "totalGoals")
+    return Trend(name, name, team, prop, 1, Rate(4, 10), Rate(0, 0), Rate(0, 0), Rate(0, 0), "2026-27", "", "", p)
+
+
+def test_matchup_moves_goalscorer_chances():
+    from sportsbot.props import Matchup, apply_matchup
+    g = arsenal_leeds()
+    # Arsenal expected to score well above their usual; Leeds well below theirs.
+    m = Matchup({"359": 2.7, "357": 0.6}, {"359": 1.8, "357": 1.5}, "market")
+    found = {t.player: t for t in apply_matchup([scorer("Kai Havertz", "ARS", 0.40), scorer("Dominic Calvert-Lewin", "LEE", 0.40),
+                                                 scorer("Anton Stach", "LEE", 0.25)], g, m)}
+    # Arsenal's 1.8 a game blends with a typical 1.4 to 1.62; 2.7 expected is 1.67x that: 40% -> 57%, not 67%.
+    assert round(found["Kai Havertz"].probability, 2) == 0.57
+    assert round(found["Dominic Calvert-Lewin"].probability, 2) == 0.23  # cut by at most half: 40% -> 23%
+    assert "Anton Stach" not in found  # a long shot against a tight defence drops out
+    assert found["Kai Havertz"].evidence.endswith("Arsenal expected 2.7 goals (betting line), 1.8 a game lately")
+    # Without a matchup the record stands as it is.
+    assert apply_matchup([scorer("Kai Havertz", "ARS", 0.40)], g, None)[0].probability == 0.40
+
+
+def test_a_cold_spell_is_not_taken_as_the_teams_level():
+    from sportsbot.props import Matchup, apply_matchup
+    # Scoring 0.6 a game over 5 games: expecting 1.2 is double that, but only about 1.25x a typical team's level.
+    m = Matchup({"359": 1.2, "357": 1.2}, {"359": 0.6, "357": 1.4}, "market", 5)
+    [t] = apply_matchup([scorer("Kai Havertz", "ARS", 0.30)], arsenal_leeds(), m)
+    assert 0.34 < t.probability < 0.38

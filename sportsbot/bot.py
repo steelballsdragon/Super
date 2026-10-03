@@ -25,8 +25,8 @@ from .limits import MESSAGE, clip, fit_embed
 from .odds import OddsBook, grade_text, line_text
 from .cricket_props import CricketHistory
 from .parlays import ParlayBook, record_field, settle
-from .props import (MAX_LEGS, MAX_LEGS_PER_GAME, TARGETS, PropsClient, build_to_target, injured_names, moneyline_leg,
-                    parlay_embed, scorer_lines, trend_legs, trends_embed)
+from .props import (MAX_LEGS, MAX_LEGS_PER_GAME, TARGETS, PropsClient, apply_matchup, build_to_target, expected_goals,
+                    injured_names, moneyline_leg, parlay_embed, scorer_lines, trend_legs, trends_embed)
 from .research import LeanBook, leans, market_chances, parse_research, picks_embed, record_embed, report_embed
 from .schedule import COMMON_TIMEZONES, games_on, today
 from .plays import AssistResolver, PlayResolver
@@ -460,6 +460,9 @@ class SportsBot(discord.Client):
             trends = await self.cricket.trends(game, bigger)
         else:
             trends = await self.props.game_trends(game, injured_names(summary), bigger, scorers)
+            if scorers:  # who's likely to score depends on the matchup, not just the player's record
+                matchup = expected_goals(game, market_chances(r), r.odds.total if r.odds else None, r.form)
+                trends = apply_matchup(trends, game, matchup)
         return trends, moneyline_leg(game, market_chances(r), r.odds, underdog)
 
     async def research(self, game):

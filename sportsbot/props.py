@@ -35,6 +35,8 @@ BARS = {
 # games), so they get their own bar: a real chance, and at least 2 of the last 10.
 SCORER_STATS = ("totalGoals", "goalAssists", "goalOrAssist", "goals", "assists")
 SCORER_BAR, SCORER_MIN_L10 = 0.22, 0.2
+# Before the matchup adjustment, players a little under the bar are kept too: a good matchup can lift them over it.
+SCORER_PRE_BAR = 0.15
 WEIGHTS = {"l10": 0.45, "season": 0.30, "last": 0.25}
 MIN_GAMES = {"l10": 5, "season": 3, "last": 8}
 CACHE_SECONDS = 6 * 3600
@@ -206,6 +208,7 @@ class Trend:
     last_label: str
     opponent: str
     probability: float  # weighted hit rate
+    note: str = ""  # e.g. the matchup adjustment behind the probability
 
     @property
     def pick(self) -> str:
@@ -222,6 +225,8 @@ class Trend:
             parts.append(f"{self.last_label} {self.last}")
         if self.vs.games:
             parts.append(f"vs {self.opponent} {self.vs}")
+        if self.note:
+            parts.append(self.note)
         return " · ".join(parts)
 
 
@@ -238,7 +243,8 @@ def weighted(rates: dict[str, Rate]) -> float | None:
 
 
 def best_trends(name: str, pid: str, team: str, opponent: str, games: list[PlayerGame], sport: str,
-                bigger: bool = False, props: list[Prop] | None = None, scorers: bool = False) -> list[Trend]:
+                bigger: bool = False, props: list[Prop] | None = None, scorers: bool = False,
+                bar: float | None = None) -> list[Trend]:
     """For each prop, the highest line this player has hit consistently.
 
     With bigger=True, each prop's smallest line (the near-certain "gimme") is
@@ -249,7 +255,7 @@ def best_trends(name: str, pid: str, team: str, opponent: str, games: list[Playe
     target, min_l10 = BARS.get(sport, BARS["default"])[1 if bigger else 0]
     if scorers:
         props = [p for p in PROPS.get(sport, []) if p.stat in SCORER_STATS]
-        target, min_l10, bigger = SCORER_BAR, SCORER_MIN_L10, False
+        target, min_l10, bigger = SCORER_BAR if bar is None else bar, SCORER_MIN_L10, False
     if not games:
         return []
     seasons = []
@@ -277,6 +283,73 @@ def best_trends(name: str, pid: str, team: str, opponent: str, games: list[Playe
         if best:
             found.append(best)
     return found
+
+
+# ---------- matchup adjustment for goalscorer and assist bets ----------
+
+@dataclass(frozen=True)
+class Matchup:
+    """Goals each team is expected to score in this game, next to what it usually scores."""
+    expected: dict[str, float]  # team id -> expected goals
+    usual: dict[str, float]  # team id -> goals per game recently
+    source: str  # "market" (the betting line) or "form" (recent scoring vs the opponent's defence)
+    games: int = 5  # how many recent games "usual" comes from
+
+
+# How strongly the win chances split the expected goals: a -260 soccer favourite takes about 75% of them;
+# hockey scores are closer than its win chances suggest.
+GOAL_SHARE_SLOPE = {"soccer": 0.45, "hockey": 0.35}
+RATIO_RANGE = (0.5, 1.8)
+# A few games are a small sample (a cold spell isn't the team's level), so recent scoring is blended
+# with a typical team's: about 1.4 goals a game in soccer, 3.0 in the NHL, worth this many games.
+TYPICAL_GOALS = {"soccer": 1.4, "hockey": 3.0}
+TYPICAL_WEIGHT = 4
+
+
+def expected_goals(game: Game, chances: dict[str, float] | None, total: float | None, form: dict) -> Matchup | None:
+    """Each team's expected goals: from the betting line when there is one (the total split by the win
+    chances), otherwise from recent form (its scoring averaged with what the opponent concedes)."""
+    home, away = game.home.id, game.away.id
+    usual = {tid: f.scored for tid, f in (form or {}).items() if f.games >= 3}
+    games = min((f.games for f in (form or {}).values()), default=5)
+    if home not in usual or away not in usual:
+        return None
+    slope = GOAL_SHARE_SLOPE.get(game.league.sport)
+    if slope and chances and total and home in chances and away in chances:
+        share = min(max(0.5 + slope * (chances[home] - chances[away]), 0.15), 0.85)
+        return Matchup({home: total * share, away: total * (1 - share)}, usual, "market", games)
+    concede = {tid: f.allowed for tid, f in form.items() if f.games >= 3}
+    if home not in concede or away not in concede:
+        return None
+    return Matchup({home: (usual[home] + concede[away]) / 2, away: (usual[away] + concede[home]) / 2}, usual, "form", games)
+
+
+def apply_matchup(trends: list[Trend], game: Game, matchup: Matchup | None) -> list[Trend]:
+    """Scales each goal and assist chance by how many goals the player's team is expected to score here
+    against its usual (a player's goals come and go with his team's), then keeps those over the bar.
+
+    The chance is treated as a scoring rate (Poisson): 1 - e^(-rate x ratio), so a 40% scorer in a game
+    where his team should score 1.5x its usual becomes 54%, not 60%.
+    """
+    from dataclasses import replace
+    from math import exp, log
+    ids = {t.abbrev: t.id for t in game.teams}
+    names = {t.id: t.name for t in game.teams}
+    out = []
+    for t in trends:
+        tid = ids.get(t.team)
+        if matchup and t.prop.stat in SCORER_STATS and tid in matchup.expected:
+            typical = TYPICAL_GOALS.get(game.league.sport, matchup.usual[tid])
+            usual = (matchup.games * matchup.usual[tid] + TYPICAL_WEIGHT * typical) / (matchup.games + TYPICAL_WEIGHT)
+            ratio = min(max(matchup.expected[tid] / max(usual, 0.3), RATIO_RANGE[0]), RATIO_RANGE[1])
+            p = 1 - exp(log(1 - min(t.probability, 0.95)) * ratio)
+            why = "betting line" if matchup.source == "market" else "form vs this defence"
+            t = replace(t, probability=min(max(p, 0.02), 0.9),
+                        note=f"{names[tid]} expected {matchup.expected[tid]:.1f} goals ({why}), "
+                             f"{matchup.usual[tid]:.1f} a game lately")
+        if t.prop.stat not in SCORER_STATS or t.probability >= SCORER_BAR:
+            out.append(t)
+    return sorted(out, key=lambda t: t.probability, reverse=True)
 
 
 class PropsClient:
@@ -398,7 +471,7 @@ class PropsClient:
             except Exception:
                 return []
             return [] if pitcher else best_trends(name, aid, team.abbrev, opponent.abbrev, games, league.sport, bigger,
-                                                  scorers=scorers)
+                                                  scorers=scorers, bar=SCORER_PRE_BAR if scorers else None)
 
         jobs = []
         for team, opponent in ((game.home, game.away), (game.away, game.home)):
@@ -606,11 +679,14 @@ def trends_embed(game: Game, trends: list[Trend], ml: Leg | None) -> discord.Emb
 
 def scorer_lines(trends: list[Trend], limit: int = 1000) -> str:
     """Goalscorer and assist chances for a game report, most likely first."""
-    goal_chance = {t.player_id: t.probability for t in trends if t.prop.stat in ("totalGoals", "goals")}
+    single = {}  # player -> his goal and assist chances
+    for t in trends:
+        if t.prop.stat in ("totalGoals", "goals", "goalAssists", "assists"):
+            single.setdefault(t.player_id, []).append(t.probability)
     text = ""
     for t in sorted(trends, key=lambda t: t.probability, reverse=True):
-        if t.prop.stat == "goalOrAssist" and abs(goal_chance.get(t.player_id, -1) - t.probability) < 0.005:
-            continue  # never assists: "goal or assist" would just repeat his goal line
+        if t.prop.stat == "goalOrAssist" and any(abs(c - t.probability) < 0.005 for c in single.get(t.player_id, [])):
+            continue  # only ever scores (or only assists): "score or assist" would just repeat that line
         row = f"**~{t.probability:.0%}** {t.pick} ({american(t.probability)})\n  {t.evidence}\n"
         if len(text) + len(row) > limit:
             break
