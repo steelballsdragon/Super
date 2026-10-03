@@ -107,3 +107,38 @@ def test_store_roundtrip(tmp_path):
     assert s2.leagues() == {"nfl"}
     s2.remove_channel(1)
     assert SubscriptionStore(path).leagues() == set()
+
+
+def test_espn_requests_retry_when_throttled(monkeypatch):
+    import asyncio
+    import sportsbot.espn as espn
+
+    calls = []
+
+    class Resp:
+        def __init__(self, status):
+            self.status = status
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def raise_for_status(self):
+            if self.status >= 400:
+                raise RuntimeError(self.status)
+
+        async def json(self, content_type=None):
+            return {"ok": True}
+
+    class Session:
+        closed = False
+
+        def get(self, url, params=None):
+            calls.append(url)
+            return Resp(429 if len(calls) < 3 else 200)
+
+    monkeypatch.setattr(espn, "RETRY_BASE_SECONDS", 0)
+    client = espn.ESPNClient(Session())
+    assert asyncio.run(client._get_json("u")) == {"ok": True} and len(calls) == 3

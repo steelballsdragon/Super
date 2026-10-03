@@ -19,7 +19,7 @@ from .espn import Game
 from .leagues import LEAGUES
 
 GAMELOG_URL = "https://site.web.api.espn.com/apis/common/v3/sports/{path}/athletes/{id}/gamelog"
-LEADERS_URL = "https://sports.core.api.espn.com/v2/sports/{sport}/leagues/{league}/seasons/{season}/types/2/teams/{team}/leaders"
+LEADERS_URL = "https://sports.core.api.espn.com/v2/sports/{sport}/leagues/{league}/seasons/{season}/types/{type}/teams/{team}/leaders"
 ROSTER_URL = "https://site.web.api.espn.com/apis/site/v2/sports/{path}/teams/{team}/roster"
 
 # A line counts as "most likely" when its estimated chance reaches the bar and it
@@ -67,6 +67,14 @@ PROPS = {
         Prop("Goals", "goals", (1,), anytime="Anytime Goal"),
         Prop("Assists", "assists", (1,)),
     ],
+    "soccer": [
+        Prop("Shots", "totalShots", (1, 2, 3, 4)),
+        Prop("Shots on Target", "shotsOnTarget", (1, 2)),
+        Prop("Goals", "totalGoals", (1,), anytime="Anytime Goal"),
+        Prop("Assists", "goalAssists", (1,), anytime="To Assist"),
+        Prop("Goal or Assist", "goalOrAssist", (1,), anytime="Goal or Assist"),
+        Prop("Fouls Committed", "foulsCommitted", (1, 2)),
+    ],
     "baseball": [
         Prop("Hits", "hits", (1, 2)),
         Prop("Total Bases", "totalBases", (2, 3, 4)),  # 1+ total bases is the same as 1+ hits
@@ -82,8 +90,11 @@ LEADER_PICKS = {
     "basketball": (("pointsPerGame", 4), ("reboundsPerGame", 1), ("assistsPerGame", 1)),
     "hockey": (("points", 4),),
     "baseball": (("OPS", 3), ("homeRuns", 2), ("avg", 2)),
+    "soccer": (("goalsLeaders", 3), ("assistsLeaders", 2), ("shotsOnTarget", 2)),
 }
-MAX_PLAYERS = {"football": 5, "basketball": 4, "hockey": 4, "baseball": 4}
+MAX_PLAYERS = {"football": 5, "basketball": 4, "hockey": 4, "baseball": 4, "soccer": 4}
+# Leaders live under the regular season (type 2) for most leagues; soccer uses type 1.
+LEADER_TYPES = (2, 1)
 
 
 def _f(value) -> float:
@@ -99,6 +110,7 @@ class PlayerGame:
     season: str  # e.g. "2026", "2025-26"
     opponent: str  # abbreviation
     stats: dict[str, float]
+    event_id: str = ""
 
 
 def _computed(stats: dict[str, float]) -> dict[str, float]:
@@ -106,6 +118,7 @@ def _computed(stats: dict[str, float]) -> dict[str, float]:
     s["anytimeTouchdowns"] = s.get("rushingTouchdowns", 0) + s.get("receivingTouchdowns", 0)
     s["pra"] = s.get("points", 0) + s.get("totalRebounds", 0) + s.get("assists", 0)
     s["totalBases"] = s.get("hits", 0) + s.get("doubles", 0) + 2 * s.get("triples", 0) + 3 * s.get("homeRuns", 0)
+    s["goalOrAssist"] = s.get("totalGoals", 0) + s.get("goalAssists", 0)
     return s
 
 
@@ -116,19 +129,32 @@ def parse_gamelog(data: dict) -> tuple[list[PlayerGame], bool]:
     raw["threePointFieldGoalsMade-threePointFieldGoalsAttempted"] = "threesMade"
     events = data.get("events") or {}
     games = []
+    shown = _season_shown(data)
     for st in data.get("seasonTypes") or []:
         label = st.get("displayName") or ""
         if "Preseason" in label:
             continue
-        season = label.split(" ")[0]
+        # Cup rounds are labelled "Final", "Quarterfinals"...: use ESPN's season field when it has one.
+        season = shown or label.split(" ")[0]
         for cat in st.get("categories") or []:
             for ev in cat.get("events") or []:
                 meta = events.get(ev.get("eventId")) or {}
                 stats = {raw[n]: _f(v) for n, v in zip(names, ev.get("stats") or [])}
                 games.append(PlayerGame(meta.get("gameDate", ""), season,
-                                        (meta.get("opponent") or {}).get("abbreviation", ""), _computed(stats)))
+                                        (meta.get("opponent") or {}).get("abbreviation", ""), _computed(stats),
+                                        str(ev.get("eventId", ""))))
     games.sort(key=lambda g: g.when, reverse=True)
     return games, "innings" in names
+
+
+def _season_shown(data: dict) -> str | None:
+    """The season this game log covers, as ESPN displays it (e.g. "2025-26" or "2026")."""
+    for f in data.get("filters") or []:
+        if f.get("name") == "season":
+            for o in f.get("options") or []:
+                if o.get("value") == f.get("value"):
+                    return o.get("displayValue") or o.get("value")
+    return None
 
 
 def seasons_from(data: dict) -> list[str]:
@@ -204,7 +230,7 @@ def weighted(rates: dict[str, Rate]) -> float | None:
 
 
 def best_trends(name: str, pid: str, team: str, opponent: str, games: list[PlayerGame], sport: str,
-                bigger: bool = False) -> list[Trend]:
+                bigger: bool = False, props: list[Prop] | None = None) -> list[Trend]:
     """For each prop, the highest line this player has hit consistently.
 
     With bigger=True, each prop's smallest line (the near-certain "gimme") is
@@ -222,7 +248,7 @@ def best_trends(name: str, pid: str, team: str, opponent: str, games: list[Playe
     l10 = games[:10]
     vs = [g for g in games if g.opponent == opponent]
     found = []
-    for prop in PROPS[sport]:
+    for prop in props if props is not None else PROPS[sport]:
         best = None
         for line in prop.lines:
             if bigger and len(prop.lines) > 1 and line == prop.lines[0]:
@@ -248,10 +274,10 @@ class PropsClient:
         self._cache: dict[str, tuple[float, object]] = {}
         self._limit = asyncio.Semaphore(8)
 
-    async def _json(self, url: str, params: dict | None = None):
+    async def _json(self, url: str, params: dict | None = None, ttl: float = CACHE_SECONDS):
         key = url + str(sorted((params or {}).items()))
         hit = self._cache.get(key)
-        if hit and time.monotonic() - hit[0] < CACHE_SECONDS:
+        if hit and time.monotonic() - hit[0] < ttl:
             return hit[1]
         async with self._limit:
             data = await self.espn._get_json(url, params)
@@ -266,22 +292,28 @@ class PropsClient:
         ids: list[str] = []
         year = date.today().year
         for season in (year + 1, year, year - 1):  # newest season that has leaders yet
-            try:
-                data = await self._json(LEADERS_URL.format(sport=sport_path, league=league_slug, season=season, team=team_id))
-            except Exception:
-                continue
-            cats = {c.get("name"): c.get("leaders") or [] for c in data.get("categories") or []}
-            for cat, count in picks:
-                for leader in cats.get(cat, [])[:count]:
-                    aid = (leader.get("athlete") or {}).get("$ref", "").split("/athletes/")[-1].split("?")[0]
-                    if aid and aid not in ids:
-                        ids.append(aid)
+            for kind in LEADER_TYPES:
+                try:
+                    data = await self._json(LEADERS_URL.format(sport=sport_path, league=league_slug, season=season,
+                                                               type=kind, team=team_id))
+                except Exception:
+                    continue
+                cats = {c.get("name"): c.get("leaders") or [] for c in data.get("categories") or []}
+                for cat, count in picks:
+                    for leader in cats.get(cat, [])[:count]:
+                        aid = (leader.get("athlete") or {}).get("$ref", "").split("/athletes/")[-1].split("?")[0]
+                        if aid and aid not in ids:
+                            ids.append(aid)
+                if ids:
+                    break
             if ids:
                 break
         roster = await self._roster(league.path, team_id)
         players = [(aid, *roster[aid]) for aid in ids if aid in roster]
         if league.sport == "baseball":
             players = [p for p in players if p[2] not in ("SP", "RP", "P")]  # batters only
+        if league.sport == "soccer":
+            players = [p for p in players if p[2] not in ("G", "GK")]  # no goalkeepers
         return players[:MAX_PLAYERS[league.sport]]
 
     async def _roster(self, path: str, team_id: str) -> dict[str, tuple[str, str]]:
@@ -294,10 +326,13 @@ class PropsClient:
         return {str(i.get("id")): (i.get("displayName", "?"), (i.get("position") or {}).get("abbreviation", ""))
                 for i in items if isinstance(i, dict)}
 
-    async def player_games(self, path: str, athlete_id: str) -> tuple[list[PlayerGame], bool]:
-        """This season's and last season's games for a player."""
+    async def player_games(self, path: str, athlete_id: str, fresh: bool = False) -> tuple[list[PlayerGame], bool]:
+        """This season's and last season's games for a player (fresh=True skips the cache, for grading)."""
         url = GAMELOG_URL.format(path=path, id=athlete_id)
-        latest = await self._json(url)
+        latest = await self._json(url, ttl=0 if fresh else CACHE_SECONDS)
+        if fresh:
+            games, pitcher = parse_gamelog(latest)
+            return games, pitcher
         games, pitcher = parse_gamelog(latest)
         seasons = seasons_from(latest)
         if len(seasons) > 1:
@@ -355,11 +390,19 @@ class Leg:
     game: str  # e.g. "IND @ WSH"
     game_id: str
     player_id: str | None = None
+    # For grading after the game:
+    kind: str = "prop"  # "prop" or "moneyline"
+    stat: str | None = None  # game-log stat, e.g. "receptions"
+    line: int | None = None  # "N or more"
+    side: str | None = None  # moneyline: the team id picked
+    league: str = ""
+    path: str = ""  # ESPN path for this game, e.g. "football/nfl" or "cricket/24289"
 
 
 def trend_legs(game: Game, trends: list[Trend]) -> list[Leg]:
     label = f"{game.away.abbrev} @ {game.home.abbrev}"
-    return [Leg(t.pick, t.probability, t.evidence, label, game.id, t.player_id) for t in trends]
+    return [Leg(t.pick, t.probability, t.evidence, label, game.id, t.player_id, "prop", t.prop.stat, t.line,
+                None, game.league_key, game.path) for t in trends]
 
 
 def moneyline_leg(game: Game, chances: dict[str, float] | None, odds) -> Leg | None:
@@ -371,7 +414,8 @@ def moneyline_leg(game: Game, chances: dict[str, float] | None, odds) -> Leg | N
     team = game.home if tid == game.home.id else game.away
     price = odds.home_ml if team is game.home else odds.away_ml
     return Leg(f"{team.name} Moneyline", chances[tid], f"{odds.provider} {price} → {chances[tid]:.0%} implied (no-vig)",
-               f"{game.away.abbrev} @ {game.home.abbrev}", game.id)
+               f"{game.away.abbrev} @ {game.home.abbrev}", game.id, None, "moneyline", None, None, tid,
+               game.league_key, game.path)
 
 
 def build_parlay(legs: list[Leg], size: int) -> list[Leg]:
@@ -408,10 +452,14 @@ NOTE = ("~% = past hit rate adjusted for sample size. It's history, not odds, an
 
 def trends_embed(game: Game, trends: list[Trend], ml: Leg | None) -> discord.Embed:
     a, b = game.teams
+    legend = ["L10 = last 10 games"]
+    if trends and trends[0].season_label and trends[0].season_label != "recent":
+        legend.append(f"{trends[0].season_label} = most recent season")
+    if trends and trends[0].last_label:
+        legend.append(f"{trends[0].last_label} = the season before")
     embed = discord.Embed(title=f"📊 Trends: {a.name} vs {b.name}",
                           description=f"{game.league.emoji} {game.league.name} · most likely line per player and stat\n"
-                                      f"*{trends[0].season_label if trends else ''} = this season · "
-                                      f"{trends[0].last_label if trends else ''} = last season · L10 = last 10 games*",
+                                      f"*{' · '.join(legend)}*",
                           color=discord.Color.purple())
     if ml:
         embed.add_field(name="🏆 Moneyline", value=f"**{ml.pick}** · {ml.evidence}", inline=False)
@@ -425,15 +473,24 @@ def trends_embed(game: Game, trends: list[Trend], ml: Leg | None) -> discord.Emb
                 text += row + "\n"
             embed.add_field(name=f"{team.abbrev}", value=text, inline=False)
     if not trends:
-        embed.add_field(name="No trends", value="Not enough game logs for this matchup's key players yet.", inline=False)
+        if game.league.feed == "scorepanel":
+            why = ("ESPN has no international match history for players, so I build it as matches finish "
+                   "(earlier matches in this series count too). Players need 3+ recent matches; check back soon.")
+        else:
+            why = "No line has hit consistently enough for this matchup's key players yet."
+        embed.add_field(name="No trends yet", value=why, inline=False)
     embed.set_footer(text=NOTE)
     return embed
 
 
-def parlay_embed(league_name: str, emoji: str, legs: list[Leg], style: str = "Safest") -> tuple[discord.Embed, str]:
+def parlay_embed(league_name: str, emoji: str, legs: list[Leg], style: str = "Safest",
+                 requested: int | None = None) -> tuple[discord.Embed, str]:
     """The parlay with its evidence, plus a plain slip to copy or screenshot."""
     embed = discord.Embed(title=f"🎟️ {emoji} {league_name} parlay: {len(legs)} legs ({style})", color=discord.Color.purple())
     lines = [f"**{i}. {leg.pick}** ({leg.game})\n  ~{leg.probability:.0%} · {leg.evidence}" for i, leg in enumerate(legs, 1)]
+    if requested and len(legs) < requested:
+        lines.append(f"\n*Only {len(legs)} of {requested} legs: there aren't enough games right now "
+                     f"(max {MAX_LEGS_PER_GAME} legs per game).*")
     embed.description = "\n".join(lines)[:4000]
     embed.add_field(
         name="Chance all legs hit (estimate)",
