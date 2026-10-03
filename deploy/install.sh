@@ -5,6 +5,12 @@
 #
 # Run it again at any time to update the bot to the latest code; the saved
 # token and followed leagues are kept.
+#
+# To install without any prompts (e.g. from a cloud server's startup script),
+# set DISCORD_TOKEN in the environment first:
+#
+#   export DISCORD_TOKEN=your-token
+#   curl -fsSL https://raw.githubusercontent.com/steelballsdragon/Super/main/deploy/install.sh | bash
 set -euo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/steelballsdragon/Super.git}"
@@ -21,8 +27,9 @@ command -v apt-get >/dev/null || die "this script needs Ubuntu (choose an Ubuntu
 
 say "Installing system packages"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq git python3 python3-venv >/dev/null
+# Wait for any boot-time package updates to release the apt lock.
+apt-get -o DPkg::Lock::Timeout=600 update -qq
+apt-get -o DPkg::Lock::Timeout=600 install -y -qq git python3 python3-venv >/dev/null
 
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' \
   || die "Python 3.10+ is required; use Ubuntu 22.04 or newer"
@@ -43,15 +50,17 @@ python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/pip" install -q -r "$APP_DIR/requirements.txt"
 chown -R scorebot:scorebot "$APP_DIR"
 
-if [ ! -s "$ENV_FILE" ] || ! grep -q '^DISCORD_TOKEN=.\+' "$ENV_FILE"; then
+token="${DISCORD_TOKEN:-}"
+if [ -z "$token" ] && { [ ! -s "$ENV_FILE" ] || ! grep -q '^DISCORD_TOKEN=.\+' "$ENV_FILE"; }; then
   say "Discord bot token"
   echo "Paste your bot token (from the Discord Developer Portal → Bot page)."
   echo "It won't be shown as you paste. Press Enter when done."
-  token=""
   while [ -z "$token" ]; do
     read -rs -p "Token: " token </dev/tty
     echo
   done
+fi
+if [ -n "$token" ]; then
   umask 077
   cat > "$ENV_FILE" <<ENV
 DISCORD_TOKEN=$token
