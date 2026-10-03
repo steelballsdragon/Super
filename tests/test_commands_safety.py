@@ -245,7 +245,8 @@ def test_parlays_look_past_a_lone_midweek_game_and_never_fake_a_lotto(tmp_path):
             return [], None
         legs = [Leg(f"{game.home.name} P{i} Over 0.5 Shots", 0.62, "", "", game.id, f"{game.id}-{i}") for i in range(2)]
         return [SimpleNamespace(**{"pick": l.pick, "probability": l.probability, "evidence": "", "player_id": l.player_id,
-                                   "prop": SimpleNamespace(stat="shots"), "line": 1, "player": "P"}) for l in legs], None
+                                   "prop": SimpleNamespace(stat="shots"), "line": 1, "player": "P",
+                                   "team": game.home.abbrev}) for l in legs], None
     bot.game_props = game_props
     bot.store.add(7, "mls")
     research = bot.tree.get_command("research").callback
@@ -266,7 +267,6 @@ def test_parlays_look_past_a_lone_midweek_game_and_never_fake_a_lotto(tmp_path):
 
 
 def test_pick_a_game_for_a_same_game_lotto_of_goalscorers(tmp_path):
-    from sportsbot.props import Leg
     bot = bot_with_teams(tmp_path)
     bot.store.add(7, "epl")
     from datetime import datetime, timedelta, timezone
@@ -283,11 +283,13 @@ def test_pick_a_game_for_a_same_game_lotto_of_goalscorers(tmp_path):
         asked.append((g.id, scorers))
         if not scorers:
             return [], None
-        names = ("Cole Palmer", "João Pedro", "Antoine Semenyo", "Justin Kluivert", "Enzo Fernández", "Evanilson")
-        legs = [Leg(f"{n} Anytime Goal", p, "", "", g.id, f"{g.id}-{n}", "prop", "totalGoals", 1, None, "epl", "", n)
-                for n, p in zip(names, (0.45, 0.4, 0.35, 0.3, 0.27, 0.25))]
-        return [SimpleNamespace(pick=l.pick, probability=l.probability, evidence="", player_id=l.player_id,
-                                prop=SimpleNamespace(stat="totalGoals"), line=1, player=l.player) for l in legs], None
+        # Three scorers and three assisters for each side; only one of each per team can be used.
+        names = {"CHE": ("Cole Palmer", "João Pedro", "Enzo Fernández"), "BOU": ("Antoine Semenyo", "Justin Kluivert", "Evanilson")}
+        legs = [(f"{n} {wording}", p, f"{g.id}-{n}-{stat}", stat, n, team)
+                for team, players in names.items() for n, p in zip(players, (0.45, 0.4, 0.3))
+                for stat, wording in (("totalGoals", "Anytime Goalscorer"), ("goalAssists", "To Record an Assist"))]
+        return [SimpleNamespace(pick=pick, probability=p, evidence="", player_id=pid, prop=SimpleNamespace(stat=stat),
+                                line=1, player=n, team=team) for pick, p, pid, stat, n, team in legs], None
     bot.game_props = game_props
     research = bot.tree.get_command("research")
 
@@ -302,7 +304,10 @@ def test_pick_a_game_for_a_same_game_lotto_of_goalscorers(tmp_path):
     assert i.sent[0].startswith("🎟️ ⚽ Premier League · Lotto") and "Closest" not in i.sent[0]
     assert {gid for gid, _ in asked} == {"55"} and all(s for _, s in asked)  # only that game, only scorer bets
     [parlay] = bot.parlays.pending()
-    assert {leg["game_id"] for leg in parlay["legs"]} == {"55"} and 4 <= len(parlay["legs"]) <= 10
+    assert {leg["game_id"] for leg in parlay["legs"]} == {"55"} and len(parlay["legs"]) == 4
+    # One goalscorer and one assister per team, never two assists from the same side.
+    assert sorted((leg["team"], leg["stat"]) for leg in parlay["legs"]) == [
+        ("BOU", "goalAssists"), ("BOU", "totalGoals"), ("CHE", "goalAssists"), ("CHE", "totalGoals")]
 
     # Typing the game instead of picking it works too.
     i = Inter()

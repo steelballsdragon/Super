@@ -296,3 +296,21 @@ def test_a_cold_spell_is_not_taken_as_the_teams_level():
     m = Matchup({"359": 1.2, "357": 1.2}, {"359": 0.6, "357": 1.4}, "market", 5)
     [t] = apply_matchup([scorer("Kai Havertz", "ARS", 0.30)], arsenal_leeds(), m)
     assert 0.34 < t.probability < 0.38
+
+
+def test_never_two_assists_or_two_goalscorers_from_one_team():
+    """The slip that prompted this: Messi and De Paul (both Inter Miami) to assist."""
+    def leg_(name, team, stat, p, game):
+        wording = "To Record an Assist" if stat == "goalAssists" else "Anytime Goalscorer"
+        return Leg(f"{name} {wording}", p, "", "", game, f"{name}-{stat}", "prop", stat, 1, None, "mls", "", name, team)
+    legs = [leg_("Wessam Abou Ali", "CLB", "totalGoals", 0.45, "1"), leg_("Lionel Messi", "MIA", "goalAssists", 0.42, "2"),
+            leg_("Rodrigo De Paul", "MIA", "goalAssists", 0.40, "2"), leg_("Luis Suárez", "MIA", "totalGoals", 0.38, "2"),
+            leg_("Lionel Messi", "MIA", "totalGoals", 0.37, "2"), leg_("Myrto Uzuni", "ATX", "totalGoals", 0.33, "3"),
+            leg_("Diego Rossi", "CLB", "totalGoals", 0.32, "1"), leg_("Owen Wolff", "ATX", "goalAssists", 0.30, "3")]
+    chosen = build_to_target(legs, TARGETS["lotto"], per_game=15, balance=True)
+    by_team = {}
+    for leg in chosen:
+        by_team.setdefault((leg.team, leg.stat), []).append(leg.player)
+    assert all(len(players) == 1 for players in by_team.values()), by_team
+    assert len({leg.player_id for leg in chosen}) == len(chosen)
+    assert ("MIA", "goalAssists") in by_team and by_team[("MIA", "goalAssists")] == ["Lionel Messi"]

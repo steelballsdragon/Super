@@ -35,6 +35,9 @@ BARS = {
 # games), so they get their own bar: a real chance, and at least 2 of the last 10.
 SCORER_STATS = ("totalGoals", "goalAssists", "goalOrAssist", "goals", "assists")
 SCORER_BAR, SCORER_MIN_L10 = 0.22, 0.2
+# Two assists (or two goalscorers) from one team rarely both land: a parlay takes at most one of each per team.
+SCORER_KIND = {"totalGoals": "goal", "goals": "goal", "goalAssists": "assist", "assists": "assist",
+               "goalOrAssist": "goal or assist"}
 # Before the matchup adjustment, players a little under the bar are kept too: a good matchup can lift them over it.
 SCORER_PRE_BAR = 0.15
 WEIGHTS = {"l10": 0.45, "season": 0.30, "last": 0.25}
@@ -549,12 +552,13 @@ class Leg:
     league: str = ""
     path: str = ""  # ESPN path for this game, e.g. "football/nfl" or "cricket/24289"
     player: str = ""  # the player's name, for matching match commentary
+    team: str = ""  # the player's team (abbreviation)
 
 
 def trend_legs(game: Game, trends: list[Trend]) -> list[Leg]:
     label = f"{game.away.name} @ {game.home.name}"
     return [Leg(t.pick, t.probability, t.evidence, label, game.id, t.player_id, "prop", t.prop.stat, t.line,
-                None, game.league_key, game.path, t.player) for t in trends]
+                None, game.league_key, game.path, t.player, t.team) for t in trends]
 
 
 def moneyline_leg(game: Game, chances: dict[str, float] | None, odds, underdog: bool = False) -> Leg | None:
@@ -622,8 +626,15 @@ def build_to_target(legs: list[Leg], target: Target, per_game: int = MAX_LEGS_PE
     pool = sorted(legs, key=lambda l: (l.probability > target.leg_max, -l.probability))
     p = 1.0
 
+    team_bets: set[tuple] = set()  # (game, team, goal/assist): one goalscorer and one assister per team at most
+
+    def team_bet(leg):
+        kind = SCORER_KIND.get(leg.stat or "")
+        return (leg.game_id, leg.team, kind) if kind and leg.team else None
+
     def allowed(leg):
-        return counts.get(leg.game_id, 0) < per_game and not (leg.player_id and leg.player_id in players)
+        return (counts.get(leg.game_id, 0) < per_game and not (leg.player_id and leg.player_id in players)
+                and team_bet(leg) not in team_bets)
 
     def fewest_of_its_kind(found):
         if not balance or not found:
@@ -644,6 +655,8 @@ def build_to_target(legs: list[Leg], target: Target, per_game: int = MAX_LEGS_PE
         counts[leg.game_id] = counts.get(leg.game_id, 0) + 1
         if leg.player_id:
             players.add(leg.player_id)
+        if bet := team_bet(leg):
+            team_bets.add(bet)
         p *= leg.probability
     return chosen
 
