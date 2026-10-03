@@ -13,6 +13,7 @@ from discord.ext import tasks
 from .espn import ESPNClient
 from .formatting import scoreboard_embed, update_embed
 from .leagues import LEAGUES
+from .plays import PlayResolver
 from .storage import SubscriptionStore
 from .tracker import Tracker
 
@@ -28,6 +29,8 @@ class SportsBot(discord.Client):
         self.store = store
         self.espn = ESPNClient()
         self.tracker = Tracker()
+        nfl = LEAGUES["nfl"]
+        self.nfl_plays = PlayResolver(lambda event_id: self.espn.scoring_plays(nfl, event_id))
         self.dev_guild = dev_guild
         self.poll.change_interval(seconds=poll_interval)
 
@@ -68,6 +71,8 @@ class SportsBot(discord.Client):
             log.exception("Failed to fetch %s scoreboard", key)
             return
         updates = self.tracker.update(key, games)
+        if key == "nfl":
+            updates = await self.nfl_plays.resolve(games, updates)
         if not updates:
             return
         subs = self.store.for_league(key)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .espn import Game, Goal
+from .espn import Game, Goal, ScoringPlay
 
 KICKOFF = "kickoff"
 SCORE = "score"
@@ -18,6 +18,8 @@ class Update:
     game: Game
     new_goals: tuple[Goal, ...] = ()
     score_decreased: bool = False  # e.g. a goal overturned by VAR
+    prev_total: int = 0  # combined score before this update
+    play: ScoringPlay | None = None  # NFL scoring play details, when known
 
 
 def diff_game(prev: Game, cur: Game) -> list[Update]:
@@ -27,7 +29,8 @@ def diff_game(prev: Game, cur: Game) -> list[Update]:
     if (prev.home.score, prev.away.score) != (cur.home.score, cur.away.score):
         decreased = cur.home.score + cur.away.score < prev.home.score + prev.away.score
         new_goals = () if decreased else cur.goals[len(prev.goals):]
-        updates.append(Update(SCORE, cur, new_goals, decreased))
+        prev_total = prev.home.score + prev.away.score
+        updates.append(Update(SCORE, cur, new_goals, decreased, prev_total))
     if cur.status_name == "STATUS_HALFTIME" and prev.status_name != "STATUS_HALFTIME":
         updates.append(Update(HALFTIME, cur))
     if prev.state != "post" and cur.state == "post":

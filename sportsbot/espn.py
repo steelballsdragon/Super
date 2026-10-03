@@ -1,4 +1,4 @@
-"""Minimal client for ESPN's public scoreboard API."""
+"""Minimal client for ESPN's public scoreboard and game summary APIs."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from .leagues import LEAGUES, League
 log = logging.getLogger(__name__)
 
 BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
+SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/summary"
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,34 @@ class Goal:
 
 
 @dataclass(frozen=True)
+class ScoringPlay:
+    """An NFL scoring play, e.g. a touchdown with its yardage and kick."""
+
+    id: str
+    kind: str  # e.g. "Passing Touchdown", "Field Goal Good"
+    category: str  # e.g. "Touchdown", "Field Goal", "Safety"
+    text: str  # e.g. "Roman Wilson 12 Yd pass from Aaron Rodgers (Chris Boswell Kick)"
+    team_abbrev: str
+    period: int
+    clock: str
+    away_score: int
+    home_score: int
+
+    @property
+    def total(self) -> int:
+        return self.away_score + self.home_score
+
+
+@dataclass(frozen=True)
+class Leader:
+    """A statistical game leader, e.g. PASS: A. Rodgers 22/40, 299 YDS, 3 TD."""
+
+    category: str
+    athlete: str
+    stats: str
+
+
+@dataclass(frozen=True)
 class Game:
     id: str
     league_key: str
@@ -50,6 +79,7 @@ class Game:
     start: str  # ISO timestamp
     last_play: str | None = None
     goals: tuple[Goal, ...] = field(default_factory=tuple)
+    leaders: tuple[Leader, ...] = field(default_factory=tuple)
 
     @property
     def teams(self) -> tuple[Team, Team]:
@@ -106,6 +136,42 @@ def _parse_goals(details: list[dict]) -> tuple[Goal, ...]:
     return tuple(goals)
 
 
+LEADER_CATEGORIES = {"passingYards": "PASS", "rushingYards": "RUSH", "receivingYards": "REC"}
+
+
+def _parse_leaders(categories: list[dict]) -> tuple[Leader, ...]:
+    leaders = []
+    for cat in categories:
+        label = LEADER_CATEGORIES.get(cat.get("name", ""))
+        top = (cat.get("leaders") or [None])[0]
+        if label is None or not top:
+            continue
+        athlete = top.get("athlete") or {}
+        leaders.append(
+            Leader(label, athlete.get("shortName") or athlete.get("displayName", "?"), top.get("displayValue", ""))
+        )
+    return tuple(leaders)
+
+
+def parse_scoring_plays(summary: dict) -> list[ScoringPlay]:
+    plays = []
+    for p in summary.get("scoringPlays") or []:
+        plays.append(
+            ScoringPlay(
+                id=str(p.get("id", "")),
+                kind=(p.get("type") or {}).get("text", ""),
+                category=(p.get("scoringType") or {}).get("displayName", ""),
+                text=(p.get("text") or "").strip(),
+                team_abbrev=(p.get("team") or {}).get("abbreviation", ""),
+                period=_int((p.get("period") or {}).get("number")),
+                clock=(p.get("clock") or {}).get("displayValue", ""),
+                away_score=_int(p.get("awayScore")),
+                home_score=_int(p.get("homeScore")),
+            )
+        )
+    return plays
+
+
 def parse_scoreboard(data: dict, league: League) -> list[Game]:
     games = []
     for event in data.get("events", []):
@@ -133,6 +199,7 @@ def parse_scoreboard(data: dict, league: League) -> list[Game]:
                 start=event.get("date", ""),
                 last_play=(situation.get("lastPlay") or {}).get("text"),
                 goals=_parse_goals(comp.get("details") or []),
+                leaders=_parse_leaders(comp.get("leaders") or []),
             )
         )
     return games
@@ -152,13 +219,19 @@ class ESPNClient:
             self._owns_session = True
         return self._session
 
-    async def scoreboard(self, league: League) -> list[Game]:
+    async def _get_json(self, url: str, params: dict | None = None) -> dict:
         session = await self._get_session()
-        url = BASE_URL.format(path=league.path)
-        async with session.get(url) as resp:
+        async with session.get(url, params=params) as resp:
             resp.raise_for_status()
-            data = await resp.json(content_type=None)
+            return await resp.json(content_type=None)
+
+    async def scoreboard(self, league: League) -> list[Game]:
+        data = await self._get_json(BASE_URL.format(path=league.path))
         return parse_scoreboard(data, league)
+
+    async def scoring_plays(self, league: League, event_id: str) -> list[ScoringPlay]:
+        data = await self._get_json(SUMMARY_URL.format(path=league.path), {"event": event_id})
+        return parse_scoring_plays(data)
 
     async def close(self) -> None:
         if self._owns_session and self._session and not self._session.closed:
