@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import html
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import aiohttp
 
@@ -16,6 +17,7 @@ BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
 SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/summary"
 SCOREPANEL_URL = "https://site.web.api.espn.com/apis/site/v2/sports/{path}/scorepanel"
 TEAMS_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/teams"
+PLAYBYPLAY_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/playbyplay"
 
 # ESPN has no team list for international cricket, so team suggestions start
 # from the national sides and add any team currently playing.
@@ -119,6 +121,7 @@ class Game:
     leaders: tuple[Leader, ...] = field(default_factory=tuple)
     period: int = 0
     summary: str = ""  # cricket, e.g. "India won toss & batted", "RCB won by 5 wkts"
+    path: str = ""  # ESPN path for this game's details, e.g. "cricket/24289"
 
     @property
     def league(self) -> League:
@@ -397,6 +400,7 @@ def _parse_event(event: dict, league: League) -> Game | None:
         leaders=_parse_leaders(comp, competitors),
         period=_int(status.get("period")),
         summary=status.get("summary") or "",
+        path=league.path,
     )
 
 
@@ -422,8 +426,67 @@ def is_international(event: dict) -> bool:
 
 def parse_scorepanel(data: dict, league: League) -> list[Game]:
     """Every current international cricket match, across all series."""
-    events = [e for block in data.get("scores", []) for e in block.get("events", []) if is_international(e)]
-    return parse_scoreboard({"events": events}, league)
+    games = []
+    for block in data.get("scores", []):
+        series = (_list(block.get("leagues")) or [{}])[0].get("id")
+        events = [e for e in block.get("events", []) if is_international(e)]
+        for game in parse_scoreboard({"events": events}, league):
+            # Each series has its own ESPN path, needed for ball-by-ball commentary.
+            games.append(replace(game, path=f"{league.path}/{series}") if series else game)
+    return games
+
+
+@dataclass(frozen=True)
+class Ball:
+    """One delivery from a cricket match's ball-by-ball commentary."""
+
+    sequence: int
+    over: str  # e.g. "2.3"
+    short: str  # e.g. "Seales to Shubman Gill, OUT"
+    text: str  # full commentary
+    kind: str  # "no run", "run", "four", "six", "out", "wide", ...
+    team: str  # batting team abbreviation
+    runs: int  # innings total after this ball
+    wickets: int
+    dismissal: str  # e.g. "Shubman Gill c †Hope b Seales 1 (6b 0x4 0x6)"; "" if none
+    over_number: int
+    over_complete: bool
+    over_runs: int
+
+
+def parse_balls(data: dict) -> tuple[list[Ball], int]:
+    """Balls on one commentary page, plus how many pages there are."""
+    commentary = data.get("commentary") or {}
+    balls = []
+    for it in _list(commentary.get("items")):
+        short = (it.get("shortText") or "").strip()
+        if not short:
+            continue
+        over, inn, out = it.get("over") or {}, it.get("innings") or {}, it.get("dismissal") or {}
+        dismissal = ""
+        if out.get("dismissal"):
+            dismissal = re.sub(r"\s+SR: [\d.]+$", "", html.unescape(out.get("text") or "")).strip()
+            dismissal = re.sub(r"\s{2,}", " ", dismissal)
+        balls.append(
+            Ball(
+                sequence=_int(it.get("sequence")),
+                over=str(over.get("actual", "")),
+                short=short,
+                text=html.unescape(it.get("text") or "").strip(),
+                kind=(it.get("playType") or {}).get("description", ""),
+                team=(it.get("team") or {}).get("abbreviation", ""),
+                runs=_int(inn.get("runs")),
+                wickets=_int(inn.get("wickets")),
+                dismissal=dismissal,
+                over_number=_int(over.get("number")),
+                # ESPN flags the over complete a little after its last ball, so a
+                # sixth legal delivery also counts.
+                over_complete=bool(over.get("complete"))
+                or (_int(over.get("ball")) >= 6 and (it.get("playType") or {}).get("description") not in ("wide", "no ball")),
+                over_runs=_int(over.get("runs")),
+            )
+        )
+    return balls, max(_int(commentary.get("pageCount")), 1)
 
 
 class ESPNClient:
@@ -470,6 +533,12 @@ class ESPNClient:
             data = await self._get_json(TEAMS_URL.format(path=league.path))
             raw = [t.get("team") or {} for s in _list(data.get("sports")) for l in _list(s.get("leagues")) for t in _list(l.get("teams"))]
         return sorted({(t.get("displayName", ""), t.get("abbreviation", "")) for t in raw if t.get("displayName")})
+
+    async def balls(self, path: str, event_id: str, page: int | None = None) -> tuple[list[Ball], int]:
+        params = {"event": event_id}
+        if page:
+            params["page"] = page
+        return parse_balls(await self._get_json(PLAYBYPLAY_URL.format(path=path), params))
 
     async def goal_details(self, league: League, event_id: str) -> list[GoalDetail]:
         data = await self._get_json(SUMMARY_URL.format(path=league.path), {"event": event_id})

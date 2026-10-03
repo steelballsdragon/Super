@@ -14,6 +14,7 @@ class Subscription:
     channel_id: int
     league: str
     team: str | None = None  # None means every game in the league
+    ball_by_ball: bool = False  # cricket: post every delivery
 
 
 class SubscriptionStore:
@@ -28,13 +29,13 @@ class SubscriptionStore:
         with self.path.open() as f:
             raw = json.load(f)
         self._subs = {
-            Subscription(int(s["channel_id"]), s["league"], s.get("team"))
+            Subscription(int(s["channel_id"]), s["league"], s.get("team"), bool(s.get("ball_by_ball", False)))
             for s in raw
         }
 
     def _save(self) -> None:
         data = [
-            {"channel_id": s.channel_id, "league": s.league, "team": s.team}
+            {"channel_id": s.channel_id, "league": s.league, "team": s.team, "ball_by_ball": s.ball_by_ball}
             for s in sorted(self._subs, key=lambda s: (s.channel_id, s.league, s.team or ""))
         ]
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -48,19 +49,22 @@ class SubscriptionStore:
         team = (team or "").strip().lower()
         return team or None
 
-    def add(self, channel_id: int, league: str, team: str | None = None) -> bool:
-        sub = Subscription(channel_id, league, self._norm(team))
+    def add(self, channel_id: int, league: str, team: str | None = None, ball_by_ball: bool = False) -> bool:
+        """Follow a league/team; following again in the other mode switches modes."""
+        sub = Subscription(channel_id, league, self._norm(team), ball_by_ball)
         if sub in self._subs:
             return False
+        self._subs.discard(Subscription(channel_id, league, self._norm(team), not ball_by_ball))
         self._subs.add(sub)
         self._save()
         return True
 
     def remove(self, channel_id: int, league: str, team: str | None = None) -> bool:
-        sub = Subscription(channel_id, league, self._norm(team))
-        if sub not in self._subs:
+        team = self._norm(team)
+        gone = {s for s in self._subs if (s.channel_id, s.league, s.team) == (channel_id, league, team)}
+        if not gone:
             return False
-        self._subs.discard(sub)
+        self._subs -= gone
         self._save()
         return True
 
