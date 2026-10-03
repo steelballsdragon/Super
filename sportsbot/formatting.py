@@ -8,7 +8,7 @@ import discord
 
 from .espn import Game, Goal, ScoringPlay, Team, period_label
 from .leagues import LEAGUES
-from .tracker import FINAL, HALFTIME, INNINGS, KICKOFF, PERIOD, SCORE, WICKET, Update
+from .tracker import FINAL, HALFTIME, INNINGS, KICKOFF, OVERS, PERIOD, SCORE, WICKET, Update
 
 COLORS = {
     KICKOFF: discord.Color.blue(),
@@ -17,6 +17,7 @@ COLORS = {
     HALFTIME: discord.Color.gold(),
     WICKET: discord.Color.red(),
     INNINGS: discord.Color.gold(),
+    OVERS: discord.Color.teal(),
     FINAL: discord.Color.dark_grey(),
 }
 
@@ -105,6 +106,8 @@ def _title(update: Update) -> str:
         text = "WICKET!" if update.count == 1 else f"{update.count} WICKETS!"
     elif kind == INNINGS:
         text = "Innings break"
+    elif kind == OVERS:
+        text = f"After {update.count} overs"
     else:
         text = {"soccer": "Full-time", "cricket": "Result"}.get(sport, "Final")
     return f"{game.league.emoji} {text}"
@@ -131,7 +134,7 @@ def update_embed(update: Update) -> discord.Embed:
             lines += [_goal_line(game, g) for g in update.new_goals]
         elif game.last_play:
             lines.append(game.last_play)
-    elif update.kind in (KICKOFF, WICKET, INNINGS) and game.summary:
+    elif update.kind in (KICKOFF, WICKET, INNINGS, OVERS) and game.summary:
         lines.append(game.summary)  # cricket: toss result, or the chase equation
     elif update.kind == FINAL:
         lines.append(_result(game))

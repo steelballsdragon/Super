@@ -5,6 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
+import time
+from dataclasses import dataclass
+from pathlib import Path
 
 import discord
 from discord import app_commands
@@ -20,6 +24,35 @@ from .tracker import Tracker
 log = logging.getLogger("sportsbot")
 
 PLAY_BY_PLAY_SPORTS = ("football", "baseball", "hockey")
+
+# ESPN refreshes its data every 5-8 seconds, so checking more often than this
+# wouldn't make updates any faster.
+DEFAULT_POLL_SECONDS = 10
+MIN_POLL_SECONDS = 5
+# Older installers wrote POLL_INTERVAL=30 into the server's settings; treat that
+# as "use the default" so those servers speed up too.
+LEGACY_DEFAULT_POLL = "30"
+
+TEAM_LIST_TTL = 6 * 3600
+
+
+@dataclass
+class LeagueHealth:
+    checked_at: float | None = None
+    live_games: int = 0
+    error: str | None = None
+    error_at: float | None = None
+
+
+def code_version() -> str:
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parent.parent), "log", "-1", "--format=%h (%cd)", "--date=short"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return out.stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
 
 LEAGUE_CHOICES = [app_commands.Choice(name=l.name, value=l.key) for l in LEAGUES.values()]
 
@@ -44,7 +77,20 @@ class SportsBot(discord.Client):
             if league.sport == "soccer"
         )
         self.dev_guild = dev_guild
+        self.poll_interval = poll_interval
         self.poll.change_interval(seconds=poll_interval)
+        self.health: dict[str, LeagueHealth] = {}
+        self.version = code_version()
+        self._team_lists: dict[str, tuple[float, list[tuple[str, str]]]] = {}
+
+    async def team_list(self, key: str) -> list[tuple[str, str]]:
+        """(name, abbreviation) of the league's teams, cached for a few hours."""
+        cached = self._team_lists.get(key)
+        if cached and time.monotonic() - cached[0] < TEAM_LIST_TTL:
+            return cached[1]
+        teams = await self.espn.teams(LEAGUES[key])
+        self._team_lists[key] = (time.monotonic(), teams)
+        return teams
 
     def _plays_fetcher(self, league):
         return lambda event_id: self.espn.scoring_plays(league, event_id)
@@ -70,7 +116,7 @@ class SportsBot(discord.Client):
     async def on_ready(self) -> None:
         log.info("Logged in as %s (%s)", self.user, getattr(self.user, "id", "?"))
 
-    @tasks.loop(seconds=30)
+    @tasks.loop(seconds=DEFAULT_POLL_SECONDS)
     async def poll(self) -> None:
         active = self.store.leagues()
         for key in list(LEAGUES):
@@ -83,11 +129,14 @@ class SportsBot(discord.Client):
         await self.wait_until_ready()
 
     async def _poll_league(self, key: str) -> None:
+        health = self.health.setdefault(key, LeagueHealth())
         try:
             games = await self.espn.scoreboard(LEAGUES[key])
-        except Exception:
+        except Exception as exc:
             log.exception("Failed to fetch %s scoreboard", key)
+            health.error, health.error_at = f"{type(exc).__name__}: {exc}"[:200], time.time()
             return
+        health.checked_at, health.live_games = time.time(), sum(g.state == "in" for g in games)
         updates = self.tracker.update(key, games)
         resolver = self.play_resolvers.get(key)
         if resolver is not None:
@@ -120,8 +169,35 @@ class SportsBot(discord.Client):
             log.exception("Failed to post update to channel %s", channel_id)
 
 
+def _ago(ts: float | None) -> str:
+    if ts is None:
+        return "never"
+    secs = int(time.time() - ts)
+    return f"{secs}s ago" if secs < 120 else f"{secs // 60} min ago"
+
+
 def register_commands(bot: SportsBot) -> None:
     tree = bot.tree
+
+    async def team_suggestions(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        key = getattr(interaction.namespace, "league", None)
+        if key not in LEAGUES:
+            return []
+        try:
+            # Discord drops suggestions that take longer than 3 seconds.
+            teams = await asyncio.wait_for(bot.team_list(key), timeout=2.5)
+        except Exception:
+            log.warning("Couldn't load %s teams for suggestions", key, exc_info=True)
+            return []
+        q = current.strip().lower()
+        matches = [n for n, a in teams if not q or q in n.lower() or q == a.lower()]
+        return [app_commands.Choice(name=n[:100], value=n[:100]) for n in matches[:25]]
+
+    async def followed_team_suggestions(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        key = getattr(interaction.namespace, "league", None)
+        q = current.strip().lower()
+        teams = [s.team for s in bot.store.for_channel(interaction.channel_id) if s.league == key and s.team]
+        return [app_commands.Choice(name=t[:100], value=t[:100]) for t in teams if q in t][:25]
 
     @tree.command(name="scores", description="Show current scores for a league")
     @app_commands.describe(league="League to show", team="Only show games for this team (name or abbreviation)")
@@ -138,6 +214,8 @@ def register_commands(bot: SportsBot) -> None:
             games = [g for g in games if g.involves(team)]
         await interaction.followup.send(embed=scoreboard_embed(league.value, games, team))
 
+    scores.autocomplete("team")(team_suggestions)
+
     @tree.command(name="follow", description="Post live updates for a league (or one team) in this channel")
     @app_commands.describe(league="League to follow", team="Only follow this team (name or abbreviation)")
     @app_commands.choices(league=LEAGUE_CHOICES)
@@ -151,6 +229,8 @@ def register_commands(bot: SportsBot) -> None:
             msg = f"This channel already follows {target}."
         await interaction.response.send_message(msg)
 
+    follow.autocomplete("team")(team_suggestions)
+
     @tree.command(name="unfollow", description="Stop live updates for a league (or one team) in this channel")
     @app_commands.describe(league="League to unfollow", team="The team you followed, if any")
     @app_commands.choices(league=LEAGUE_CHOICES)
@@ -163,6 +243,26 @@ def register_commands(bot: SportsBot) -> None:
         else:
             msg = f"This channel wasn't following {target}. Use `/following` to see what it follows."
         await interaction.response.send_message(msg, ephemeral=True)
+
+    unfollow.autocomplete("team")(followed_team_suggestions)
+
+    @tree.command(name="status", description="Show whether the bot is checking scores and when it last succeeded")
+    async def status(interaction: discord.Interaction):
+        active = sorted(bot.store.leagues() & LEAGUES.keys(), key=list(LEAGUES).index)
+        lines = []
+        for key in active:
+            h = bot.health.get(key, LeagueHealth())
+            line = f"{LEAGUES[key].emoji} **{LEAGUES[key].name}**: checked {_ago(h.checked_at)}, {h.live_games} live"
+            if h.error and (h.checked_at is None or (h.error_at or 0) > h.checked_at):
+                line += f"\n  ⚠️ Last check failed {_ago(h.error_at)}: `{h.error}`"
+            lines.append(line)
+        embed = discord.Embed(
+            title="ScoreBot status",
+            description="\n".join(lines) or "No channel follows anything yet. Use `/follow`.",
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text=f"Version {bot.version} · checks every {bot.poll_interval:g}s")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @tree.command(name="following", description="List what this channel is following")
     async def following(interaction: discord.Interaction):
@@ -180,13 +280,21 @@ def register_commands(bot: SportsBot) -> None:
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 
+def poll_seconds(setting: str | None) -> float:
+    """Seconds between checks from the POLL_INTERVAL setting."""
+    setting = (setting or "").strip()
+    if setting in ("", LEGACY_DEFAULT_POLL):
+        return DEFAULT_POLL_SECONDS
+    return max(float(setting), MIN_POLL_SECONDS)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     token = os.environ.get("DISCORD_TOKEN")
     if not token:
         raise SystemExit("Set the DISCORD_TOKEN environment variable (see .env.example).")
     store = SubscriptionStore(os.environ.get("DATA_FILE", "subscriptions.json"))
-    interval = float(os.environ.get("POLL_INTERVAL", "30"))
+    interval = poll_seconds(os.environ.get("POLL_INTERVAL"))
     dev_guild = os.environ.get("DEV_GUILD_ID")
     bot = SportsBot(store, interval, int(dev_guild) if dev_guild else None)
     bot.run(token, log_handler=None)

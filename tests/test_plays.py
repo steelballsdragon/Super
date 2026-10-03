@@ -3,7 +3,7 @@ import asyncio
 from sportsbot.espn import parse_scoreboard, parse_scoring_plays
 from sportsbot.formatting import update_embed
 from sportsbot.leagues import LEAGUES
-from sportsbot.plays import MAX_ATTEMPTS, PlayResolver
+from sportsbot.plays import PLAY_WAIT_SECONDS, PlayResolver
 from sportsbot.tracker import FINAL, SCORE, Tracker
 
 NFL = LEAGUES["nfl"]
@@ -81,10 +81,15 @@ def test_extra_point_after_touchdown_is_not_reposted():
 
 
 def test_falls_back_to_plain_score_when_play_never_appears():
-    feed, tracker, resolver = setup()
-    results = [step(tracker, resolver, board(away=2)) for _ in range(MAX_ATTEMPTS)]
-    assert results[:-1] == [[]] * (MAX_ATTEMPTS - 1)
-    [u] = results[-1]
+    now = [0.0]
+    feed, tracker = Feed(), Tracker()
+    resolver = PlayResolver(feed, clock=lambda: now[0])
+    step(tracker, resolver, board())
+    assert step(tracker, resolver, board(away=2)) == []
+    now[0] = PLAY_WAIT_SECONDS - 1
+    assert step(tracker, resolver, board(away=2)) == []  # still waiting
+    now[0] = PLAY_WAIT_SECONDS
+    [u] = step(tracker, resolver, board(away=2))
     assert u.kind == SCORE and u.play is None
 
 

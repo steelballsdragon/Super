@@ -12,6 +12,7 @@ PERIOD = "period"  # basketball/hockey: end of a quarter or period
 HALFTIME = "halftime"
 WICKET = "wicket"
 INNINGS = "innings"  # cricket: innings break
+OVERS = "overs"  # cricket: score every 5 (T20) or 10 (ODI/Test) overs
 FINAL = "final"
 
 # Statuses meaning a basketball quarter or hockey period just ended.
@@ -30,7 +31,7 @@ class Update:
     score_decreased: bool = False  # e.g. a goal overturned by VAR
     prev_total: int = 0  # combined score before this update
     play: ScoringPlay | None = None  # NFL/MLB/NHL scoring play details, when known
-    count: int = 1  # wickets that fell since the last snapshot
+    count: int = 1  # wickets that fell, or the over count reached (OVERS)
 
 
 def _batting(game: Game) -> str | None:
@@ -39,6 +40,32 @@ def _batting(game: Game) -> str | None:
         if team.innings and team.innings[-1].batting:
             return team.id
     return None
+
+
+def _batting_innings(game: Game):
+    """(team, innings) currently batting in a cricket match, if any."""
+    for team in game.teams:
+        if team.innings and team.innings[-1].batting:
+            return team, len(team.innings)
+    return None, 0
+
+
+def over_interval(game: Game) -> int:
+    """How often to post the score: every 5 overs in T20s and shorter, 10 otherwise."""
+    overs = [t.max_overs for t in game.teams if t.max_overs]
+    return 5 if overs and max(overs) <= 20 else 10
+
+
+def overs_milestone(prev: Game, cur: Game) -> int | None:
+    """The over count just reached (e.g. 10), if the batting side passed one."""
+    prev_team, prev_n = _batting_innings(prev)
+    team, n = _batting_innings(cur)
+    if team is None or prev_team is None or team.id != prev_team.id or n != prev_n:
+        return None
+    every = over_interval(cur)
+    before = int(prev_team.innings[-1].overs) // every
+    after = int(team.innings[-1].overs) // every
+    return after * every if after > before else None
 
 
 def diff_game(prev: Game, cur: Game) -> list[Update]:
@@ -57,6 +84,9 @@ def diff_game(prev: Game, cur: Game) -> list[Update]:
             updates.append(Update(WICKET, cur, count=fallen))
         if _batting(prev) is not None and _batting(cur) not in (None, _batting(prev)):
             updates.append(Update(INNINGS, cur))
+        elif fallen <= 0 and (milestone := overs_milestone(prev, cur)):
+            # A wicket post already shows the score, so skip the over update then.
+            updates.append(Update(OVERS, cur, count=milestone))
     if sport in ("basketball", "hockey") and cur.status_name in END_OF_PERIOD and prev.status_name not in END_OF_PERIOD:
         updates.append(Update(PERIOD, cur))
     if cur.status_name == "STATUS_HALFTIME" and prev.status_name != "STATUS_HALFTIME":
