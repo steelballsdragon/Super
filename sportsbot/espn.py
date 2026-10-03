@@ -6,13 +6,23 @@ import asyncio
 import html
 import logging
 import re
+import time
 from dataclasses import dataclass, field, replace
+from datetime import datetime
+from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 import aiohttp
 
 from .leagues import LEAGUES, League
 
+if TYPE_CHECKING:  # odds.py imports this module
+    from .odds import Odds
+
 log = logging.getLogger(__name__)
+
+EASTERN = ZoneInfo("America/New_York")  # ESPN's scoreboard days follow US Eastern time
+QUIET_DAY_SECONDS = 600
 
 BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard"
 SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/{path}/summary"
@@ -170,7 +180,6 @@ def _float(value) -> float:
 
 def start_time(game: "Game"):
     """The game's start as an aware datetime, or None if ESPN didn't give one."""
-    from datetime import datetime
     try:
         return datetime.fromisoformat(game.start.replace("Z", "+00:00"))
     except ValueError:
@@ -511,6 +520,7 @@ class ESPNClient:
     def __init__(self, session: aiohttp.ClientSession | None = None):
         self._session = session
         self._owns_session = session is None
+        self._quiet_days: dict[str, tuple] = {}  # league -> (a day with no games, when to check it again)
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -537,8 +547,21 @@ class ESPNClient:
         if league.feed == "scorepanel":
             data = await self._get_json(SCOREPANEL_URL.format(path=league.path))  # current matches only
             return parse_scorepanel(data, league)
-        data = await self._get_json(BASE_URL.format(path=league.path), {"dates": date} if date else None)
-        return parse_scoreboard(data, league)
+        url = BASE_URL.format(path=league.path)
+        data = await self._get_json(url, {"dates": date} if date else None)
+        games = parse_scoreboard(data, league)
+        shown = (data.get("day") or {}).get("date")  # the day ESPN chose, e.g. "2026-10-01"
+        today = datetime.now(EASTERN).date()
+        quiet = self._quiet_days.get(league.key)
+        if date is None and shown and shown < today.isoformat() and not (quiet and quiet[0] == today and time.monotonic() < quiet[1]):
+            # ESPN can keep showing an earlier day well into a game day (even after first pitch),
+            # and a game first seen already under way would miss its start: add today's games too.
+            known = {g.id for g in games}
+            extra = parse_scoreboard(await self._get_json(url, {"dates": f"{today:%Y%m%d}"}), league)
+            games += [g for g in extra if g.id not in known]
+            if not extra:  # nothing on today (e.g. the off-season): check again in a while, not every cycle
+                self._quiet_days[league.key] = (today, time.monotonic() + QUIET_DAY_SECONDS)
+        return games
 
     async def scoring_plays(self, league: League, event_id: str) -> list[ScoringPlay]:
         data = await self._get_json(SUMMARY_URL.format(path=league.path), {"event": event_id})

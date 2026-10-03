@@ -98,6 +98,10 @@ def test_ball_by_ball_channels_skip_wicket_posts_but_get_the_result():
     async def no_balls(game):
         return []
     bot.ball_feeds["cricket"].new_balls = no_balls
+
+    async def no_record(game):  # keeping the scorecard would reach ESPN
+        return None
+    bot.cricket.record = no_record
     snapshots = iter([cricket((40, 2, 8.3, True)), cricket((41, 3, 8.4, True)),
                       cricket((150, 10, 45.0, False), summary="India won by 40 runs", state="post")])
 

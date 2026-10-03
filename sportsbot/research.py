@@ -291,6 +291,31 @@ class LeanBook:
                 settled.append(lean)
         return settled
 
+    async def settle_pending(self, bot) -> int:
+        """Grades leans whose games are over, even if the bot never saw them end (e.g. restarting at
+        the time). Postponed/cancelled games, and leans unresolved after a week, are voided."""
+        from types import SimpleNamespace
+        from .parlays import EXPIRE_SECONDS, game_result
+        done = 0
+        for key, lean in self._state.items("leans"):
+            if "result" in lean:
+                continue
+            if time.time() - lean.get("at", time.time()) > EXPIRE_SECONDS:
+                self._state.set("leans", key, {**lean, "result": "void", "final": "never settled"})
+                done += 1
+                continue
+            final = await game_result(bot, lean["league"], lean["game"])
+            if final is None:
+                continue
+            if final["called_off"]:
+                self._state.set("leans", key, {**lean, "result": "void", "final": final["detail"]})
+            else:
+                (hid, hs), (aid, as_) = final["home"], final["away"]
+                g = SimpleNamespace(home=SimpleNamespace(id=hid, score=hs), away=SimpleNamespace(id=aid, score=as_))
+                self._state.set("leans", key, {**lean, "result": grade(lean, g), "final": f"{as_}-{hs}"})
+            done += 1
+        return done
+
     def pending_leagues(self) -> set[str]:
         return {lean["league"] for _, lean in self._state.items("leans") if "result" not in lean}
 
@@ -300,8 +325,8 @@ class LeanBook:
     def summary(self) -> dict[str, dict]:
         out: dict[str, dict] = {}
         for _, lean in self._state.items("leans"):
-            if "result" not in lean:
-                continue
+            if lean.get("result") not in ("win", "loss", "push"):
+                continue  # pending, or voided (postponed games don't count)
             for bucket in ("all", lean["market"], lean.get("confidence", "Low")):
                 s = out.setdefault(bucket, {"win": 0, "loss": 0, "push": 0, "units": 0.0})
                 s[lean["result"]] += 1
@@ -313,6 +338,8 @@ class LeanBook:
 
 import discord  # noqa: E402  (kept with the formatting it's used for)
 
+from .limits import fitted  # noqa: E402
+
 DISCLAIMER = "Research, not advice · leans are tracked: /research record"
 
 
@@ -320,6 +347,7 @@ def _pct(x: float) -> str:
     return f"{100 * x:.1f}%"
 
 
+@fitted
 def report_embed(r: Research, found: list[Lean]) -> discord.Embed:
     g, o = r.game, r.odds
     a, b = g.teams
@@ -382,6 +410,7 @@ def _start_ts(g: Game) -> float | None:
     return s.timestamp() if s else None
 
 
+@fitted
 def picks_embed(league_name: str, emoji: str, reports: list[tuple[Research, list[Lean]]]) -> discord.Embed:
     rows = []
     for r, found in reports:
@@ -395,11 +424,15 @@ def picks_embed(league_name: str, emoji: str, reports: list[tuple[Research, list
             strength = {"High": 3, "Medium": 2, "Low": 1}[lean.confidence]
             rows.append((strength, -len(lean.cautions), r, lean, pick))
     rows.sort(key=lambda x: (x[0], x[1]), reverse=True)
-    lines = []
+    lines, used = [], 0
     for _, _, r, lean, pick in rows[:10]:
         g = r.game
         warn = " ⚠️" if lean.cautions else ""
-        lines.append(f"**{pick}** · {g.away.abbrev} @ {g.home.abbrev} · {lean.confidence}{warn}\n  {lean.why[-1]}")
+        entry = f"**{pick}** · {g.away.abbrev} @ {g.home.abbrev} · {lean.confidence}{warn}\n  {lean.why[-1]}"
+        if used + len(entry) + 1 > 1000:
+            break  # whole entries only, within Discord's 1024-character field limit
+        lines.append(entry)
+        used += len(entry) + 1
     likely = sorted(((ml, r) for r in (x[0] for x in reports) if (ml := most_likely(r))), key=lambda x: -x[0][1])[:5]
     embed = discord.Embed(title=f"🔎 {emoji} {league_name} research", color=discord.Color.dark_teal())
     embed.add_field(name="💡 Leans (strongest first)",
@@ -415,6 +448,7 @@ def picks_embed(league_name: str, emoji: str, reports: list[tuple[Research, list
     return embed
 
 
+@fitted
 def record_embed(summary: dict[str, dict], pending: int) -> discord.Embed:
     embed = discord.Embed(title="📒 Research lean record", color=discord.Color.dark_teal())
     if not summary:

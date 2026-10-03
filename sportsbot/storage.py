@@ -3,10 +3,43 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+
+def write_json(path: Path, data) -> None:
+    """Saves atomically and flushes to disk, so a crash or power cut leaves the old or new file, never half of one."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def read_json(path: Path, default):
+    """Loads a saved file; a damaged one is set aside (not deleted) so the bot still starts."""
+    try:
+        with path.open() as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return default
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        aside = path.with_name(f"{path.name}.damaged-{int(time.time())}")
+        os.replace(path, aside)
+        log.error("%s was damaged; moved it to %s and started fresh", path, aside.name)
+        return default
 
 
 @dataclass(frozen=True)
@@ -24,10 +57,7 @@ class SubscriptionStore:
         self._load()
 
     def _load(self) -> None:
-        if not self.path.exists():
-            return
-        with self.path.open() as f:
-            raw = json.load(f)
+        raw = read_json(self.path, [])
         self._subs = {
             Subscription(int(s["channel_id"]), s["league"], s.get("team"), bool(s.get("ball_by_ball", False)))
             for s in raw
@@ -38,11 +68,7 @@ class SubscriptionStore:
             {"channel_id": s.channel_id, "league": s.league, "team": s.team, "ball_by_ball": s.ball_by_ball}
             for s in sorted(self._subs, key=lambda s: (s.channel_id, s.league, s.team or ""))
         ]
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent, suffix=".tmp")
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, self.path)
+        write_json(self.path, data)
 
     @staticmethod
     def _norm(team: str | None) -> str | None:

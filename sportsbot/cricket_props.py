@@ -15,7 +15,6 @@ is their final line. One request returns a whole match.
 from __future__ import annotations
 
 import asyncio
-import time
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -131,22 +130,24 @@ class CricketHistory:
         self._props = props_client
         self._state = state
 
-    async def _json(self, url, params=None):
-        return await self._props._json(url, params, ttl=HISTORY_CACHE)
-
     async def _finished_ids_on(self, path: str, day: date, team_ids: set[str]) -> list[tuple[str, str]]:
+        key = f"cricket-day:{path}:{day:%Y%m%d}"
         try:
-            data = await self._json(SCOREBOARD_URL.format(path=path), {"dates": day.strftime("%Y%m%d")})
+            finished = await self._props.cached(key, HISTORY_CACHE, lambda: self._finished_on(path, day))
         except Exception:
             return []
+        return [(eid, when) for eid, when, ids in finished if set(ids) & team_ids]
+
+    async def _finished_on(self, path: str, day: date) -> list[tuple[str, str, tuple[str, ...]]]:
+        """Finished matches on a day (past days never change, so this is cached for a week)."""
+        data = await self._props._json(SCOREBOARD_URL.format(path=path), {"dates": day.strftime("%Y%m%d")})
         found = []
         for e in data.get("events") or []:
             comp = (e.get("competitions") or [{}])[0]
             if ((comp.get("status") or {}).get("type") or {}).get("state") != "post":
                 continue
-            ids = {str((c.get("team") or {}).get("id")) for c in comp.get("competitors") or []}
-            if ids & team_ids:
-                found.append((str(e.get("id")), e.get("date", "")))
+            ids = tuple(str((c.get("team") or {}).get("id")) for c in comp.get("competitors") or [])
+            found.append((str(e.get("id")), e.get("date", ""), ids))
         return found
 
     async def scorecards(self, game: Game) -> list[Scorecard]:
@@ -164,10 +165,14 @@ class CricketHistory:
         events = {eid: when for day in found for eid, when in day}
         cards = []
 
+        async def scorecard_now(eid, when):
+            data = await self._props._json(PLAYBYPLAY_URL.format(path=path), {"event": eid, "limit": WHOLE_MATCH})
+            return parse_scorecard(data, eid, when)  # keep the small scorecard, not the ~1 MB commentary
+
         async def one(eid, when):
             try:
-                data = await self._json(PLAYBYPLAY_URL.format(path=path), {"event": eid, "limit": WHOLE_MATCH})
-                return parse_scorecard(data, eid, when)
+                return await self._props.cached(f"cricket-card:{path}:{eid}", HISTORY_CACHE,
+                                                lambda: scorecard_now(eid, when))
             except Exception:
                 return None
         cards = [c for c in await asyncio.gather(*(one(e, w) for e, w in events.items())) if c]

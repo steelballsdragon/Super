@@ -49,7 +49,10 @@ say "Installing Python packages"
 python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/pip" install -q --upgrade pip
 "$APP_DIR/.venv/bin/pip" install -q -r "$APP_DIR/requirements.txt"
-chown -R scorebot:scorebot "$APP_DIR"
+# The bot only reads its code (its data lives in /var/lib/scorebot), and root
+# runs the update scripts in here, so the bot's user must not be able to edit it.
+chown -R root:root "$APP_DIR"
+chmod -R go-w "$APP_DIR"
 
 token="${DISCORD_TOKEN:-}"
 if [ -z "$token" ] && { [ ! -s "$ENV_FILE" ] || ! grep -q '^DISCORD_TOKEN=.\+' "$ENV_FILE"; }; then
