@@ -70,10 +70,10 @@ def update_embed(update: Update) -> discord.Embed:
 
 
 def game_line(game: Game) -> str:
-    a, h = game.away, game.home
+    a, b = game.teams
     if game.state == "pre":
-        return f"🕒 {a.abbrev} vs {h.abbrev} · {_timestamp(game.start)}"
-    score = f"{a.abbrev} **{a.score} - {h.score}** {h.abbrev}"
+        return f"🕒 {a.abbrev} vs {b.abbrev} · {_timestamp(game.start)}"
+    score = f"{a.abbrev} **{a.score} - {b.score}** {b.abbrev}"
     if game.state == "in":
         return f"🔴 {score} · {game.detail}"
     return f"✅ {score} · {game.detail}"

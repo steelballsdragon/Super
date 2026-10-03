@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 import aiohttp
 
-from .leagues import League
+from .leagues import LEAGUES, League
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +53,10 @@ class Game:
 
     @property
     def teams(self) -> tuple[Team, Team]:
+        """Both teams in display order: home first for soccer, away first (US style) otherwise."""
+        league = LEAGUES.get(self.league_key)
+        if league is not None and league.sport == "soccer":
+            return (self.home, self.away)
         return (self.away, self.home)
 
     def involves(self, query: str) -> bool:
@@ -62,7 +66,8 @@ class Game:
         )
 
     def scoreline(self) -> str:
-        return f"{self.away.name} {self.away.score} - {self.home.score} {self.home.name}"
+        first, second = self.teams
+        return f"{first.name} {first.score} - {second.score} {second.name}"
 
 
 def _int(value) -> int:
