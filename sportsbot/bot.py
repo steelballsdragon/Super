@@ -407,15 +407,15 @@ class SportsBot(discord.Client):
 
     # ----- betting research -----
 
-    async def game_props(self, game, bigger: bool = False):
-        """Player trends and a moneyline leg for one game."""
+    async def game_props(self, game, bigger: bool = False, underdog: bool = False):
+        """Player trends and a moneyline leg (the favorite's, or with underdog=True the underdog's) for one game."""
         summary = await self.espn.summary(game.path or LEAGUES[game.league_key].path, game.id)
         r = parse_research(summary, game)
         if game.league.sport == "cricket":
             trends = await self.cricket.trends(game, bigger)
         else:
             trends = await self.props.game_trends(game, injured_names(summary), bigger)
-        return trends, moneyline_leg(game, market_chances(r), r.odds)
+        return trends, moneyline_leg(game, market_chances(r), r.odds, underdog)
 
     async def research(self, game):
         """The research report and leans for a game; pre-game leans are recorded for grading."""
@@ -789,10 +789,13 @@ def register_commands(bot: SportsBot) -> None:
         async def one(g):
             try:
                 trends, ml = await bot.game_props(g, target.bigger)
-                legs = trend_legs(g, trends)
+                legs = trend_legs(g, trends) + ([ml] if ml else [])
                 if target.bigger:  # the near-certain lines too, to finish near the target
                     legs += trend_legs(g, (await bot.game_props(g))[0])
-                return legs + ([ml] if ml else [])
+                if target.key == "lotto":  # underdogs pay more per leg
+                    if dog := (await bot.game_props(g, underdog=True))[1]:
+                        legs.append(dog)
+                return legs
             except Exception:
                 log.warning("Parlay research failed for %s", g.id, exc_info=True)
                 return []
@@ -833,7 +836,7 @@ def register_commands(bot: SportsBot) -> None:
     @app_commands.describe(
         league="League",
         team="A team: everything on its next game (with a parlay: legs from that game only)",
-        parlay="Build a parlay: Safe (around +100) or Big payout (+1000 to +10000)",
+        parlay="Safe (around +100), Big payout (+1000 to +10000) or Lotto (4-10 legs, +3000 to +20000)",
     )
     @app_commands.choices(league=LEAGUE_CHOICES, parlay=[app_commands.Choice(name=t.name, value=t.key)
                                                          for t in TARGETS.values()])

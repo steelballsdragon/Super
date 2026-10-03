@@ -54,6 +54,7 @@ Everything is one command, `/research <league> [team] [parlay]`:
 | `/research league:NFL team:Chiefs` | Everything on that team's next game: market, model, form, injuries, leans and player trends |
 | `/research league:NFL parlay:Safe` | A parlay built to about **+100** |
 | `/research league:NFL parlay:Big payout` | A parlay built to between **+1000 and +10000** |
+| `/research league:NFL parlay:Lotto` | A 4–10 leg parlay built to between **+3000 and +20000** |
 | `/research league:NFL team:Chiefs parlay:Safe` | A same-game parlay from the Chiefs' next game |
 
 `/record` shows how the leans and parlays have done.
@@ -104,6 +105,8 @@ odds land in range:
   chance), usually 2–4 legs.
 - **Big payout (+1000 to +10000):** the higher, better-paying lines (each stat's near-certain line is skipped), usually
   6–12 legs.
+- **Lotto (4–10 legs, +3000 to +20000):** the longest shots that still have a track record: high lines, plus
+  underdog moneylines the market gives at least a 25% chance (not soccer, where draws are possible).
 
 Legs are spread out (at most two per game, one per player; legs in the same game move together) unless you pick a
 team, which builds a same-game parlay. Clear moneyline favorites can be legs too. Each leg shows its evidence, and

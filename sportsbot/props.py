@@ -423,6 +423,7 @@ def injured_names(summary: dict) -> set[str]:
 
 MAX_LEGS_PER_GAME = 2  # legs in the same game move together, so keep a parlay spread out
 MONEYLINE_MIN = 0.60  # favorites at least this likely (no-vig) can be legs
+UNDERDOG_MIN = 0.25  # lotto underdogs: real chances only, no long shots
 
 
 @dataclass(frozen=True)
@@ -448,11 +449,13 @@ def trend_legs(game: Game, trends: list[Trend]) -> list[Leg]:
                 None, game.league_key, game.path) for t in trends]
 
 
-def moneyline_leg(game: Game, chances: dict[str, float] | None, odds) -> Leg | None:
+def moneyline_leg(game: Game, chances: dict[str, float] | None, odds, underdog: bool = False) -> Leg | None:
+    """The clear favorite's moneyline, or with underdog=True the underdog's (for lottos), from the market."""
     if not chances or "draw" in chances:
         return None  # soccer moneylines can also draw, so they're left out
-    tid = max((game.home.id, game.away.id), key=lambda t: chances[t])
-    if chances[tid] < MONEYLINE_MIN:
+    pick = min if underdog else max
+    tid = pick((game.home.id, game.away.id), key=lambda t: chances[t])
+    if (chances[tid] < UNDERDOG_MIN) if underdog else (chances[tid] < MONEYLINE_MIN):
         return None
     team = game.home if tid == game.home.id else game.away
     price = odds.home_ml if team is game.home else odds.away_ml
@@ -471,14 +474,19 @@ class Target:
     aim: float  # the chance to get closest to
     bigger: bool  # use the higher, better-paying lines
     leg_max: float = 1.0  # build mostly from legs at most this likely (near-certain ones only fine-tune)
+    min_legs: int = 2
+    max_legs: int = 15
 
 
 TARGETS = {
     # +100 is a 50% chance; +1000 is 1 in 11; +10000 is 1 in 101.
     "safe": Target("safe", "Safe (around +100)", 0.45, 0.55, 0.50, bigger=False),
     "big": Target("big", "Big payout (+1000 to +10000)", 1 / 101, 1 / 11, 0.035, bigger=True, leg_max=0.82),
+    # +3000 is 1 in 31; +20000 is 1 in 201. Only 4-10 legs, so each leg pays more.
+    "lotto": Target("lotto", "Lotto (4-10 legs, +3000 to +20000)", 1 / 201, 1 / 31, 1 / 80, bigger=True,
+                    leg_max=0.72, min_legs=4, max_legs=10),
 }
-MAX_LEGS = 15
+MAX_LEGS = max(t.max_legs for t in TARGETS.values())
 
 
 def american(p: float) -> str:
@@ -507,11 +515,12 @@ def build_to_target(legs: list[Leg], target: Target, per_game: int = MAX_LEGS_PE
     def allowed(leg):
         return counts.get(leg.game_id, 0) < per_game and not (leg.player_id and leg.player_id in players)
 
-    while p > target.high and len(chosen) < MAX_LEGS:
+    while (p > target.high or len(chosen) < target.min_legs) and len(chosen) < target.max_legs:
         options = [leg for leg in pool if allowed(leg)]
         if not options:
             break
-        landing = [leg for leg in options if target.low <= p * leg.probability <= target.high]
+        last = len(chosen) + 1 >= target.min_legs  # this leg can finish the parlay
+        landing = [leg for leg in options if last and target.low <= p * leg.probability <= target.high]
         leg = (min(landing, key=lambda l: abs(log(p * l.probability / target.aim))) if landing else options[0])
         chosen.append(leg)
         pool.remove(leg)
@@ -580,7 +589,7 @@ def parlay_embed(league_name: str, emoji: str, legs: list[Leg], target: Target) 
     chance = combined(legs)
     embed = discord.Embed(title=f"🎟️ {emoji} {league_name} · {target.name}: {count}", color=discord.Color.purple())
     lines = [f"**{i}. {leg.pick}** ({leg.game})\n  ~{leg.probability:.0%} · {leg.evidence}" for i, leg in enumerate(legs, 1)]
-    if not target.low <= chance <= target.high:
+    if not target.low <= chance <= target.high or len(legs) < target.min_legs:
         why = "too few games or strong legs right now" if chance > target.high else "the legs available"
         lines.append(f"\n*Closest I could get is {american(chance)} ({why}).*")
     embed.description = "\n".join(lines)
