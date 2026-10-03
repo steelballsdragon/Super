@@ -46,8 +46,19 @@ When a game ends on a score, such as a walk-off home run, the winning play is po
 
 ### Betting research
 
-`/research game <league> <team>` builds a report on the team's live or next game (looking up to a week ahead), with
-every number labelled by source:
+Everything is one command, `/research <league> [team] [parlay]`:
+
+| You type | You get |
+|---|---|
+| `/research league:NFL` | The league's strongest leans, most likely results, and a **Safe** parlay |
+| `/research league:NFL team:Chiefs` | Everything on that team's next game: market, model, form, injuries, leans and player trends |
+| `/research league:NFL parlay:Safe` | A parlay built to about **+100** |
+| `/research league:NFL parlay:Big payout` | A parlay built to between **+1000 and +10000** |
+| `/research league:NFL team:Chiefs parlay:Safe` | A same-game parlay from the Chiefs' next game |
+
+`/record` shows how the leans and parlays have done.
+
+A team's report labels every number by source:
 
 - **Market (DraftKings via ESPN):** spread, total and moneyline, the implied chance of each result with the
   bookmaker's margin removed, and how the line has moved since it opened.
@@ -59,17 +70,13 @@ every number labelled by source:
   against the lean since the open, or a gap so large it usually means the model is missing news. Leans with
   cautions are always Low; totals from recent form top out at Medium.
 
-`/research picks <league>` ranks the upcoming games by how strongly the data disagrees with the line, and separately
-lists the **most likely results** by the market (with the reminder that likely isn't the same as good value).
-
-`/research record` shows how the leans have actually done. Every pre-game lean is saved and graded at the final
-(win/loss/push, units at the recorded price), broken down by market and by confidence. Break-even at standard
--110 prices is about 52.4%, so judge the leans by this record, not by how convincing they sound. It's research,
-not advice, and it can't guarantee winners.
+Every pre-game lean is saved and graded at the final (win/loss/push, units at the recorded price), and `/record`
+breaks the results down by market and by confidence. Break-even at standard -110 prices is about 52.4%, so judge the
+leans by this record, not by how convincing they sound. It's research, not advice, and it can't guarantee winners.
 
 ### Player trends and parlays (Linemate-style)
 
-`/research trends <league> <team>` shows each key player's **most likely line** for every stat in the team's next
+A team's report also shows each key player's **most likely line** for every stat in the team's next
 game, with how often it hit: last 10 games, this season, last season and against this opponent, from ESPN's game
 logs, e.g. *~92% Josh Downs Over 1.5 Receptions · L10 10/10 · 2026 3/3 · 2025 15/16*. Key players come from ESPN's
 team leaders; players listed Out, Doubtful or on IR are skipped.
@@ -90,19 +97,25 @@ The **~%** is the hit rate adjusted for sample size (10/10 becomes about 92%, so
 weighted toward the last 10 games. A line needs about 75% (and 7 of the last 10) to be shown. MLB hitting is far less
 consistent, so its bar is about 60%; its estimates are shown either way.
 
-`/research parlay <league> legs:4 style:Safest|Bigger payout` builds a parlay from the upcoming games: the most likely
-legs, at most two per game and one per player (legs in the same game move together), plus clear moneyline favorites.
-*Safest* takes the most likely lines, often small ones that pay little; *Bigger payout* skips each stat's smallest
-line. It shows each leg's evidence, an estimate of the chance all legs hit (optimistic: it assumes independence),
-and a plain slip to copy or screenshot for an odds bot.
+**Parlays are built to a payout, not a number of legs.** Legs are added, most likely first, until the estimated
+odds land in range:
 
-Parlays look up to three days ahead when there are no games left today, and say so when there are fewer games than
-legs asked for.
+- **Safe (around +100):** the most likely lines until the parlay is close to even money (+100 means about a 50%
+  chance), usually 2–4 legs.
+- **Big payout (+1000 to +10000):** the higher, better-paying lines (each stat's near-certain line is skipped), usually
+  6–12 legs.
+
+Legs are spread out (at most two per game, one per player; legs in the same game move together) unless you pick a
+team, which builds a same-game parlay. Clear moneyline favorites can be legs too. Each leg shows its evidence, and
+the parlay shows its **estimated odds** from those hit rates, with a plain slip to copy or screenshot for an odds bot.
+The estimate is optimistic (it treats legs as independent) and your book's real price will differ, so check it.
+If there aren't enough games or strong legs to reach the range, it says how close it got. Parlays look up to three
+days ahead when there are no games left today.
 
 **Every parlay is graded.** It's saved with the channel it was built in; after the games, each leg is checked against
 the player's actual stats (game log, or the cricket scorecard) or the final score, players who didn't play are voided as
 books do, and the result is posted back, e.g. *✅ Aaron Rodgers Over 199.5 Passing Yards · 299 · predicted ~79%*.
-`/research record` adds parlay and leg results per sport with **hit rate vs predicted**, the honest test of whether the
+`/record` adds parlay and leg results per sport with **hit rate vs predicted**, the honest test of whether the
 estimates can be trusted.
 
 These are historical frequencies, not odds, and books price these trends in; check prices before betting.

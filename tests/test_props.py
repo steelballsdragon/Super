@@ -3,7 +3,7 @@ import asyncio
 from sportsbot.espn import parse_scoreboard
 from sportsbot.leagues import LEAGUES
 from sportsbot.odds import Odds
-from sportsbot.props import (Leg, PlayerGame, PropsClient, Rate, best_trends, build_parlay, combined, injured_names,
+from sportsbot.props import (Leg, PlayerGame, PropsClient, Rate, TARGETS, american, best_trends, build_to_target, combined, injured_names,
                              moneyline_leg, parlay_embed, parse_gamelog, seasons_from, trend_legs, trends_embed)
 
 
@@ -81,19 +81,63 @@ def leg(pick, p, game_id, player=None):
     return Leg(pick, p, "", f"G{game_id}", game_id, player)
 
 
+def test_american_odds():
+    assert [american(p) for p in (0.5, 0.8, 0.25, 1 / 11, 1 / 101)] == ["+100", "-400", "+300", "+1000", "+10000"]
+
+
 def test_parlay_spreads_legs_across_games_and_players():
     legs = [leg("A1", 0.95, "1", "a"), leg("A2", 0.94, "1", "a"), leg("B1", 0.93, "1", "b"), leg("C1", 0.92, "1", "c"),
             leg("D1", 0.90, "2", "d"), leg("ML", 0.80, "3")]
-    chosen = build_parlay(legs, 4)
-    assert [l.pick for l in chosen] == ["A1", "B1", "D1", "ML"]  # one leg per player, two per game
-    assert round(combined(chosen), 4) == round(0.95 * 0.93 * 0.90 * 0.80, 4)
+    chosen = build_to_target(legs, TARGETS["safe"])
+    assert [l.pick for l in chosen][:3] == ["A1", "B1", "D1"]  # one leg per player, two per game
+    assert "A2" not in [l.pick for l in chosen] and "C1" not in [l.pick for l in chosen]
+
+
+def strong_legs(n_games, p, per_game=2):
+    return [leg(f"P{g}-{i}", p, str(g), f"p{g}{i}") for g in range(n_games) for i in range(per_game)]
+
+
+def test_safe_parlay_lands_around_even_money():
+    for p in (0.95, 0.9, 0.85, 0.8, 0.7):
+        chosen = build_to_target(strong_legs(8, p), TARGETS["safe"])
+        assert 0.45 <= combined(chosen) <= 0.55, (p, combined(chosen))
+        assert -122 <= int(american(combined(chosen))) <= 122
+
+
+def test_big_parlay_lands_between_1000_and_10000():
+    for p in (0.8, 0.75, 0.7, 0.6, 0.5):  # the higher lines it uses hit less often
+        chosen = build_to_target(strong_legs(10, p), TARGETS["big"])
+        odds = int(american(combined(chosen)))
+        assert 1000 <= odds <= 10000, (p, odds, len(chosen))
+    # Only near-certain legs can't reach +1000 within 15 legs: it says how close it got.
+    chosen = build_to_target(strong_legs(10, 0.9), TARGETS["big"])
+    assert len(chosen) == 15
+    assert "Closest I could get is +386" in parlay_embed("NBA", "🏀", chosen, TARGETS["big"])[0].description
+
+
+def test_mixed_legs_finish_close_to_the_aim():
+    legs = [leg(f"L{i}", q, str(i), f"p{i}") for i, q in enumerate((0.92, 0.9, 0.88, 0.75, 0.66, 0.6, 0.55))]
+    assert 0.45 <= combined(build_to_target(legs, TARGETS["safe"])) <= 0.55
+
+
+def test_big_payout_prefers_the_better_paying_legs():
+    legs = strong_legs(10, 0.95) + [leg(f"B{g}", 0.7, str(g), f"b{g}") for g in range(10)]
+    chosen = build_to_target(legs, TARGETS["big"])
+    assert 1000 <= int(american(combined(chosen))) <= 10000 and len(chosen) <= 10
+
+
+def test_too_few_games_says_how_close_it_got():
+    chosen = build_to_target(strong_legs(2, 0.9), TARGETS["big"])  # 4 legs at most: about -190
+    embed, _ = parlay_embed("NFL", "🏈", chosen, TARGETS["big"])
+    assert len(chosen) == 4 and "Closest I could get is +" not in embed.description
+    assert "Closest I could get is -" in embed.description
 
 
 def test_parlay_embed_and_copyable_slip():
-    chosen = [leg("Josh Downs Over 1.5 Receptions", 0.92, "1"), leg("Baltimore Ravens Moneyline", 0.84, "2")]
-    embed, slip = parlay_embed("NFL", "🏈", chosen, "Safest")
-    assert embed.title == "🎟️ 🏈 NFL parlay: 2 legs (Safest)"
-    assert embed.fields[0].value.startswith("**77%**")
+    chosen = [leg("Josh Downs Over 1.5 Receptions", 0.70, "1"), leg("Baltimore Ravens Moneyline", 0.70, "2")]
+    embed, slip = parlay_embed("NFL", "🏈", chosen, TARGETS["safe"])
+    assert embed.title == "🎟️ 🏈 NFL · Safe (around +100): 2 legs"
+    assert embed.fields[0].name == "Estimated odds: +104" and "**49%**" in embed.fields[0].value
     assert slip == "```\nJosh Downs Over 1.5 Receptions\nBaltimore Ravens Moneyline\n```"
 
 

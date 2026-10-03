@@ -3,7 +3,7 @@
 This doesn't promise winners. It lays out what the market says (DraftKings,
 via ESPN), what ESPN's own model says, recent form and injuries, and only
 suggests a lean where the data points away from the line. Leans are recorded
-and graded so their real track record is visible with /research record.
+and graded so their real track record is visible with /record.
 """
 
 from __future__ import annotations
@@ -340,7 +340,7 @@ import discord  # noqa: E402  (kept with the formatting it's used for)
 
 from .limits import fitted  # noqa: E402
 
-DISCLAIMER = "Research, not advice · leans are tracked: /research record"
+DISCLAIMER = "Research, not advice · leans are tracked: /record"
 
 
 def _pct(x: float) -> str:
@@ -444,7 +444,7 @@ def picks_embed(league_name: str, emoji: str, reports: list[tuple[Research, list
             + "\n*Likely ≠ good value: short prices pay little.*",
             inline=False,
         )
-    embed.set_footer(text="Use /research game for the full data behind a lean · " + DISCLAIMER)
+    embed.set_footer(text="Add a team to /research for the full data behind a lean · " + DISCLAIMER)
     return embed
 
 

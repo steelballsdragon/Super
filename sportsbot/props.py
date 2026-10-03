@@ -461,20 +461,64 @@ def moneyline_leg(game: Game, chances: dict[str, float] | None, odds) -> Leg | N
                game.league_key, game.path)
 
 
-def build_parlay(legs: list[Leg], size: int) -> list[Leg]:
-    """The most likely legs, at most two per game and one per player."""
+@dataclass(frozen=True)
+class Target:
+    """A parlay's payout goal, as a range for the chance that every leg hits."""
+    key: str
+    name: str
+    low: float  # chance of all legs hitting, lowest and highest allowed
+    high: float
+    aim: float  # the chance to get closest to
+    bigger: bool  # use the higher, better-paying lines
+    leg_max: float = 1.0  # build mostly from legs at most this likely (near-certain ones only fine-tune)
+
+
+TARGETS = {
+    # +100 is a 50% chance; +1000 is 1 in 11; +10000 is 1 in 101.
+    "safe": Target("safe", "Safe (around +100)", 0.45, 0.55, 0.50, bigger=False),
+    "big": Target("big", "Big payout (+1000 to +10000)", 1 / 101, 1 / 11, 0.035, bigger=True, leg_max=0.82),
+}
+MAX_LEGS = 15
+
+
+def american(p: float) -> str:
+    """Fair American odds for a chance p, e.g. 0.5 -> +100, 0.8 -> -400, 0.04 -> +2400."""
+    p = min(max(p, 1e-6), 1 - 1e-6)
+    if p > 0.5:
+        return f"-{round(100 * p / (1 - p))}"
+    return f"+{round(100 * (1 - p) / p)}"
+
+
+def build_to_target(legs: list[Leg], target: Target, per_game: int = MAX_LEGS_PER_GAME) -> list[Leg]:
+    """Adds the most likely legs until the parlay's estimated odds land in the target range.
+
+    Once a leg can land it in range, the one landing closest to the aim (on a
+    log scale, so +2400 is as near to +3500 as +5000 is) finishes the parlay.
+    At most `per_game` legs per game and one leg per player.
+    """
+    from math import log
     chosen: list[Leg] = []
-    per_game: dict[str, int] = {}
+    counts: dict[str, int] = {}
     players: set[str] = set()
-    for leg in sorted(legs, key=lambda l: l.probability, reverse=True):
-        if per_game.get(leg.game_id, 0) >= MAX_LEGS_PER_GAME or (leg.player_id and leg.player_id in players):
-            continue
+    # Most likely first, but a big payout is built from the better-paying legs, so it needs fewer of them.
+    pool = sorted(legs, key=lambda l: (l.probability > target.leg_max, -l.probability))
+    p = 1.0
+
+    def allowed(leg):
+        return counts.get(leg.game_id, 0) < per_game and not (leg.player_id and leg.player_id in players)
+
+    while p > target.high and len(chosen) < MAX_LEGS:
+        options = [leg for leg in pool if allowed(leg)]
+        if not options:
+            break
+        landing = [leg for leg in options if target.low <= p * leg.probability <= target.high]
+        leg = (min(landing, key=lambda l: abs(log(p * l.probability / target.aim))) if landing else options[0])
         chosen.append(leg)
-        per_game[leg.game_id] = per_game.get(leg.game_id, 0) + 1
+        pool.remove(leg)
+        counts[leg.game_id] = counts.get(leg.game_id, 0) + 1
         if leg.player_id:
             players.add(leg.player_id)
-        if len(chosen) == size:
-            break
+        p *= leg.probability
     return chosen
 
 
@@ -530,22 +574,23 @@ def trends_embed(game: Game, trends: list[Trend], ml: Leg | None) -> discord.Emb
 
 
 @fitted
-def parlay_embed(league_name: str, emoji: str, legs: list[Leg], style: str = "Safest",
-                 requested: int | None = None) -> tuple[discord.Embed, str]:
-    """The parlay with its evidence, plus a plain slip to copy or screenshot."""
+def parlay_embed(league_name: str, emoji: str, legs: list[Leg], target: Target) -> tuple[discord.Embed, str]:
+    """The parlay with its evidence and estimated odds, plus a plain slip to copy or screenshot."""
     count = f"{len(legs)} leg" + ("" if len(legs) == 1 else "s")
-    embed = discord.Embed(title=f"🎟️ {emoji} {league_name} parlay: {count} ({style})", color=discord.Color.purple())
+    chance = combined(legs)
+    embed = discord.Embed(title=f"🎟️ {emoji} {league_name} · {target.name}: {count}", color=discord.Color.purple())
     lines = [f"**{i}. {leg.pick}** ({leg.game})\n  ~{leg.probability:.0%} · {leg.evidence}" for i, leg in enumerate(legs, 1)]
-    if requested and len(legs) < requested:
-        lines.append(f"\n*Only {len(legs)} of {requested} legs: there aren't enough games right now "
-                     f"(max {MAX_LEGS_PER_GAME} legs per game).*")
-    embed.description = "\n".join(lines)[:4000]
+    if not target.low <= chance <= target.high:
+        why = "too few games or strong legs right now" if chance > target.high else "the legs available"
+        lines.append(f"\n*Closest I could get is {american(chance)} ({why}).*")
+    embed.description = "\n".join(lines)
     embed.add_field(
-        name="Chance all legs hit (estimate)",
-        value=f"**{combined(legs):.0%}**\n*Optimistic: it assumes the legs are independent, and the best-looking trends "
-              "from many players tend to overstate themselves.*",
+        name=f"Estimated odds: {american(chance)}",
+        value=f"About a **{chance:.0%}** chance every leg hits, from the hit rates above. Books price these trends in, "
+              "so your book's price will differ: check it with your odds bot. The estimate is optimistic: it treats "
+              "the legs as independent.",
         inline=False,
     )
-    embed.set_footer(text="At most 2 legs per game. " + NOTE)
+    embed.set_footer(text=f"At most {MAX_LEGS_PER_GAME} legs per game unless you pick a team. " + NOTE)
     slip = "```\n" + "\n".join(leg.pick for leg in legs) + "\n```"
     return embed, slip

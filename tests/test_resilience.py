@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import tempfile
+from pathlib import Path
 
 import sportsbot.bot as botmod
 from sportsbot.bot import SportsBot
@@ -10,7 +11,7 @@ from sportsbot.storage import SubscriptionStore
 
 
 def make_bot():
-    bot = SportsBot(SubscriptionStore(tempfile.mktemp()), 10, None)
+    bot = SportsBot(SubscriptionStore(Path(tempfile.mkdtemp()) / "subscriptions.json"), 10, None)
     bot.wait_until_ready = lambda: asyncio.sleep(0)
     bot.poll.change_interval(seconds=0.02)
     return bot
