@@ -66,14 +66,14 @@ def test_mlb_runs_post_the_play():
     feed_plays[:] = plays["plays"]
     [u] = asyncio.run(r.resolve(game(0, 3), t.update("mlb", game(0, 3))))
     e = update_embed(u)
-    assert e.title == "⚾ HOME RUN — ATL"
+    assert e.title == "⚾ HOME RUN — Atlanta Braves"
     assert "Philadelphia Phillies 0 - 3 Atlanta Braves" in e.description
     assert "homered to right center (387 feet)" in e.description
     assert e.footer.text == "MLB · Bottom 1st"
 
     feed_plays.append(mlb_play("rbi", 1, 3, "Bohm grounded out to shortstop, Schwarber scored.", 1, "Top", "6th Inning", "22"))
     [u] = asyncio.run(r.resolve(game(1, 3), t.update("mlb", game(1, 3))))
-    assert update_embed(u).title == "⚾ RUN SCORED — PHI"
+    assert update_embed(u).title == "⚾ RUN SCORED — Philadelphia Phillies"
 
 
 def cricket_event(state="in", summary="India won toss & batted", ind=(51, 1, 3.4, True), pak=None, intl="3", eid="1552779"):
@@ -95,7 +95,7 @@ def panel(*events):
 def test_scorepanel_keeps_only_internationals():
     games = panel(cricket_event(), cricket_event(intl="0", eid="2"))
     assert [g.id for g in games] == ["1552779"]
-    assert "🔴 IND **51/1 (3.4/20 ov)** · PAK — India won toss & batted" == game_line(games[0])
+    assert "🔴 India **51/1 (3.4/20 ov)** · Pakistan — India won toss & batted" == game_line(games[0])
 
 
 def test_cricket_wickets_innings_break_and_result():
@@ -181,7 +181,7 @@ def test_nhl_goals_periods_and_final():
     feed_plays.append(nhl_play("g1", 1, 0, "Alex Tuch Goal (1) Wrist Shot, assists: Pierre-Luc Dubois (1), Alex Ovechkin (1)"))
     [u] = step(nhl_game(away=1))
     e = update_embed(u)
-    assert e.title == "🏒 GOAL — WSH"
+    assert e.title == "🏒 GOAL — Washington Capitals"
     assert "Washington Capitals 1 - 0 Carolina Hurricanes" in e.description
     assert "Alex Tuch Goal (1) Wrist Shot\n🅰️ Assists: Pierre-Luc Dubois (1), Alex Ovechkin (1)" in e.description
     assert e.footer.text == "NHL · 1st 6:33"
@@ -193,11 +193,11 @@ def test_nhl_goals_periods_and_final():
     feed_plays.append(nhl_play("g2", 1, 1, "Sebastian Aho Goal (1) Snap Shot, assists: Andrei Svechnikov (1)",
                                "power-play", "2nd", "16:50", "7"))
     [u] = step(nhl_game(away=1, home=1, period=2))
-    assert update_embed(u).title == "🏒 POWER-PLAY GOAL — CAR"
+    assert update_embed(u).title == "🏒 POWER-PLAY GOAL — Carolina Hurricanes"
 
     feed_plays.append(nhl_play("g3", 1, 2, "Seth Jarvis Goal (4) Wrist Shot, Empty Net", "short-handed", "3rd", "19:02", "7"))
     [u] = step(nhl_game(away=1, home=2, period=3))
-    assert update_embed(u).title == "🏒 EMPTY-NET GOAL — CAR"
+    assert update_embed(u).title == "🏒 EMPTY-NET GOAL — Carolina Hurricanes"
 
     [u] = step(nhl_game("post", "STATUS_FINAL", away=1, home=2, period=3, leaders=True))
     e = update_embed(u)

@@ -115,5 +115,5 @@ def test_injured_players_are_skipped(monkeypatch):
     trends = asyncio.run(client.game_trends(game(), injured_names(summary)))
     assert {t.player for t in trends} == {"Terry McLaurin"}
     embed = trends_embed(game(), trends, None)
-    assert embed.fields[0].name == "WSH" and "Terry McLaurin Over" in embed.fields[0].value
-    assert trend_legs(game(), trends)[0].game == "IND @ WSH"
+    assert embed.fields[0].name == "Washington Commanders" and "Terry McLaurin Over" in embed.fields[0].value
+    assert trend_legs(game(), trends)[0].game == "Indianapolis Colts @ Washington Commanders"

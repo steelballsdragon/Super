@@ -13,7 +13,7 @@ from sportsbot.storage import SubscriptionStore
 NFL = LEAGUES["nfl"]
 
 
-def game(gid, start, home=("BUF", "Buffalo Bills"), away=("NE", "New England Patriots"), odds=None):
+def game(gid, start, home=("Buffalo Bills", "Buffalo Bills"), away=("New England Patriots", "New England Patriots"), odds=None):
     comp = {"status": {"type": {"state": "pre", "name": "STATUS_SCHEDULED", "shortDetail": ""}},
             "competitors": [{"homeAway": "home", "score": "0", "team": {"id": home[0], "abbreviation": home[0], "displayName": home[1]}},
                             {"homeAway": "away", "score": "0", "team": {"id": away[0], "abbreviation": away[0], "displayName": away[1]}}],
@@ -63,7 +63,7 @@ def test_reminder_includes_the_line_when_odds_are_on(tmp_path):
     bot.odds.remember([g])
     bot.latest["nfl"] = [g]
     asyncio.run(bot._send_reminders(now=ts("2026-10-04T16:50Z")))
-    assert sent[0][1].endswith("\nSpread: NE +3 · BUF -3 · Total: O/U 44.5")
+    assert sent[0][1].endswith("\nSpread: New England Patriots +3 · Buffalo Bills -3 · Total: O/U 44.5")
 
 
 def test_games_on_uses_the_channels_local_day(tmp_path):

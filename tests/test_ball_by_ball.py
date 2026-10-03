@@ -73,12 +73,12 @@ def test_ball_message_layout():
     ], 1))
     [msg] = ball_messages(game(), balls)
     assert msg.splitlines() == [
-        "🏏 **IND v WI**",
-        "`2.3` Seales to Shubman Gill, 🔴 **OUT!** · **IND 3/1**",
+        "🏏 **India v West Indies**",
+        "`2.3` Seales to Shubman Gill, 🔴 **OUT!** · **India 3/1**",
         "> Shubman Gill c †Hope b Seales 1 (6b 0x4 0x6)",
-        "`2.4` Seales to Kohli, 4️⃣ **FOUR!** · **IND 7/1**",
+        "`2.4` Seales to Kohli, 4️⃣ **FOUR!** · **India 7/1**",
         "> Driven through cover",
-        "`2.6` Seales to Kohli, 1 run · **IND 8/1**",
+        "`2.6` Seales to Kohli, 1 run · **India 8/1**",
         "*End of over 3: 6 runs*",
     ]
 

@@ -43,7 +43,7 @@ def _timestamp(iso: str, style: str = "f") -> str:
 
 
 def _goal_line(game: Game, goal: Goal) -> str:
-    team = next((t.abbrev for t in game.teams if t.id == goal.team_id), None)
+    team = next((t.name for t in game.teams if t.id == goal.team_id), None)
     line = f"⚽ {goal.describe()}" + (f" ({team})" if team else "")
     if goal.assist:
         line += f"\n🅰️ Assist: {goal.assist}"
@@ -70,8 +70,8 @@ def _play_team(game: Game, play: ScoringPlay) -> Team | None:
 def play_embed(game: Game, play: ScoringPlay) -> discord.Embed:
     league = game.league
     team = _play_team(game, play)
-    abbrev = play.team_abbrev or (team.abbrev if team else "")
-    title = f"{league.emoji} {(play.category or 'Score').upper()}" + (f" — {abbrev}" if abbrev else "")
+    who = team.name if team else play.team_abbrev
+    title = f"{league.emoji} {(play.category or 'Score').upper()}" + (f" — {who}" if who else "")
     score = f"**{game.away.name} {play.away_score} - {play.home_score} {game.home.name}**"
     text = _hockey_text(play.text) if league.sport == "hockey" else play.text
     desc = f"{score}\n*{play.kind}*\n{text}" if play.kind else f"{score}\n{text}"
@@ -168,12 +168,12 @@ def update_embed(update: Update) -> discord.Embed:
 def game_line(game: Game, time_style: str = "f") -> str:
     a, b = game.teams
     if game.state == "pre":
-        return f"🕒 {a.abbrev} vs {b.abbrev} · {_timestamp(game.start, time_style)}"
+        return f"🕒 {a.name} vs {b.name} · {_timestamp(game.start, time_style)}"
     icon = "🔴" if game.state == "in" else "✅"
     if game.league.sport == "cricket":
-        score = " · ".join(f"{t.abbrev} **{t.score_text}**" if t.score_text else t.abbrev for t in (a, b))
+        score = " · ".join(f"{t.name} **{t.score_text}**" if t.score_text else t.name for t in (a, b))
         return f"{icon} {score}" + (f" — {game.summary}" if game.summary else "")
-    return f"{icon} {a.abbrev} **{a.score} - {b.score}** {b.abbrev} · {game.detail}"
+    return f"{icon} {a.name} **{a.score} - {b.score}** {b.name} · {game.detail}"
 
 
 @fitted
@@ -201,10 +201,10 @@ BALL_ICONS = {"four": "4️⃣ **FOUR!**", "six": "6️⃣ **SIX!**", "out": "�
 DISCORD_LIMIT = 2000
 
 
-def _ball_line(ball: Ball) -> str:
+def _ball_line(ball: Ball, names: dict[str, str]) -> str:
     bowler_batter, _, result = ball.short.rpartition(", ")
     shout = BALL_ICONS.get(ball.kind)
-    line = f"`{ball.over}` {bowler_batter}, {shout or result} · **{ball.team} {ball.runs}/{ball.wickets}**"
+    line = f"`{ball.over}` {bowler_batter}, {shout or result} · **{names.get(ball.team, ball.team)} {ball.runs}/{ball.wickets}**"
     if ball.dismissal:
         line += f"\n> {ball.dismissal}"
     elif shout and ball.text:
@@ -216,9 +216,10 @@ def _ball_line(ball: Ball) -> str:
 
 def ball_messages(game: Game, balls: list[Ball]) -> list[str]:
     """Ball-by-ball lines for one check, split to fit Discord's message limit."""
-    header = f"🏏 **{' v '.join(t.abbrev for t in game.teams)}**"
+    header = f"🏏 **{' v '.join(t.name for t in game.teams)}**"
+    names = {t.abbrev: t.name for t in game.teams}
     messages, current = [], header
-    for line in (_ball_line(b) for b in balls):
+    for line in (_ball_line(b, names) for b in balls):
         if len(current) + len(line) + 1 > DISCORD_LIMIT:
             messages.append(current)
             current = header

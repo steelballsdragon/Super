@@ -52,7 +52,7 @@ def test_goal_shows_assist():
     [u] = step(match(home=1, goals=[CHERKI]))
     e = update_embed(u)
     assert e.title == "⚽ GOAL!"
-    assert "⚽ 29' Rayan Cherki (MNC)\n🅰️ Assist: Antoine Semenyo" in e.description
+    assert "⚽ 29' Rayan Cherki (Manchester City)\n🅰️ Assist: Antoine Semenyo" in e.description
 
 
 def test_unassisted_goal_posts_without_waiting():

@@ -80,7 +80,7 @@ def test_embeds_render():
     e = update_embed(u)
     assert "GOAL" in e.title
     assert "Arsenal 0 - 1 Leeds United" in e.description
-    assert "80' Joe Rodon (pen) (LEE)" in e.description
+    assert "80' Joe Rodon (pen) (Leeds United)" in e.description
 
     t.update("nfl", parse_scoreboard(event("in"), NFL))
     [u] = t.update("nfl", parse_scoreboard(event("in", home=7, last_play="J. Allen 5 yd pass to K. Shakir"), NFL))
@@ -89,8 +89,8 @@ def test_embeds_render():
     assert "Leeds United 0 - 7 Arsenal" in e.description  # NFL keeps away team first
 
     board = scoreboard_embed("epl", parse_scoreboard(event("in", home=2), EPL))
-    assert "ARS **2 - 0** LEE" in board.description
-    assert "ARS vs LEE" in scoreboard_embed("epl", parse_scoreboard(event(), EPL)).description
+    assert "Arsenal **2 - 0** Leeds United" in board.description
+    assert "Arsenal vs Leeds United" in scoreboard_embed("epl", parse_scoreboard(event(), EPL)).description
 
 
 def test_store_roundtrip(tmp_path):

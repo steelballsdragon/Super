@@ -18,7 +18,7 @@ A Discord bot that posts live **NFL, NBA, MLB, NHL, soccer and cricket** updates
 - `/reminders enabled:True`: posts a heads-up 15 minutes before each followed game.
 - `/odds enabled:False`: hides betting lines in this channel (on by default). Game starts show the DraftKings line
   (spread, over/under, moneyline; draw for soccer), and finals show how it settled, e.g.
-  *Spread: IND -4.5 ✅ covered · Total: Under 47.5 ✅ (47) · Moneyline: IND -205 ✅*. The pre-game line is saved, so
+  *Spread: Indianapolis Colts -4.5 ✅ covered · Total: Under 47.5 ✅ (47) · Moneyline: Indianapolis Colts -205 ✅*. The pre-game line is saved, so
   bets are graded against the closing line. Soccer bets settle on the 90-minute score, as sportsbooks do.
 - `/threads enabled:True`: puts each game's updates in its own thread. The start and result post in the channel;
   goals, plays, wickets and ball-by-ball go in the game's thread.
@@ -112,11 +112,11 @@ These are historical frequencies, not odds, and books price these trends in; che
 `/follow` → a cricket league → `ball_by_ball: True` posts every delivery from ESPNcricinfo's commentary, e.g.
 
 ```
-🏏 IND v WI
-`2.3` Seales to Shubman Gill, 🔴 OUT! · IND 3/1
+🏏 India v West Indies
+`2.3` Seales to Shubman Gill, 🔴 OUT! · India 3/1
 > Shubman Gill c †Hope b Seales 1 (6b 0x4 0x6)
-`2.4` Seales to Kohli, 4️⃣ FOUR! · IND 7/1
-`2.6` Seales to Kohli, 1 run · IND 8/1
+`2.4` Seales to Kohli, 4️⃣ FOUR! · India 7/1
+`2.6` Seales to Kohli, 1 run · India 8/1
 End of over 3: 6 runs
 ```
 

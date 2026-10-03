@@ -57,7 +57,7 @@ def test_touchdown_posts_the_scoring_play():
     [u] = step(tracker, resolver, board(away=7))
     assert u.kind == SCORE and u.play.text.startswith("Roman Wilson 12 Yd pass")
     e = update_embed(u)
-    assert e.title == "🏈 TOUCHDOWN — PIT"
+    assert e.title == "🏈 TOUCHDOWN — Pittsburgh Steelers"
     assert "Pittsburgh Steelers 7 - 0 Cleveland Browns" in e.description
     assert "*Passing Touchdown*" in e.description
     assert e.footer.text == "NFL · Q1 2:59"
@@ -68,7 +68,7 @@ def test_waits_for_a_late_play_then_posts_it():
     assert step(tracker, resolver, board(away=3)) == []  # ESPN hasn't published the play yet
     feed.plays = [play("fg", 3, 0, "Chris Boswell 48 Yd Field Goal", "Field Goal Good", "Field Goal")]
     [u] = step(tracker, resolver, board(away=3))
-    assert update_embed(u).title == "🏈 FIELD GOAL — PIT"
+    assert update_embed(u).title == "🏈 FIELD GOAL — Pittsburgh Steelers"
     assert step(tracker, resolver, board(away=3)) == []  # not posted twice
 
 

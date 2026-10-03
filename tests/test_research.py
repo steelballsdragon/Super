@@ -52,7 +52,7 @@ def test_implied_and_no_vig():
 def test_parse_research_reads_every_source():
     r = parse_research(summary(), game())
     assert r.model == {"28": 43.3, "11": 56.4}
-    assert r.open_home_spread == -1.5 and r.open_favorite == "WSH"
+    assert r.open_home_spread == -1.5 and r.open_favorite == "Washington Commanders"
     assert [i.name for i in r.injuries["28"]] == ["Jayden Daniels", "Rachaad White"]  # QB first; Questionable left out
     assert r.form["28"].results == ["L 13-17 @DET", "W 33-31 vsSEA", "L 3-41 @BAL"]
     assert r.form["11"].results[2] == "L 30-33 @KC"  # overtime score parsed
@@ -63,11 +63,11 @@ def test_parse_research_reads_every_source():
 def test_model_gap_lean_carries_its_cautions():
     found = leans(parse_research(summary(), game()))
     ml, spread = found[0], found[1]
-    assert (ml.market, ml.pick, spread.pick) == ("moneyline", "WSH +170", "WSH +4.5")
+    assert (ml.market, ml.pick, spread.pick) == ("moneyline", "Washington Commanders +170", "Washington Commanders +4.5")
     assert ml.confidence == "Low"
     assert ml.why[-1] == "Model is 7.8 points higher than the market"
-    assert ml.cautions == ["WSH QB Jayden Daniels is Out; the model may not reflect it",
-                           "The line moved 6 points toward IND since it opened (WSH -1.5 → +4.5)"]
+    assert ml.cautions == ["Washington Commanders QB Jayden Daniels is Out; the model may not reflect it",
+                           "The line moved 6 points toward Indianapolis Colts since it opened (Washington Commanders -1.5 → +4.5)"]
 
 
 def test_clean_gap_gets_real_confidence_and_huge_gap_is_flagged():
@@ -90,8 +90,8 @@ def test_total_lean_from_form_tops_out_at_medium():
 
 
 def test_grading():
-    final = game("post", home=20, away=24)  # IND wins by 4
-    assert grade({"market": "spread", "side": "28", "line": 4.5}, final) == "win"   # WSH +4.5 covers
+    final = game("post", home=20, away=24)  # Indianapolis Colts wins by 4
+    assert grade({"market": "spread", "side": "28", "line": 4.5}, final) == "win"   # Washington Commanders +4.5 covers
     assert grade({"market": "spread", "side": "11", "line": -4.5}, final) == "loss"
     assert grade({"market": "spread", "side": "28", "line": 4.0}, final) == "push"
     assert grade({"market": "moneyline", "side": "28", "line": None}, final) == "loss"
@@ -123,11 +123,11 @@ def test_embeds_render():
     names = [f.name for f in e.fields]
     assert names == ["📈 Market (DraftKings)", "🧮 ESPN Matchup Predictor", "📋 Last 5 (ESPN)",
                      "🩹 Injuries (ESPN)", "💡 Leans", "🎯 Most likely result (market)"]
-    assert "Line move: WSH -1.5 at open → +4.5 now" in e.fields[0].value
-    assert "⚠️ WSH QB Jayden Daniels is Out" in e.fields[4].value
-    assert most_likely(r) == ("IND win", market_chances(r)["11"], "-205")
+    assert "Line move: Washington Commanders -1.5 at open → +4.5 now" in e.fields[0].value
+    assert "⚠️ Washington Commanders QB Jayden Daniels is Out" in e.fields[4].value
+    assert most_likely(r) == ("Indianapolis Colts win", market_chances(r)["11"], "-205")
     picks = picks_embed("NFL", "🏈", [(r, found)])
-    assert picks.fields[0].value.startswith("**WSH +4.5 / ML +170** · IND @ WSH · Low ⚠️")
+    assert picks.fields[0].value.startswith("**Washington Commanders +4.5 / ML +170** · Indianapolis Colts @ Washington Commanders · Low ⚠️")
     assert record_embed({}, 2).description == "No graded leans yet (2 waiting on games)."
 
 

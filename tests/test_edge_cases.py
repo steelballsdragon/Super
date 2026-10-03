@@ -73,7 +73,7 @@ def test_walk_off_play_is_posted_before_the_final():
     plays.append(mlb_play(2, 3))
     ups = step(game("mlb", "post", "STATUS_FINAL", "Final", nyy(3, {"winner": True}), ("BOS", "Boston Red Sox", 2)))
     assert [u.kind for u in ups] == [SCORE, FINAL]
-    assert update_embed(ups[0]).title == "⚾ HOME RUN — NYY"
+    assert update_embed(ups[0]).title == "⚾ HOME RUN — New York Yankees"
 
 
 def test_final_is_not_held_forever_if_the_play_never_appears():
