@@ -600,6 +600,26 @@ def _ago(ts: float | None) -> str:
     return f"{secs}s ago" if secs < 120 else f"{secs // 60} min ago"
 
 
+_STILL_LOADING: set = set()
+
+
+def _finished_loading(task) -> None:
+    _STILL_LOADING.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        log.warning("Loading suggestions failed: %r", task.exception())
+
+
+async def gather_within(seconds: float, *jobs) -> list:
+    """Results of the jobs that finish within `seconds` (Discord drops suggestions after 3). The rest keep
+    running in the background rather than being cancelled, so what they load is cached for the next try."""
+    tasks = [asyncio.ensure_future(job) for job in jobs]
+    for task in tasks:
+        _STILL_LOADING.add(task)  # held until done, so Python doesn't drop it part-way
+        task.add_done_callback(_finished_loading)
+    done, _ = await asyncio.wait(tasks, timeout=seconds)
+    return [t.result() for t in tasks if t in done and not t.cancelled() and t.exception() is None]
+
+
 def register_commands(bot: SportsBot) -> None:
     tree = bot.tree
 
@@ -647,12 +667,7 @@ def register_commands(bot: SportsBot) -> None:
         keys = [key] if key in LEAGUES else channel_leagues(interaction.channel_id)
         if not keys:
             return []
-        try:
-            # Discord drops suggestions that take longer than 3 seconds.
-            lists = await asyncio.wait_for(asyncio.gather(*(bot.team_list(k) for k in keys)), timeout=2.5)
-        except Exception:
-            log.warning("Couldn't load %s teams for suggestions", keys, exc_info=True)
-            return []
+        lists = await gather_within(2.5, *(bot.team_list(k) for k in keys))
         teams = list(dict.fromkeys(t for found in lists for t in found))
         q = current.strip().lower()
         matches = [n for n, a in teams if not q or q in n.lower() or q == a.lower()]
@@ -1062,11 +1077,7 @@ def register_commands(bot: SportsBot) -> None:
         keys = [key] if key in LEAGUES else channel_leagues(interaction.channel_id)
         if not keys:
             return []
-        try:
-            weeks = await asyncio.wait_for(asyncio.gather(*(bot.week_games(k) for k in keys)), timeout=2.5)
-        except Exception:
-            log.warning("Couldn't load %s games for suggestions", keys, exc_info=True)
-            return []
+        weeks = await gather_within(2.5, *(bot.week_games(k) for k in keys))
         q = current.strip().lower()
         now = time.time()
         out = []

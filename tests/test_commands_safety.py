@@ -343,3 +343,25 @@ def test_game_picker_works_in_a_channel_following_several_leagues(tmp_path):
     asyncio.run(research.callback(i, game="55", parlay=SimpleNamespace(value="safe")))
     assert seen == ["epl"]  # the picked game decided the league
     asyncio.run(bot.espn.close())
+
+
+def test_slow_suggestions_keep_loading_for_next_time():
+    from sportsbot.bot import gather_within
+    finished = []
+
+    async def quick():
+        return "quick"
+
+    async def slow():
+        await asyncio.sleep(0.2)
+        finished.append("slow")
+        return "slow"
+
+    async def broken():
+        raise RuntimeError("ESPN down")
+
+    async def run():
+        first = await gather_within(0.05, quick(), slow(), broken())
+        await asyncio.sleep(0.3)  # the slow one wasn't cancelled: it finished (and would have been cached)
+        return first
+    assert asyncio.run(run()) == ["quick"] and finished == ["slow"]
