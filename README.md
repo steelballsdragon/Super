@@ -32,6 +32,18 @@ Supported leagues: NFL, Premier League, La Liga, Serie A, Bundesliga, Ligue 1, M
 
 You don't need privileged gateway intents.
 
+### Hosting 24/7 (no computer needed)
+
+The bot has to stay running, so for round-the-clock updates host it in the cloud.
+For example, on [Railway](https://railway.app), which you can set up from a phone browser:
+
+1. **New Project → Deploy from GitHub repo**, then pick this repository and branch.
+2. In the service's **Variables** tab, add `DISCORD_TOKEN`.
+3. The included `Procfile` starts the bot with `python -m sportsbot`.
+
+Subscriptions are saved in `subscriptions.json`. On hosts where the disk is wiped on every redeploy,
+attach a volume and set `DATA_FILE` to a path on it (e.g. `/data/subscriptions.json`). Otherwise, run `/follow` again after a redeploy.
+
 ### Configuration (environment variables)
 
 | Variable | Default | Description |
