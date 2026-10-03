@@ -116,8 +116,9 @@ Legs are spread out (at most two per game, one per player; legs in the same game
 team, which builds a same-game parlay. Clear moneyline favorites can be legs too. Each leg shows its evidence, and
 the parlay shows its **estimated odds** from those hit rates, with a plain slip to copy or screenshot for an odds bot.
 The estimate is optimistic (it treats legs as independent) and your book's real price will differ, so check it.
-If there aren't enough games or strong legs to reach the range, it says how close it got. Parlays look up to three
-days ahead when there are no games left today.
+Parlays look up to a week ahead until there are enough games to build from (soccer often has one midweek game
+before a full weekend). If the range still can't be reached it says how close it got, and if there aren't enough
+legs for the option at all (a Lotto needs 4) it says so rather than posting something smaller.
 
 **Every parlay is graded.** It's saved with the channel it was built in; after the games, each leg is checked against
 the player's actual stats (game log, or the cricket scorecard) or the final score, players who didn't play are voided as
