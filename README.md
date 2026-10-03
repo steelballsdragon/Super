@@ -11,6 +11,14 @@ A Discord bot that posts live **NFL, NBA, MLB, NHL, soccer and cricket** updates
 - `/status`: shows when the bot last checked each followed league, how many games are live, and any errors.
 - `/scoreboard`: posts a live scoreboard in this channel and pins it. It keeps editing itself with every game the
   channel follows (live first, then upcoming, then recent results). `/scoreboard enabled:False` removes it.
+- `/schedule`: today's games for everything this channel follows.
+- `/daily enabled:True hour:9 timezone:America/Toronto`: posts today's games every morning at that hour (skipped on
+  days with nothing on). Start times show in each reader's own time zone.
+- `/reminders enabled:True`: posts a heads-up 15 minutes before each followed game.
+- `/odds enabled:False`: hides betting lines in this channel (on by default). Game starts show the DraftKings line
+  (spread, over/under, moneyline; draw for soccer), and finals show how it settled, e.g.
+  *Spread: IND -4.5 ✅ covered · Total: Under 47.5 ✅ (47) · Moneyline: IND -205 ✅*. The pre-game line is saved, so
+  bets are graded against the closing line. Soccer bets settle on the 90-minute score, as sportsbooks do.
 - `/threads enabled:True`: puts each game's updates in its own thread. The start and result post in the channel;
   goals, plays, wickets and ball-by-ball go in the game's thread.
 

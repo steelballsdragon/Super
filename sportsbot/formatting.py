@@ -32,12 +32,13 @@ KICKOFF_TITLES = {
 }
 
 
-def _timestamp(iso: str) -> str:
+def _timestamp(iso: str, style: str = "f") -> str:
+    """A Discord timestamp, shown in each viewer's own time zone (f: date and time, t: time, R: relative)."""
     try:
         dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
     except ValueError:
         return iso
-    return f"<t:{int(dt.timestamp())}:f>"
+    return f"<t:{int(dt.timestamp())}:{style}>"
 
 
 def _goal_line(game: Game, goal: Goal) -> str:
@@ -161,10 +162,10 @@ def update_embed(update: Update) -> discord.Embed:
     return embed
 
 
-def game_line(game: Game) -> str:
+def game_line(game: Game, time_style: str = "f") -> str:
     a, b = game.teams
     if game.state == "pre":
-        return f"🕒 {a.abbrev} vs {b.abbrev} · {_timestamp(game.start)}"
+        return f"🕒 {a.abbrev} vs {b.abbrev} · {_timestamp(game.start, time_style)}"
     icon = "🔴" if game.state == "in" else "✅"
     if game.league.sport == "cricket":
         score = " · ".join(f"{t.abbrev} **{t.score_text}**" if t.score_text else t.abbrev for t in (a, b))
@@ -252,3 +253,31 @@ def board_embed(sections: list[tuple[str, list[Game]]]) -> discord.Embed:
     )
     embed.set_footer(text="Updates automatically · 🔴 live · 🕒 upcoming · ✅ final")
     return embed
+
+
+def schedule_embed(day_label: str, sections: list[tuple[str, list[Game]]]) -> discord.Embed | None:
+    """Today's games per followed league; None when there's nothing on."""
+    blocks = []
+    for key, games in sections:
+        if not games:
+            continue
+        league = LEAGUES[key]
+        lines = [game_line(g, "t") for g in games]
+        blocks.append(f"**{league.emoji} {league.name}**\n" + "\n".join(lines))
+    if not blocks:
+        return None
+    desc = ""
+    for block in blocks:
+        if len(desc) + len(block) + 2 > EMBED_LIMIT:
+            desc += "\n…more games not shown"
+            break
+        desc += ("\n\n" if desc else "") + block
+    embed = discord.Embed(title=f"📅 Today's games · {day_label}", description=desc, color=discord.Color.blurple())
+    embed.set_footer(text="Times are shown in your own time zone")
+    return embed
+
+
+def reminder_text(game: Game) -> str:
+    a, b = game.teams
+    start = _timestamp(game.start, "R")
+    return f"⏰ **{a.name} vs {b.name}** starts {start} · {game.league.emoji} {game.league.name}"

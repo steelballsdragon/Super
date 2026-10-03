@@ -122,6 +122,7 @@ class Game:
     period: int = 0
     summary: str = ""  # cricket, e.g. "India won toss & batted", "RCB won by 5 wkts"
     path: str = ""  # ESPN path for this game's details, e.g. "cricket/24289"
+    odds: "Odds | None" = None  # betting line, when ESPN has one
 
     @property
     def league(self) -> League:
@@ -159,6 +160,15 @@ def _float(value) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def start_time(game: "Game"):
+    """The game's start as an aware datetime, or None if ESPN didn't give one."""
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(game.start.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def period_label(n: int, sport: str = "football") -> str:
@@ -374,6 +384,7 @@ def parse_goal_details(summary: dict) -> list[GoalDetail]:
 
 
 def _parse_event(event: dict, league: League) -> Game | None:
+    from .odds import parse_odds  # odds.py imports Game from here
     comps = event.get("competitions") or []
     if not comps:
         return None
@@ -401,6 +412,7 @@ def _parse_event(event: dict, league: League) -> Game | None:
         period=_int(status.get("period")),
         summary=status.get("summary") or "",
         path=league.path,
+        odds=parse_odds(comp),
     )
 
 
@@ -509,11 +521,12 @@ class ESPNClient:
             resp.raise_for_status()
             return await resp.json(content_type=None)
 
-    async def scoreboard(self, league: League) -> list[Game]:
+    async def scoreboard(self, league: League, date: str | None = None) -> list[Game]:
+        """Current games, or a given day's (YYYYMMDD, by ESPN's US Eastern day)."""
         if league.feed == "scorepanel":
-            data = await self._get_json(SCOREPANEL_URL.format(path=league.path))
+            data = await self._get_json(SCOREPANEL_URL.format(path=league.path))  # current matches only
             return parse_scorepanel(data, league)
-        data = await self._get_json(BASE_URL.format(path=league.path))
+        data = await self._get_json(BASE_URL.format(path=league.path), {"dates": date} if date else None)
         return parse_scoreboard(data, league)
 
     async def scoring_plays(self, league: League, event_id: str) -> list[ScoringPlay]:
