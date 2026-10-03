@@ -3,7 +3,7 @@ import asyncio
 from sportsbot.espn import parse_scoreboard
 from sportsbot.leagues import LEAGUES
 from sportsbot.odds import Odds
-from sportsbot.props import (Leg, PlayerGame, PropsClient, Rate, TARGETS, american, best_trends, build_to_target, combined, injured_names,
+from sportsbot.props import (Leg, PlayerGame, availability, PropsClient, Rate, TARGETS, american, best_trends, build_to_target, combined, injured_names,
                              moneyline_leg, parlay_embed, parse_gamelog, seasons_from, trend_legs, trends_embed)
 
 
@@ -182,7 +182,7 @@ def test_injured_players_are_skipped(monkeypatch):
                 for i in range(10)], False
     client.key_players = players
     client.player_games = games
-    trends = asyncio.run(client.game_trends(game(), injured_names(summary)))
+    trends = asyncio.run(client.game_trends(game(), availability(summary)))
     assert {t.player for t in trends} == {"Terry McLaurin"}
     embed = trends_embed(game(), trends, None)
     assert embed.fields[0].name == "Washington Commanders" and "Terry McLaurin Over" in embed.fields[0].value
