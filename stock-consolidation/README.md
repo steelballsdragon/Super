@@ -36,6 +36,18 @@ from the screenshot, if you want to see a finished result first.
 To keep the macro in that file, save it as **Excel Macro-Enabled Workbook (*.xlsm)**.
 The settings are the `DEFAULT_` lines near the top of the code.
 
+### Getting the report straight from Power BI
+
+1. In Power BI (browser), on the report table click **…** → **Export data** →
+   **Summarized data**, file format **Excel with live connection (.xlsx)**.
+2. Open the downloaded file and paste `VBA_Code.txt` into it (Option 2), then
+   save it as **.xlsm**.
+3. From then on just open that file and run **BuildConsolidationPlan**. It
+   refreshes the data from Power BI first, then builds the plan.
+
+If the live-connection option is greyed out, ask your Power BI admin or the
+report owner for "Build" permission on the dataset.
+
 ### Option 3: run it straight in SQL Server (optional)
 
 `consolidation_plan.sql` does the same thing without Excel. Change the one

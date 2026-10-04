@@ -60,6 +60,7 @@ RULES = [
     "     - otherwise, if splitting is allowed, spread over the locations with the most room first.",
     "A location that is emptied never receives stock, and a location that receives stock is never emptied.",
     "Open capacity starts at Fp Available and is updated as moves are planned, so no location is overfilled.",
+    "If the report is a table exported from Power BI with live connection, it is refreshed first.",
 ]
 
 
@@ -221,6 +222,7 @@ def build_one(path, sample):
         ("SameTypeOnly", "Only move within the same location type (Typcod)", yn(d.SAME_TYPE_ONLY), "yn"),
         ("AllowSplit", "Allow emptying a location into several locations", yn(d.ALLOW_SPLIT), "yn"),
         ("ExcludeTypes", "Location types to ignore (comma separated)", d.EXCLUDE_TYPES, None),
+        ("RefreshFirst", "Refresh connected data (e.g. Power BI) before building", "Yes", "yn"),
     ]
     for i, (name, text, value, kind) in enumerate(settings):
         row = 12 + i
@@ -235,22 +237,23 @@ def build_one(path, sample):
         if kind == "yn":
             s.data_validation(row, 2, row, 2, {"validate": "list", "source": ["Yes", "No"]})
 
-    s.write("B20", "Status", h2)
-    s.write("C20", "", h2)
+    top = 12 + len(settings) + 1           # first free row index after the settings
+    s.write(top, 1, "Status", h2)
+    s.write(top, 2, "", h2)
     status = ("Showing the result for the sample rows. Paste your own report into Raw Data and press "
               "Build Consolidation Plan." if sample else
               "Paste your report into the Raw Data sheet (headers in row 1) and press Build Consolidation Plan.")
-    s.write("B21", status, fmt(italic=True, font_color=GREY_TEXT))
-    wb.define_name("LastRun", "=Start!$B$21")
+    s.write(top + 1, 1, status, fmt(italic=True, font_color=GREY_TEXT))
+    wb.define_name("LastRun", f"=Start!$B${top + 2}")
 
-    s.write("B23", "How it works", h2)
-    s.write("C23", "", h2)
+    s.write(top + 3, 1, "How it works", h2)
+    s.write(top + 3, 2, "", h2)
     n_rule = 0
     for i, rule in enumerate(RULES):
         if not rule.startswith(" "):
             n_rule += 1
             rule = f"{n_rule}.  {rule}"
-        s.write(23 + i, 1, rule, fmt(font_color=GREY_TEXT, font_size=9))
+        s.write(top + 4 + i, 1, rule, fmt(font_color=GREY_TEXT, font_size=9))
 
     s.insert_button("E5", {"macro": "BuildConsolidationPlan", "caption": "Build Consolidation Plan",
                            "width": 210, "height": 46})

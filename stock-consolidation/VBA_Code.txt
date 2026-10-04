@@ -11,6 +11,11 @@
 '   created for you. To keep the macro, save the file as "Excel Macro-Enabled
 '   Workbook (*.xlsm)". The settings are the DEFAULT_ lines below.
 '
+' POWER BI
+'   If the report is a table exported from Power BI "with live connection",
+'   the macro first refreshes it (like Data > Refresh All), so every run uses
+'   the latest Power BI data.
+'
 ' Reads the location report (a sheet called "Raw Data", or else the sheet that
 ' has the report headers), keeps only Prtnum, Stoloc,
 ' Curqvl, Fp Available, Maxqvl and Typcod, cleans it into "Clean Data", then
@@ -40,8 +45,9 @@
 '      planned (and up when a location is emptied), shared by all items in
 '      the location.
 '
-' Report columns are found by their header in row 1 ("Prtnum", "Stoloc",
-' "Max of Curqvl", ...), in any order; other columns are ignored.
+' Report columns are found by their headers ("Prtnum", "Stoloc", "Max of
+' Curqvl", ...) in any of the first 20 rows, in any order; other columns are
+' ignored.
 '==============================================================================
 Option Explicit
 Option Compare Binary
@@ -54,6 +60,7 @@ Private Const DEFAULT_REMOVE_NO_CAPACITY As String = "Yes"  ' remove rows with 0
 Private Const DEFAULT_SAME_TYPE_ONLY As String = "No"       ' only move within the same location type
 Private Const DEFAULT_ALLOW_SPLIT As String = "Yes"         ' allow emptying a location into several
 Private Const DEFAULT_EXCLUDE_TYPES As String = ""          ' location types to ignore, e.g. "CONS"
+Private Const DEFAULT_REFRESH_FIRST As String = "Yes"       ' refresh connected data (e.g. Power BI) first
 
 Private Const EPS As Double = 0.000001
 Private Const HEADER_ROW As Long = 4
@@ -84,6 +91,8 @@ Private mAllowSplit As Boolean
 Private mExcludeText As String
 Private mExcluded As Collection
 Private mShowMessages As Boolean
+Private mRefreshFirst As Boolean
+Private mRefreshNote As String          ' what happened when refreshing connected data
 
 ' Cleaning counts
 Private statRead As Long
@@ -170,6 +179,7 @@ Public Sub RunConsolidation(ByVal showMessages As Boolean)
     Set mBook = raw.Parent
 
     LoadSettings
+    mRefreshNote = RefreshConnections()
     If LoadRawData(raw) Then
         PlanMoves
         WriteCleanData
@@ -177,10 +187,10 @@ Public Sub RunConsolidation(ByVal showMessages As Boolean)
         WriteNotMoved
         SetStatus "Last run " & Format$(Now, "dd-mmm-yyyy hh:mm") & ": " & rowCount & " rows kept, " & _
                   moveCount & " moves, " & EmptiedCount() & " locations emptied, " & _
-                  RemainingFailures() & " cannot be emptied"
+                  RemainingFailures() & " cannot be emptied" & StatusNote()
         OutputSheet("shtPlan", "Consolidation Plan").Activate
         If mShowMessages Then
-            MsgBox "Plan ready." & vbCrLf & vbCrLf & _
+            MsgBox "Plan ready." & vbCrLf & vbCrLf & MessageNote() & _
                    statRead & " report rows read, " & rowCount & " kept after cleaning." & vbCrLf & _
                    moveCount & " moves will empty " & EmptiedCount() & " locations (" & _
                    FormatQty(TotalMoved()) & " units)." & vbCrLf & _
@@ -212,6 +222,7 @@ Private Sub LoadSettings()
     mSameTypeOnly = IsYes(SettingText("SameTypeOnly", DEFAULT_SAME_TYPE_ONLY))
     mAllowSplit = IsYes(SettingText("AllowSplit", DEFAULT_ALLOW_SPLIT))
     mExcludeText = SettingText("ExcludeTypes", DEFAULT_EXCLUDE_TYPES)
+    mRefreshFirst = IsYes(SettingText("RefreshFirst", DEFAULT_REFRESH_FIRST))
     Set mExcluded = New Collection
     For Each part In Split(mExcludeText, ",")
         t = UCase$(Trim$(CStr(part)))
@@ -223,27 +234,30 @@ End Sub
 
 Private Function LoadRawData(ByVal ws As Worksheet) As Boolean
     Dim data As Variant, rowIndex As Collection, locIndex As Collection
-    Dim lastCol As Long, lastRow As Long, n As Long, r As Long, idx As Long, li As Long, dropped As Long
+    Dim hdr As Long, lastCol As Long, lastRow As Long, n As Long, r As Long, idx As Long, li As Long
+    Dim dropped As Long
     Dim cItem As Long, cLoc As Long, cQty As Long, cAvail As Long, cMax As Long, cType As Long
     Dim item As String, loc As String, typ As String, key As String
     Dim qty As Double, avail As Double, mx As Double
     Dim hasQty As Boolean, hasAvail As Boolean, hasMax As Boolean
 
-    lastCol = FindLastColumn(ws)
-    cItem = FindColumn(ws, lastCol, ITEM_HEADERS)
-    cLoc = FindColumn(ws, lastCol, LOC_HEADERS)
-    cQty = FindColumn(ws, lastCol, QTY_HEADERS)
-    cAvail = FindColumn(ws, lastCol, AVAIL_HEADERS)
-    cMax = FindColumn(ws, lastCol, MAX_HEADERS)
-    cType = FindColumn(ws, lastCol, TYPE_HEADERS)
+    hdr = FindHeaderRow(ws)
+    If hdr = 0 Then hdr = 1
+    lastCol = FindLastColumn(ws, hdr)
+    cItem = FindColumn(ws, hdr, lastCol, ITEM_HEADERS)
+    cLoc = FindColumn(ws, hdr, lastCol, LOC_HEADERS)
+    cQty = FindColumn(ws, hdr, lastCol, QTY_HEADERS)
+    cAvail = FindColumn(ws, hdr, lastCol, AVAIL_HEADERS)
+    cMax = FindColumn(ws, hdr, lastCol, MAX_HEADERS)
+    cType = FindColumn(ws, hdr, lastCol, TYPE_HEADERS)
     If cItem = 0 Or cLoc = 0 Or cQty = 0 Or cMax = 0 Then
-        Report "The '" & ws.Name & "' sheet needs these headers in row 1: Prtnum, Stoloc, Max of Curqvl, " & _
+        Report "The '" & ws.Name & "' sheet needs a header row with: Prtnum, Stoloc, Max of Curqvl, " & _
                "Max of Maxqvl (and ideally Max of Fp Available and Typcod)."
         Exit Function
     End If
 
     lastRow = FindLastRow(ws, cItem, cLoc, cQty)
-    n = lastRow - 1
+    n = lastRow - hdr
     If n < 1 Then n = 1
     ReDim rItem(1 To n)
     ReDim rItemKey(1 To n)
@@ -260,8 +274,8 @@ Private Function LoadRawData(ByVal ws As Worksheet) As Boolean
     statOutOfRange = 0
     statType = 0
 
-    If lastRow >= 2 Then
-        data = ws.Range(ws.Cells(2, 1), ws.Cells(lastRow, lastCol)).Value
+    If lastRow > hdr Then
+        data = ws.Range(ws.Cells(hdr + 1, 1), ws.Cells(lastRow, lastCol)).Value
         For r = 1 To UBound(data, 1)
             item = CellText(data(r, cItem))
             loc = CellText(data(r, cLoc))
@@ -1013,12 +1027,31 @@ Private Function FindRawSheet() As Worksheet
 End Function
 
 Private Function IsReportSheet(ByVal ws As Worksheet) As Boolean
-    Dim lastCol As Long
-    lastCol = FindLastColumn(ws)
-    If FindColumn(ws, lastCol, ITEM_HEADERS) = 0 Then Exit Function
-    If FindColumn(ws, lastCol, LOC_HEADERS) = 0 Then Exit Function
-    If FindColumn(ws, lastCol, QTY_HEADERS) = 0 Then Exit Function
-    IsReportSheet = (FindColumn(ws, lastCol, MAX_HEADERS) > 0)
+    Select Case LCase$(ws.Name)
+    Case "start", "clean data", "consolidation plan", "not consolidated"
+        Exit Function                   ' never read our own sheets as the report
+    End Select
+    IsReportSheet = (FindHeaderRow(ws) > 0)
+End Function
+
+' Row (1 to 20) holding the report headers, or 0 when there is none
+Private Function FindHeaderRow(ByVal ws As Worksheet) As Long
+    Dim r As Long, lastCol As Long
+    For r = 1 To 20
+        lastCol = FindLastColumn(ws, r)
+        If lastCol >= 4 Then
+            If FindColumn(ws, r, lastCol, ITEM_HEADERS) > 0 Then
+                If FindColumn(ws, r, lastCol, LOC_HEADERS) > 0 Then
+                    If FindColumn(ws, r, lastCol, QTY_HEADERS) > 0 Then
+                        If FindColumn(ws, r, lastCol, MAX_HEADERS) > 0 Then
+                            FindHeaderRow = r
+                            Exit Function
+                        End If
+                    End If
+                End If
+            End If
+        End If
+    Next r
 End Function
 
 Private Function SettingText(ByVal settingName As String, ByVal fallback As String) As String
@@ -1038,6 +1071,55 @@ Private Function SettingNumber(ByVal settingName As String, ByVal fallback As Do
 Done:
 End Function
 
+' Pulls the latest data into every connected table of the workbook (for example
+' a table exported from Power BI "with live connection") and waits until it is
+' done. Returns "" when there was nothing to refresh, "OK" when it worked, or
+' the names of the connections that could not be refreshed.
+Private Function RefreshConnections() As String
+    Dim cn As Object, n As Long, failed As String
+    If Not mRefreshFirst Then Exit Function
+    On Error Resume Next
+    n = mBook.Connections.Count
+    If Err.Number <> 0 Or n = 0 Then Exit Function
+    Application.StatusBar = "Refreshing data from Power BI / connected sources..."
+    For Each cn In mBook.Connections
+        Err.Clear
+        Select Case cn.Type
+        Case 1                              ' OLE DB: Power BI, Power Query, SQL Server
+            cn.OLEDBConnection.BackgroundQuery = False
+        Case 2                              ' ODBC
+            cn.ODBCConnection.BackgroundQuery = False
+        End Select
+        Err.Clear
+        cn.Refresh                          ' waits, because background refresh is off
+        If Err.Number <> 0 Then
+            If Len(failed) > 0 Then failed = failed & ", "
+            failed = failed & cn.Name
+        End If
+    Next cn
+    Application.CalculateUntilAsyncQueriesDone
+    Application.StatusBar = False
+    Err.Clear
+    On Error GoTo 0
+    If Len(failed) = 0 Then RefreshConnections = "OK" Else RefreshConnections = failed
+End Function
+
+Private Function StatusNote() As String
+    If mRefreshNote = "OK" Then
+        StatusNote = " (data refreshed first)"
+    ElseIf Len(mRefreshNote) > 0 Then
+        StatusNote = " (could not refresh " & mRefreshNote & " - used the data already in the sheet)"
+    End If
+End Function
+
+Private Function MessageNote() As String
+    If mRefreshNote = "OK" Then
+        MessageNote = "Data refreshed from its source (e.g. Power BI) first." & vbCrLf
+    ElseIf Len(mRefreshNote) > 0 Then
+        MessageNote = "Could not refresh " & mRefreshNote & ", so the data already in the sheet was used." & vbCrLf
+    End If
+End Function
+
 Private Sub SetStatus(ByVal msg As String)
     On Error Resume Next
     mBook.Names("LastRun").RefersToRange.Value = msg
@@ -1048,11 +1130,12 @@ Private Sub Report(ByVal msg As String)
     If mShowMessages Then MsgBox msg, vbExclamation, "Stock consolidation"
 End Sub
 
-' Column whose row-1 header matches one of the comma-separated names
-Private Function FindColumn(ByVal ws As Worksheet, ByVal lastCol As Long, ByVal aliases As String) As Long
+' Column whose header (in row hdr) matches one of the comma-separated names
+Private Function FindColumn(ByVal ws As Worksheet, ByVal hdr As Long, ByVal lastCol As Long, _
+                            ByVal aliases As String) As Long
     Dim c As Long, h As String, nm As Variant, prefix As Variant
     For c = 1 To lastCol
-        h = LCase$(CellText(ws.Cells(1, c).Value))
+        h = LCase$(CellText(ws.Cells(hdr, c).Value))
         For Each prefix In Array("max of ", "sum of ", "min of ", "average of ", "count of ")
             If Left$(h, Len(prefix)) = prefix Then h = Mid$(h, Len(prefix) + 1)
         Next prefix
@@ -1066,8 +1149,8 @@ Private Function FindColumn(ByVal ws As Worksheet, ByVal lastCol As Long, ByVal 
     Next c
 End Function
 
-Private Function FindLastColumn(ByVal ws As Worksheet) As Long
-    FindLastColumn = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+Private Function FindLastColumn(ByVal ws As Worksheet, ByVal hdr As Long) As Long
+    FindLastColumn = ws.Cells(hdr, ws.Columns.Count).End(xlToLeft).Column
 End Function
 
 Private Function FindLastRow(ByVal ws As Worksheet, ParamArray cols() As Variant) As Long
