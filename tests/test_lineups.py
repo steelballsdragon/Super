@@ -59,7 +59,7 @@ def lineup_bot(tmp_path, avail):
     bot = make_bot(tmp_path)
     sent = []
 
-    async def send(channel_id, embed=None, content=None):
+    async def send(channel_id, embed=None, content=None, view=None):
         sent.append((channel_id, content))
 
     async def get(league, gid, path=""):

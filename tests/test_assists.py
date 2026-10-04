@@ -209,7 +209,7 @@ def test_bot_edits_a_soccer_goal_post_when_the_assist_is_out(tmp_path):
             self.embed = embed
     posts = []
 
-    async def send(channel_id, embed=None, content=None):
+    async def send(channel_id, embed=None, content=None, view=None):
         posts.append(Message(embed))
         return posts[-1]
     bot._send = send

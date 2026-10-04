@@ -91,7 +91,7 @@ def test_bot_shows_line_at_start_and_grades_at_final(tmp_path):
     bot.settings.update(2, odds=False)
     sent = []
 
-    async def send(channel_id, embed=None, content=None):
+    async def send(channel_id, embed=None, content=None, view=None):
         sent.append((channel_id, embed.title, [(f.name, f.value) for f in embed.fields]))
     bot._send = send
 

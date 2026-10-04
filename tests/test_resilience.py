@@ -111,7 +111,7 @@ def test_live_game_that_drops_off_the_scoreboard_still_gets_its_final(tmp_path):
         asked.append(date)
         return parse_scoreboard(boards.get(date, {"events": []}), league)
 
-    async def deliver(channel_id, game, kind, embed=None, content=None):
+    async def deliver(channel_id, game, kind, embed=None, content=None, view=None):
         sent.append(kind)
     bot.espn.scoreboard = scoreboard
     bot._deliver = deliver

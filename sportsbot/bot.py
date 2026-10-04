@@ -18,6 +18,7 @@ from discord import app_commands
 from discord.ext import tasks
 
 from .balls import BallFeed
+from .boxscore import STATS_SPORTS, StatsButton, stats_embed, stats_view
 from .bankroll import STYLES, BetBook, PlacedButton, bankroll_embed, money, placed_view, units_for
 from .espn import EASTERN, ESPNClient
 from .espn import start_time
@@ -35,7 +36,7 @@ from .schedule import COMMON_TIMEZONES, games_on, today
 from .plays import AssistResolver, PlayResolver
 from .settings import SettingsStore, StateStore, move_sections
 from .storage import SubscriptionStore
-from .tracker import CALLED_OFF, FINAL, KICKOFF, OVERS, SCORE, WICKET, Tracker
+from .tracker import CALLED_OFF, FINAL, HALFTIME, KICKOFF, OVERS, SCORE, WICKET, Tracker
 
 log = logging.getLogger("sportsbot")
 
@@ -208,7 +209,8 @@ class SportsBot(discord.Client):
     async def setup_hook(self) -> None:
         self._prune_state()
         register_commands(self)
-        self.add_dynamic_items(PlacedButton)  # "I placed it" buttons on slips keep working after restarts
+        # "I placed it" and "Player stats" buttons keep working after restarts.
+        self.add_dynamic_items(PlacedButton, StatsButton)
         self.poll.start()
         try:
             if self.dev_guild:
@@ -363,9 +365,10 @@ class SportsBot(discord.Client):
             if update.edit:  # ESPN filled in or corrected a play already posted: edit those posts
                 await self._edit_play(update, plain, with_odds)
                 continue
+            view = stats_view(update.game) if update.kind in (HALFTIME, FINAL) else None  # 📊 Player stats
             for channel_id in channels:
                 embed = with_odds if with_odds and self.settings.get(channel_id).odds else plain
-                message = await self._deliver(channel_id, update.game, update.kind, embed=embed)
+                message = await self._deliver(channel_id, update.game, update.kind, embed=embed, view=view)
                 if (key := _post_key(update)) and message is not None:
                     self.play_posts.setdefault((update.game.id, key), []).append((time.time(), channel_id, message))
 
@@ -430,11 +433,11 @@ class SportsBot(discord.Client):
     async def _channel(self, channel_id: int):
         return self.get_channel(channel_id) or await self.fetch_channel(channel_id)
 
-    async def _send(self, channel_id: int, embed: discord.Embed | None = None, content: str | None = None):
+    async def _send(self, channel_id: int, embed: discord.Embed | None = None, content: str | None = None, view=None):
         """Posts to a channel or thread; returns the message, or None if it failed."""
         try:
             channel = await self._channel(channel_id)
-            return await channel.send(content=content, embed=embed)
+            return await channel.send(content=content, embed=embed, **({"view": view} if view else {}))
         except discord.NotFound:
             log.warning("Channel %s no longer exists; dropping its subscriptions", channel_id)
             self.store.remove_channel(channel_id)
@@ -447,18 +450,18 @@ class SportsBot(discord.Client):
     def _thread_key(self, channel_id: int, game) -> str:
         return f"{channel_id}:{game.league_key}:{game.id}"
 
-    async def _deliver(self, channel_id: int, game, kind: str, embed=None, content=None):
+    async def _deliver(self, channel_id: int, game, kind: str, embed=None, content=None, view=None):
         """Sends an update, into the game's thread when the channel uses threads. Returns the message
         (the one in the game's thread, if it went there), or None if it couldn't be posted."""
         if not self.settings.get(channel_id).threads:
-            return await self._send(channel_id, embed, content)
+            return await self._send(channel_id, embed, content, view)
         key = self._thread_key(channel_id, game)
         if kind in CHANNEL_KINDS:
-            message = await self._send(channel_id, embed, content)
+            message = await self._send(channel_id, embed, content, view)
             if kind == KICKOFF and message is not None:
                 await self._open_thread(key, game, message)
             elif kind != KICKOFF and (thread_id := self._thread_id(key)):
-                await self._send_to_thread(thread_id, embed, content)  # keep the thread complete
+                await self._send_to_thread(thread_id, embed, content, view)  # keep the thread complete
                 self.state.delete("threads", key)
             return message
         thread_id = self._thread_id(key)
@@ -467,9 +470,9 @@ class SportsBot(discord.Client):
             header = discord.Embed(description=f"🔴 **{game.scoreline()}**\nLive updates in the thread below.")
             message = await self._send(channel_id, header)
             thread_id = await self._open_thread(key, game, message) if message else None
-        if thread_id is not None and (message := await self._send_to_thread(thread_id, embed, content)):
+        if thread_id is not None and (message := await self._send_to_thread(thread_id, embed, content, view)):
             return message
-        return await self._send(channel_id, embed, content)  # no thread permissions: fall back
+        return await self._send(channel_id, embed, content, view)  # no thread permissions: fall back
 
     def _thread_id(self, key: str) -> int | None:
         entry = self.state.get("threads", key)
@@ -486,11 +489,11 @@ class SportsBot(discord.Client):
         self.state.set("threads", key, {"id": thread.id, "at": time.time()})
         return thread.id
 
-    async def _send_to_thread(self, thread_id: int, embed=None, content=None):
+    async def _send_to_thread(self, thread_id: int, embed=None, content=None, view=None):
         """Posts in a thread; returns the message, or None if it failed."""
         try:
             thread = await self._channel(thread_id)
-            return await thread.send(content=content, embed=embed)
+            return await thread.send(content=content, embed=embed, **({"view": view} if view else {}))
         except discord.HTTPException:
             log.warning("Couldn't post in thread %s", thread_id, exc_info=True)
             return None
@@ -1309,6 +1312,81 @@ def register_commands(bot: SportsBot) -> None:
             label = f"{emoji}{g.away.name} @ {g.home.name} · {_when(g)}"[:100]
             if not q or q in label.lower():
                 out.append(app_commands.Choice(name=label, value=g.id))
+        return out[:25]
+
+    async def _today(key: str) -> list:
+        """Today's games for a league: the ones the loop already has, or a fresh scoreboard."""
+        return bot.latest.get(key) or await bot.espn.scoreboard(LEAGUES[key])
+
+    @tree.command(name="stats", description="Player stats for a game, live or finished")
+    @app_commands.describe(league="League (leave out to use the one this channel follows)",
+                           team="A team: stats for its game today",
+                           game="Pick one of today's games")
+    @app_commands.choices(league=LEAGUE_CHOICES)
+    async def stats(interaction: discord.Interaction, league: app_commands.Choice[str] | None = None,
+                    team: TeamName | None = None, game: TeamName | None = None):
+        await interaction.response.defer(thinking=True)
+        reply = interaction.followup.send
+        if game and ":" in game:  # picked from the suggestions: "league:game id"
+            key, gid = game.split(":", 1)
+            if key not in LEAGUES:
+                await reply("Pick the game from the suggestions.")
+                return
+        else:
+            key, problem = await pick_league(interaction, league, team)
+            if key is None:
+                await reply(problem)
+                return
+            try:
+                games = await _today(key)
+            except Exception:
+                log.exception("Failed to fetch %s scoreboard", key)
+                await reply(f"Couldn't reach the score service for {LEAGUES[key].name}, try again shortly.")
+                return
+            lg = LEAGUES[key]
+            mine = [g for g in games if not team or g.involves(team)]
+            started = [g for g in mine if g.state != "pre"]
+            if not started:
+                if team and mine:
+                    await reply(f"{mine[0].away.name} @ {mine[0].home.name} hasn't started yet ({_when(mine[0])}).")
+                else:
+                    await reply(f"No {lg.name} game for **{team}** today." if team else f"No {lg.name} games have started today.")
+                return
+            live = [g for g in started if g.state == "in"]
+            if len(started) > 1 and len(live) != 1 and not team:
+                await reply(f"Several {lg.name} games today: pick one with `game:`, or name a `team:`.")
+                return
+            gid = (live or started)[0].id
+        if LEAGUES[key].sport not in STATS_SPORTS:
+            await reply("Player stats aren't available for cricket yet.")
+            return
+        try:
+            summary = await bot.espn.summary(LEAGUES[key].path, gid)
+        except Exception:
+            log.exception("Failed to fetch the %s summary for %s", key, gid)
+            await reply("Couldn't reach ESPN for the stats, try again shortly.")
+            return
+        await reply(embed=stats_embed(summary, key))
+
+    stats.autocomplete("team")(team_suggestions)
+
+    @stats.autocomplete("game")
+    async def started_game_suggestions(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+        key = getattr(interaction.namespace, "league", None)
+        keys = [k for k in ([key] if key in LEAGUES else channel_leagues(interaction.channel_id))
+                if LEAGUES[k].sport in STATS_SPORTS]
+        async def board(k):
+            return k, await _today(k)
+        boards = await gather_within(2.5, *(board(k) for k in keys))  # slow or failed leagues are left out
+        q, out = current.strip().lower(), []
+        for k, games in boards:
+            for g in games or []:
+                if g.state == "pre":
+                    continue
+                emoji = f"{g.league.emoji} " if len(keys) > 1 else ""
+                label = f"{emoji}{g.away.name} {g.away.score} @ {g.home.name} {g.home.score} · {g.detail}"[:100]
+                if not q or q in label.lower():
+                    out.append(app_commands.Choice(name=label, value=f"{k}:{g.id}"[:100]))
         return out[:25]
 
     @tree.command(name="bankroll", description="Your bankroll, what to stake, and how your logged bets have done")

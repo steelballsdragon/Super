@@ -28,7 +28,7 @@ def make_bot(tmp_path):
     register_commands(bot)
     sent = []
 
-    async def send(channel_id, embed=None, content=None):
+    async def send(channel_id, embed=None, content=None, view=None):
         sent.append((channel_id, embed.title if embed else content))
     bot._send = send
     return bot, sent

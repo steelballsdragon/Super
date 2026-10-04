@@ -48,7 +48,7 @@ class FakeChannel:
     def __init__(self, server, name=""):
         self.id, self.server, self.name, self.messages, self.edits = next(ids), server, name, [], 0
 
-    async def send(self, content=None, embed=None):
+    async def send(self, content=None, embed=None, view=None):
         msg = FakeMessage(self, embed, content)
         self.messages.append(msg)
         return msg

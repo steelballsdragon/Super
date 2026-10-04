@@ -207,7 +207,7 @@ def test_bot_edits_the_posts_of_a_corrected_play(tmp_path):
             self.embed = embed
     posts = []
 
-    async def send(channel_id, embed=None, content=None):
+    async def send(channel_id, embed=None, content=None, view=None):
         posts.append(Message(embed))
         return posts[-1]
     bot._send = send

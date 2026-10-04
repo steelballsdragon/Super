@@ -39,7 +39,7 @@ class FakeBot:
         self.props = SimpleNamespace(player_games=player_games)
         self.espn = None
 
-    async def _send(self, channel_id, embed=None, content=None):
+    async def _send(self, channel_id, embed=None, content=None, view=None):
         self.sent.append((channel_id, embed))
 
 

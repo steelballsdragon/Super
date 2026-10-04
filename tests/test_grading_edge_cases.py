@@ -27,7 +27,7 @@ def make_bot(tmp_path):
                     StateStore(tmp_path / "state.json"))
     sent = []
 
-    async def send(cid, embed=None, content=None):
+    async def send(cid, embed=None, content=None, view=None):
         sent.append(embed)
     bot._send = send
     return bot, sent

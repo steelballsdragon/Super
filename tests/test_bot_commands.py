@@ -92,7 +92,7 @@ def test_ball_by_ball_channels_skip_wicket_posts_but_get_the_result():
     bot.store.add(2, "cricket", "India", ball_by_ball=True)   # every ball
     sent = []
 
-    async def send(channel_id, embed=None, content=None):
+    async def send(channel_id, embed=None, content=None, view=None):
         sent.append((channel_id, embed.title if embed else content.splitlines()[0]))
     bot._send = send
 
