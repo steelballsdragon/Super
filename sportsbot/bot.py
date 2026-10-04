@@ -61,6 +61,7 @@ WEEK_CACHE_SECONDS = 600
 GAME_INFO_SECONDS = 120
 PARLAY_GAMES = 8  # parlays look ahead (up to a week) until there are at least this many games to build from
 SETTLE_SECONDS = 60  # how often finished parlay legs are graded
+PLAY_POST_SECONDS = 20 * 60  # scoring play posts are remembered this long, to edit when ESPN fills them in
 LINEUP_CHECK_SECONDS = 75 * 60  # open slips' players are checked against lineups and injuries this long before kickoff
 LINEUP_SPORTS = ("soccer", "baseball")  # sports whose starting lineups ESPN has before the game
 PRUNE_SECONDS = 3600  # how often old state entries are cleaned out
@@ -141,6 +142,7 @@ class SportsBot(discord.Client):
         self._week: dict[str, tuple[float, list]] = {}  # league -> (fetched at, the week's upcoming games)  # when to next ask ESPN how an off-scoreboard game ended
         self.tracker = Tracker()
         # NFL, MLB and NHL scores are posted as the actual scoring plays.
+        self.play_posts: dict[tuple[str, str], list] = {}  # (game, play) -> [(when, channel, message)], for edits
         self.play_resolvers = {
             league.key: PlayResolver(self._plays_fetcher(league))
             for league in LEAGUES.values()
@@ -286,6 +288,7 @@ class SportsBot(discord.Client):
         self._prune_threads()
         self._prune_reminders()
         self._prune_lineup_checks()
+        self._prune_play_posts()
         self.odds.prune()
         now = time.time()
         self.result_lookups = {k: t for k, t in self.result_lookups.items() if t > now}
@@ -357,9 +360,28 @@ class SportsBot(discord.Client):
                 continue
             plain = update_embed(update)
             with_odds = self._with_odds(update)
+            if update.edit:  # ESPN filled in or corrected a play already posted: edit those posts
+                await self._edit_play(update, plain, with_odds)
+                continue
             for channel_id in channels:
                 embed = with_odds if with_odds and self.settings.get(channel_id).odds else plain
-                await self._deliver(channel_id, update.game, update.kind, embed=embed)
+                message = await self._deliver(channel_id, update.game, update.kind, embed=embed)
+                if update.play is not None and message is not None:
+                    self.play_posts.setdefault((update.game.id, update.play.id), []).append(
+                        (time.time(), channel_id, message))
+
+    async def _edit_play(self, update, plain, with_odds) -> None:
+        for _, channel_id, message in self.play_posts.get((update.game.id, update.play.id), []):
+            embed = with_odds if with_odds and self.settings.get(channel_id).odds else plain
+            try:
+                await message.edit(embed=embed)
+            except discord.HTTPException:
+                log.warning("Couldn't edit the post for play %s", update.play.id, exc_info=True)
+
+    def _prune_play_posts(self) -> None:
+        cutoff = time.time() - PLAY_POST_SECONDS
+        self.play_posts = {k: [p for p in posts if p[0] > cutoff] for k, posts in self.play_posts.items()}
+        self.play_posts = {k: posts for k, posts in self.play_posts.items() if posts}
 
     async def _with_vanished_games(self, league, games: list) -> list:
         """Keeps following a live game that dropped off ESPN's scoreboard before it ended (ESPN moved
@@ -426,11 +448,11 @@ class SportsBot(discord.Client):
     def _thread_key(self, channel_id: int, game) -> str:
         return f"{channel_id}:{game.league_key}:{game.id}"
 
-    async def _deliver(self, channel_id: int, game, kind: str, embed=None, content=None) -> None:
-        """Sends an update, into the game's thread when the channel uses threads."""
+    async def _deliver(self, channel_id: int, game, kind: str, embed=None, content=None):
+        """Sends an update, into the game's thread when the channel uses threads. Returns the message
+        (the one in the game's thread, if it went there), or None if it couldn't be posted."""
         if not self.settings.get(channel_id).threads:
-            await self._send(channel_id, embed, content)
-            return
+            return await self._send(channel_id, embed, content)
         key = self._thread_key(channel_id, game)
         if kind in CHANNEL_KINDS:
             message = await self._send(channel_id, embed, content)
@@ -439,15 +461,16 @@ class SportsBot(discord.Client):
             elif kind != KICKOFF and (thread_id := self._thread_id(key)):
                 await self._send_to_thread(thread_id, embed, content)  # keep the thread complete
                 self.state.delete("threads", key)
-            return
+            return message
         thread_id = self._thread_id(key)
         if thread_id is None:
             # We didn't see the start (e.g. followed mid-game): post a header to hang the thread on.
             header = discord.Embed(description=f"🔴 **{game.scoreline()}**\nLive updates in the thread below.")
             message = await self._send(channel_id, header)
             thread_id = await self._open_thread(key, game, message) if message else None
-        if thread_id is None or not await self._send_to_thread(thread_id, embed, content):
-            await self._send(channel_id, embed, content)  # no thread permissions: fall back
+        if thread_id is not None and (message := await self._send_to_thread(thread_id, embed, content)):
+            return message
+        return await self._send(channel_id, embed, content)  # no thread permissions: fall back
 
     def _thread_id(self, key: str) -> int | None:
         entry = self.state.get("threads", key)
@@ -464,14 +487,14 @@ class SportsBot(discord.Client):
         self.state.set("threads", key, {"id": thread.id, "at": time.time()})
         return thread.id
 
-    async def _send_to_thread(self, thread_id: int, embed=None, content=None) -> bool:
+    async def _send_to_thread(self, thread_id: int, embed=None, content=None):
+        """Posts in a thread; returns the message, or None if it failed."""
         try:
             thread = await self._channel(thread_id)
-            await thread.send(content=content, embed=embed)
-            return True
+            return await thread.send(content=content, embed=embed)
         except discord.HTTPException:
             log.warning("Couldn't post in thread %s", thread_id, exc_info=True)
-            return False
+            return None
 
     def _prune_threads(self) -> None:
         cutoff = time.time() - THREAD_KEEP_SECONDS

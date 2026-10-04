@@ -18,6 +18,11 @@ PLAY_WAIT_SECONDS = 120
 # Once the game is over, hold the final result at most this long for the
 # winning play (e.g. a walk-off home run) so the play is posted first.
 FINAL_HOLD_SECONDS = 60
+# ESPN fills plays in after first publishing them (an NHL goal's scorer and assists, a touchdown's extra
+# point) and corrects them (assists changed minutes later). A posted play is re-checked this often, for
+# this long, and its post edited when it changes.
+WATCH_CHECK_SECONDS = 20
+WATCH_SECONDS = 15 * 60
 
 Clock = Callable[[], float]
 
@@ -45,6 +50,8 @@ class PlayResolver:
         self._clock = clock
         self._posted: dict[str, set[str]] = {}
         self._pending: dict[str, _Pending] = {}
+        self._watching: dict[str, dict[str, tuple[ScoringPlay, float]]] = {}  # game -> play -> (as posted, when)
+        self._checked: dict[str, float] = {}  # game -> when its posted plays were last re-checked
 
     async def resolve(self, games: list[Game], updates: list[Update]) -> list[Update]:
         resolved: list[Update] = []
@@ -67,6 +74,7 @@ class PlayResolver:
             (pending.held if pending else ready).append(u)
 
         by_id = {g.id: g for g in games}
+        edits = await self._recheck(by_id)
         for game_id in list(self._pending):
             game = by_id.get(game_id)
             if game is None:
@@ -78,7 +86,34 @@ class PlayResolver:
         for game_id in list(self._posted):
             if game_id not in by_id:
                 del self._posted[game_id]
-        return resolved + ready
+                self._watching.pop(game_id, None)
+        return edits + resolved + ready
+
+    async def _recheck(self, by_id: dict[str, Game]) -> list[Update]:
+        """Edits for posted plays that ESPN has since filled in or corrected."""
+        now, edits = self._clock(), []
+        for game_id, watched in list(self._watching.items()):
+            for pid, (_, at) in list(watched.items()):
+                if now - at > WATCH_SECONDS:
+                    del watched[pid]
+            game = by_id.get(game_id)
+            if not watched or game is None:
+                self._watching.pop(game_id, None)
+                continue
+            if game_id in self._pending or now - self._checked.get(game_id, 0) < WATCH_CHECK_SECONDS:
+                continue  # a new play is being looked up anyway; or checked a moment ago
+            self._checked[game_id] = now
+            try:
+                plays = {p.id: p for p in await self._fetch(game_id)}
+            except Exception:
+                log.warning("Failed to re-check scoring plays for game %s", game_id, exc_info=True)
+                continue
+            for pid, (old, at) in list(watched.items()):
+                new = plays.get(pid)
+                if new is not None and (new.text, new.away_score, new.home_score) != (old.text, old.away_score, old.home_score):
+                    watched[pid] = (new, at)
+                    edits.append(Update(SCORE, game, play=new, edit=True))
+        return edits
 
     async def _check(self, game: Game, pending: _Pending) -> list[Update]:
         try:
@@ -89,20 +124,20 @@ class PlayResolver:
         posted = self._posted.setdefault(game.id, set())
         current_total = game.home.score + game.away.score
         new = [p for p in plays if p.total > pending.base_total and p.id not in posted]
-        final_held = any(u.kind == FINAL for u in pending.held)
-        waited = self._clock() - pending.since
-        out_of_time = waited >= PLAY_WAIT_SECONDS or (final_held and waited >= FINAL_HOLD_SECONDS)
-        # A play ESPN is still filling in (an NHL goal with no scorer yet) waits for the rest, for a while.
-        if new and (all(p.ready for p in new) or out_of_time):
+        if new:
+            # Posted straight away, even if ESPN is still filling it in: the post is edited as it does.
             posted.update(p.id for p in new)
+            now = self._clock()
+            self._watching.setdefault(game.id, {}).update((p.id, (p, now)) for p in new)
+            self._checked[game.id] = now
             del self._pending[game.id]
             return [Update(SCORE, game, play=p) for p in new] + pending.held
-        if new:
-            return []
         if any(p.total == current_total and p.id in posted for p in plays):
             # The change was e.g. an extra point added to a touchdown already posted.
             del self._pending[game.id]
             return pending.held
+        final_held = any(u.kind == FINAL for u in pending.held)
+        waited = self._clock() - pending.since
         if waited >= PLAY_WAIT_SECONDS or (final_held and waited >= FINAL_HOLD_SECONDS):
             del self._pending[game.id]
             # The final already shows the score, so a bare score update would only repeat it.

@@ -75,7 +75,10 @@ def play_embed(game: Game, play: ScoringPlay) -> discord.Embed:
     who = team.name if team else play.team_abbrev
     title = f"{league.emoji} {(play.category or 'Score').upper()}" + (f" — {who}" if who else "")
     score = f"**{game.away.name} {play.away_score} - {play.home_score} {game.home.name}**"
-    text = _hockey_text(play.text) if league.sport == "hockey" else play.text
+    if not play.ready:  # ESPN hasn't filled the play in yet: this post is edited when it does
+        text = "⏳ Scorer and assists coming…"
+    else:
+        text = _hockey_text(play.text) if league.sport == "hockey" else play.text
     desc = f"{score}\n*{play.kind}*\n{text}" if play.kind else f"{score}\n{text}"
     embed = discord.Embed(title=title, description=desc, color=COLORS[SCORE])
     embed.set_footer(text=f"{league.name} · {play.when}" if play.when else league.name)
