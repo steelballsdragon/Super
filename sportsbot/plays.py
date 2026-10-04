@@ -1,4 +1,4 @@
-"""Turns NFL score changes into posts about the actual scoring plays."""
+"""Turns NFL, MLB and NHL score changes into posts about the actual scoring plays."""
 
 from __future__ import annotations
 
@@ -89,16 +89,20 @@ class PlayResolver:
         posted = self._posted.setdefault(game.id, set())
         current_total = game.home.score + game.away.score
         new = [p for p in plays if p.total > pending.base_total and p.id not in posted]
-        if new:
+        final_held = any(u.kind == FINAL for u in pending.held)
+        waited = self._clock() - pending.since
+        out_of_time = waited >= PLAY_WAIT_SECONDS or (final_held and waited >= FINAL_HOLD_SECONDS)
+        # A play ESPN is still filling in (an NHL goal with no scorer yet) waits for the rest, for a while.
+        if new and (all(p.ready for p in new) or out_of_time):
             posted.update(p.id for p in new)
             del self._pending[game.id]
             return [Update(SCORE, game, play=p) for p in new] + pending.held
+        if new:
+            return []
         if any(p.total == current_total and p.id in posted for p in plays):
             # The change was e.g. an extra point added to a touchdown already posted.
             del self._pending[game.id]
             return pending.held
-        final_held = any(u.kind == FINAL for u in pending.held)
-        waited = self._clock() - pending.since
         if waited >= PLAY_WAIT_SECONDS or (final_held and waited >= FINAL_HOLD_SECONDS):
             del self._pending[game.id]
             # The final already shows the score, so a bare score update would only repeat it.

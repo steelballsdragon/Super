@@ -123,3 +123,56 @@ def test_final_lists_game_leaders():
     assert field.name == "Game leaders"
     assert "**PASS** A. Rodgers — 22/40, 299 YDS, 3 TD, 2 INT" in field.value
     assert "**RUSH** J. McLaughlin — 18 CAR, 104 YDS, 1 TD" in field.value
+
+
+NHL = LEAGUES["nhl"]
+
+
+def nhl_board(away=0, home=0):
+    comp = {"status": {"type": {"state": "in", "name": "STATUS_IN_PROGRESS", "shortDetail": "2nd 5:00"}},
+            "competitors": [{"homeAway": "home", "score": str(home), "team": {"id": "12", "displayName": "New York Islanders", "abbreviation": "NYI"}},
+                            {"homeAway": "away", "score": str(away), "team": {"id": "11", "displayName": "New Jersey Devils", "abbreviation": "NJ"}}]}
+    return parse_scoreboard({"events": [{"id": "7", "date": "2026-10-04T23:00Z", "competitions": [comp]}]}, NHL)
+
+
+def nhl_goal(text, participants=()):
+    return {"id": "g1", "scoringPlay": True, "text": text, "team": {"id": "12"}, "period": {"displayValue": "2nd"},
+            "clock": {"displayValue": "5:00"}, "awayScore": 0, "homeScore": 1, "strength": {"text": "Even Strength"},
+            "participants": list(participants)}
+
+
+def test_nhl_goal_waits_for_espn_to_name_the_scorer():
+    now = [0.0]
+    plays = []
+
+    async def feed(event_id):
+        return parse_scoring_plays({"plays": plays}, "hockey")
+    tracker, resolver = Tracker(), PlayResolver(feed, clock=lambda: now[0])
+
+    def nhl_step(games):
+        return asyncio.run(resolver.resolve(games, tracker.update("nhl", games)))
+    nhl_step(nhl_board())
+    plays.append(nhl_goal("Goal, assists: none"))  # ESPN's first version of the goal: a placeholder
+    assert nhl_step(nhl_board(home=1)) == []
+    now[0] = 30
+    plays[0] = nhl_goal("Brayden Schenn Goal (1) Snap Shot, assists: Victor Eklund (1), Matthew Schaefer (1)")
+    [u] = nhl_step(nhl_board(home=1))
+    desc = update_embed(u).description
+    assert "Brayden Schenn Goal (1) Snap Shot" in desc and "🅰️ Assists: Victor Eklund (1), Matthew Schaefer (1)" in desc
+
+
+def test_nhl_scorer_comes_from_the_participants_and_a_placeholder_still_posts_in_time():
+    [p] = parse_scoring_plays({"plays": [nhl_goal(", assists: Victor Eklund (1)",
+                                                  [{"type": "scorer", "athlete": {"displayName": "Brayden Schenn"}}])]},
+                              "hockey")
+    assert p.ready and p.text == "Brayden Schenn Goal, assists: Victor Eklund (1)"
+    now = [0.0]
+
+    async def feed(event_id):
+        return parse_scoring_plays({"plays": [nhl_goal("Goal, assists: none")]}, "hockey")
+    tracker, resolver = Tracker(), PlayResolver(feed, clock=lambda: now[0])
+    asyncio.run(resolver.resolve([], tracker.update("nhl", nhl_board())))
+    assert asyncio.run(resolver.resolve(nhl_board(home=1), tracker.update("nhl", nhl_board(home=1)))) == []
+    now[0] = PLAY_WAIT_SECONDS  # never filled in: post what ESPN has rather than nothing
+    [u] = asyncio.run(resolver.resolve(nhl_board(home=1), tracker.update("nhl", nhl_board(home=1))))
+    assert u.play is not None
