@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Parlay Calculator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one betting slip, legs on the left, the ticket summary pinned beside them (stacked on phones). */
+:root {
+  --ground: #e9edf0;
+  --slip: #ffffff;
+  --ink: #15212b;
+  --muted: #5d6b76;
+  --rule: #cfd7dd;
+  --accent: #0b7a6e;
+  --accent-ink: #ffffff;
+  --won: #1d7a3a;
+  --push: #8a6a10;
+  --lost: #b3261e;
+  --won-bg: #e3f2e7;
+  --push-bg: #f6efd9;
+  --lost-bg: #f8e4e2;
+  --field: #f4f6f8;
+  --display: "Barlow Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #0f161b; --slip: #172129; --ink: #e4eaee; --muted: #93a2ad; --rule: #2a3741;
+    --accent: #3cc2b0; --accent-ink: #062520; --won: #6fd18b; --push: #e2c160; --lost: #f08a82;
+    --won-bg: #173326; --push-bg: #33301a; --lost-bg: #3a1f1d; --field: #1e2a33; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #0f161b; --slip: #172129; --ink: #e4eaee; --muted: #93a2ad; --rule: #2a3741;
+  --accent: #3cc2b0; --accent-ink: #062520; --won: #6fd18b; --push: #e2c160; --lost: #f08a82;
+  --won-bg: #173326; --push-bg: #33301a; --lost-bg: #3a1f1d; --field: #1e2a33; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font: 15px/1.5 var(--body);
+  padding-inline: 16px;
+  padding-block: 28px 48px;
+}
+.wrap { max-width: 980px; margin: 0 auto; display: grid; gap: 20px; }
+header { display: grid; gap: 4px; }
+h1 {
+  font: 700 2.4rem/1 var(--display);
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+  margin: 0;
+  text-wrap: balance;
+}
+header p { margin: 0; color: var(--muted); max-width: 62ch; }
+
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 20px; align-items: start; }
+@media (max-width: 760px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+
+.panel { background: var(--slip); border: 1px solid var(--rule); border-radius: 10px; }
+.legs-head, .legs-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; flex-wrap: wrap; }
+.legs-head { border-bottom: 1px solid var(--rule); }
+.label {
+  font: 600 0.78rem/1 var(--body);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.example { font-size: 0.8rem; color: var(--muted); }
+
+ol.legs { list-style: none; margin: 0; padding: 0; counter-reset: leg; }
+.leg {
+  counter-increment: leg;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1.4fr) minmax(0, 0.8fr) auto 32px;
+  grid-template-areas: "n pick price result x" "n conv conv conv conv";
+  gap: 6px 10px;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px dashed var(--rule);
+}
+.leg::before { content: counter(leg); grid-area: n; font: 700 1.3rem/1 var(--display); color: var(--muted); align-self: start; padding-top: 8px; }
+.leg .pick { grid-area: pick; }
+.leg .price { grid-area: price; }
+.leg .results { grid-area: result; }
+.leg .remove { grid-area: x; }
+.leg .conv { grid-area: conv; }
+@media (max-width: 560px) {
+  .leg { grid-template-columns: 24px minmax(0, 1fr) 32px; grid-template-areas: "n pick x" "n price price" "n result result" "n conv conv"; }
+  .results { display: flex; }
+  .results button { flex: 1; }
+}
+
+input[type="text"], input[type="number"] {
+  width: 100%;
+  font: inherit;
+  color: var(--ink);
+  background: var(--field);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 8px 10px;
+  min-width: 0;
+}
+.price input, #stake { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+input:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
+input[aria-invalid="true"] { border-color: var(--lost); }
+
+.conv { font: 0.82rem/1.4 var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; min-height: 1.4em; }
+.conv.err { color: var(--lost); font-family: var(--body); }
+
+.results { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
+.results button {
+  font: 600 0.75rem/1 var(--body);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  padding: 9px 8px;
+  cursor: pointer;
+}
+.results button + button { border-left: 1px solid var(--rule); }
+.results button[aria-pressed="true"][data-r="open"] { background: var(--field); color: var(--ink); }
+.results button[aria-pressed="true"][data-r="won"] { background: var(--won-bg); color: var(--won); }
+.results button[aria-pressed="true"][data-r="push"] { background: var(--push-bg); color: var(--push); }
+.results button[aria-pressed="true"][data-r="lost"] { background: var(--lost-bg); color: var(--lost); }
+
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.remove { width: 32px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 1.2rem; cursor: pointer; }
+.remove:hover { background: var(--field); color: var(--lost); }
+
+.btn {
+  font: 600 0.9rem/1 var(--body);
+  border-radius: 6px;
+  padding: 10px 14px;
+  cursor: pointer;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
+}
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.btn:hover { filter: brightness(1.05); }
+
+/* Ticket summary */
+.ticket { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 16px); overflow: hidden; }
+.ticket .stake { display: grid; gap: 6px; padding: 16px; border-bottom: 1px solid var(--rule); }
+.money-field { position: relative; }
+.money-field span { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--muted); font-family: var(--mono); }
+.money-field input { padding-left: 24px; font-size: 1.1rem; }
+.status {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 10px 16px;
+  font: 700 1.05rem/1 var(--display);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  background: var(--field);
+}
+.status[data-s="won"] { background: var(--won-bg); color: var(--won); }
+.status[data-s="refund"] { background: var(--push-bg); color: var(--push); }
+.status[data-s="lost"] { background: var(--lost-bg); color: var(--lost); }
+.payout { padding: 18px 16px 6px; display: grid; gap: 2px; }
+.payout .big { font: 700 2.8rem/1 var(--display); font-variant-numeric: tabular-nums; letter-spacing: 0.01em; overflow-wrap: anywhere; }
+.payout .sub { color: var(--muted); font-size: 0.88rem; }
+dl.figures { margin: 0; padding: 10px 16px 16px; display: grid; grid-template-columns: auto auto; gap: 8px 12px; }
+dl.figures dt { color: var(--muted); }
+dl.figures dd { margin: 0; text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.ticket .actions { display: flex; gap: 8px; padding: 0 16px 16px; flex-wrap: wrap; }
+.copied { font-size: 0.85rem; color: var(--muted); align-self: center; }
+textarea#slip-text { font: 0.85rem/1.4 var(--mono); margin: 0 16px 16px; width: calc(100% - 32px); background: var(--field); color: var(--ink); border: 1px solid var(--rule); border-radius: 6px; padding: 8px; }
+
+.rules { color: var(--muted); font-size: 0.88rem; max-width: 70ch; display: grid; gap: 6px; }
+.rules p { margin: 0; }
+code { font-family: var(--mono); font-size: 0.92em; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .payout .big { transition: color 0.2s; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Parlay Calculator</h1>
+    <p>Enter each leg's price as American (<code>-110</code>, <code>+450</code>), decimal (<code>5.5</code>) or fractional (<code>9/2</code>).
+      Mark legs as they settle to see what the ticket pays now.</p>
+  </header>
+
+  <div class="layout">
+    <section class="panel" aria-labelledby="legs-title">
+      <div class="legs-head">
+        <span class="label" id="legs-title">Legs</span>
+        <span class="example" id="example-note">Example slip, replace with your picks</span>
+      </div>
+      <ol class="legs" id="legs"></ol>
+      <div class="legs-foot">
+        <button class="btn primary" id="add" type="button">+ Add leg</button>
+        <button class="btn" id="clear" type="button">Start a new slip</button>
+      </div>
+    </section>
+
+    <aside class="panel ticket" aria-label="Ticket">
+      <div class="stake">
+        <label class="label" for="stake">Stake</label>
+        <div class="money-field"><span>$</span><input id="stake" type="number" inputmode="decimal" min="0" step="0.5" value="10"></div>
+      </div>
+      <div class="status" id="status" data-s="open"><span id="status-text">Open</span><span id="status-legs"></span></div>
+      <div class="payout">
+        <span class="label" id="payout-label">Pays if every leg wins</span>
+        <span class="big" id="payout">$0.00</span>
+        <span class="sub" id="profit"></span>
+      </div>
+      <dl class="figures">
+        <dt>Parlay odds</dt><dd id="f-american">–</dd>
+        <dt>Decimal</dt><dd id="f-decimal">–</dd>
+        <dt id="f-chance-label">Implied chance</dt><dd id="f-chance">–</dd>
+      </dl>
+      <div class="actions">
+        <button class="btn" id="copy" type="button">Copy slip</button>
+        <span class="copied" id="copied" aria-live="polite"></span>
+      </div>
+      <textarea id="slip-text" rows="6" readonly hidden></textarea>
+    </aside>
+  </div>
+
+  <div class="rules">
+    <p>A pushed or void leg comes off the ticket and the rest are paid at their own prices, the way books (and the bot's <code>/bet</code> grading) handle it. One lost leg loses the bet.</p>
+    <p>Implied chance is 1 ÷ decimal odds for each leg still open, multiplied together. It still includes the book's margin, so the fair chance is a little lower.</p>
+  </div>
+</div>
+
+<template id="leg-tpl">
+  <li class="leg">
+    <input class="pick" type="text" placeholder="Pick (optional)" aria-label="Pick">
+    <div class="price"><input type="text" inputmode="text" placeholder="-110" aria-label="Price" autocomplete="off" spellcheck="false"></div>
+    <div class="results" role="group" aria-label="Result">
+      <button type="button" data-r="open" aria-pressed="true">Open</button>
+      <button type="button" data-r="won" aria-pressed="false">Won</button>
+      <button type="button" data-r="push" aria-pressed="false">Push</button>
+      <button type="button" data-r="lost" aria-pressed="false">Lost</button>
+    </div>
+    <button class="remove" type="button" aria-label="Remove leg">×</button>
+    <div class="conv" aria-live="polite"></div>
+  </li>
+</template>
+
+<script src="odds.js"></script>
+<script>
+(function () {
+  "use strict";
+  const { parsePrice, american, settle, money } = window.Odds;
+  const STORE = "parlay-calculator-v1";
+  const EXAMPLE = {
+    stake: "10",
+    legs: [
+      { pick: "Chiefs -3.5", price: "-110", result: "won" },
+      { pick: "Arsenal to win", price: "+120", result: "open" },
+      { pick: "Over 8.5 runs, Braves vs Mets", price: "1.87", result: "open" },
+    ],
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const list = $("legs"), tpl = $("leg-tpl"), stakeInput = $("stake");
+  let idSeq = 0;
+
+  function load() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORE) || "null");
+      if (saved && Array.isArray(saved.legs) && saved.legs.length) return { ...saved, example: false };
+    } catch (e) { /* storage unavailable */ }
+    return { ...EXAMPLE, example: true };
+  }
+
+  function save() {
+    try { localStorage.setItem(STORE, JSON.stringify({ stake: stakeInput.value, legs: readLegs() })); } catch (e) { /* ignore */ }
+  }
+
+  function addLeg(leg = { pick: "", price: "", result: "open" }, focus = false) {
+    const node = tpl.content.firstElementChild.cloneNode(true);
+    const n = ++idSeq;
+    node.querySelector(".pick").id = "pick-" + n;
+    const price = node.querySelector(".price input");
+    price.id = "price-" + n;
+    node.querySelector(".pick").value = leg.pick || "";
+    price.value = leg.price || "";
+    setResult(node, leg.result || "open");
+    list.appendChild(node);
+    if (focus) node.querySelector(".pick").focus();
+  }
+
+  function setResult(node, result) {
+    node.dataset.result = result;
+    node.querySelectorAll(".results button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.r === result)));
+  }
+
+  function readLegs() {
+    return [...list.children].map((node) => ({
+      pick: node.querySelector(".pick").value,
+      price: node.querySelector(".price input").value,
+      result: node.dataset.result,
+    }));
+  }
+
+  function pct(x) {
+    if (x <= 0) return "0%";
+    if (x < 0.001) return "<0.1%";
+    return (x * 100).toFixed(x < 0.1 ? 2 : 1) + "%";
+  }
+
+  function render() {
+    const stake = Math.max(0, parseFloat(stakeInput.value) || 0);
+    const priced = [];
+    let bad = 0;
+    [...list.children].forEach((node) => {
+      const input = node.querySelector(".price input");
+      const conv = node.querySelector(".conv");
+      const text = input.value.trim();
+      const dec = parsePrice(text);
+      if (!text) {
+        input.removeAttribute("aria-invalid");
+        conv.className = "conv";
+        conv.textContent = "Enter a price to include this leg";
+        bad++;
+        return;
+      }
+      if (dec === null) {
+        input.setAttribute("aria-invalid", "true");
+        conv.className = "conv err";
+        conv.textContent = "Not a price. Use -110, +450, 5.5 or 9/2.";
+        bad++;
+        return;
+      }
+      input.removeAttribute("aria-invalid");
+      conv.className = "conv";
+      conv.textContent = `${american(dec)}  ·  ${dec.toFixed(2)}  ·  ${pct(1 / dec)} implied`;
+      priced.push({ price: dec, result: node.dataset.result });
+    });
+
+    const status = $("status");
+    if (!priced.length) {
+      status.dataset.s = "open";
+      $("status-text").textContent = "No legs priced";
+      $("status-legs").textContent = "";
+      $("payout").textContent = money(0);
+      $("profit").textContent = "Add a price to any leg.";
+      ["f-american", "f-decimal", "f-chance"].forEach((id) => ($(id).textContent = "–"));
+      return;
+    }
+
+    const r = settle(priced, stake);
+    status.dataset.s = r.status;
+    $("status-text").textContent = { open: "Open", won: "Winner", lost: "Lost", refund: "Refund" }[r.status];
+    $("status-legs").textContent = r.status === "open"
+      ? `${r.open} of ${r.legs} to go`
+      : `${r.legs} leg${r.legs === 1 ? "" : "s"}`;
+    $("payout-label").textContent = {
+      open: r.open === r.legs ? "Pays if every leg wins" : "Pays if the open legs win",
+      won: "Pays", lost: "Pays", refund: "Stake back",
+    }[r.status];
+    $("payout").textContent = money(r.payout);
+    $("profit").textContent = (r.profit >= 0 ? "Profit " + money(r.profit) : "Loss " + money(-r.profit)) +
+      (bad ? ` · ${bad} leg${bad === 1 ? "" : "s"} left out` : "");
+    $("f-american").textContent = r.legs ? american(r.price) : "–";
+    $("f-decimal").textContent = r.legs ? r.price.toFixed(2) : "–";
+    $("f-chance-label").textContent = r.status === "open" && r.open < r.legs ? "Chance the rest hit" : "Implied chance";
+    $("f-chance").textContent = r.status === "open" ? pct(r.chance) : "–";
+  }
+
+  function slipText() {
+    const lines = readLegs().map((leg, i) => {
+      const dec = parsePrice(leg.price);
+      const price = dec ? american(dec) : leg.price || "?";
+      const mark = { open: "", won: " ✅", push: " ↩️ push", lost: " ❌" }[leg.result];
+      return `${i + 1}. ${leg.pick || "Leg " + (i + 1)} (${price})${mark}`;
+    });
+    return [...lines, `Stake ${$("stake").value ? money(parseFloat($("stake").value) || 0) : "$0.00"} · Odds ${$("f-american").textContent} · ${$("payout-label").textContent}: ${$("payout").textContent}`].join("\n");
+  }
+
+  function update() { render(); save(); }
+
+  function dropExampleNote() { $("example-note").hidden = true; }
+
+  list.addEventListener("input", () => { dropExampleNote(); update(); });
+  list.addEventListener("click", (e) => {
+    const node = e.target.closest(".leg");
+    if (!node) return;
+    if (e.target.matches(".results button")) { setResult(node, e.target.dataset.r); dropExampleNote(); update(); }
+    else if (e.target.matches(".remove")) {
+      node.remove();
+      if (!list.children.length) addLeg();
+      dropExampleNote();
+      update();
+    }
+  });
+  stakeInput.addEventListener("input", update);
+  $("add").addEventListener("click", () => { addLeg(undefined, true); dropExampleNote(); update(); });
+  $("clear").addEventListener("click", () => {
+    list.replaceChildren();
+    addLeg(undefined, true);
+    addLeg();
+    dropExampleNote();
+    update();
+  });
+  $("copy").addEventListener("click", () => {
+    const text = slipText();
+    const box = $("slip-text");
+    const done = () => { $("copied").textContent = "Copied"; setTimeout(() => ($("copied").textContent = ""), 2000); };
+    const fallback = () => { box.value = text; box.hidden = false; box.select(); $("copied").textContent = "Select and copy below"; };
+    try {
+      navigator.clipboard.writeText(text).then(() => { box.hidden = true; done(); }, fallback);
+    } catch (e) { fallback(); }
+  });
+
+  const start = load();
+  stakeInput.value = start.stake || "10";
+  start.legs.forEach((leg) => addLeg(leg));
+  $("example-note").hidden = !start.example;
+  render();
+})();
+</script>
+</body>
+</html>

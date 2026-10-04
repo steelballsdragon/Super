@@ -360,9 +360,18 @@ It's built to keep running unattended:
   test with all 15 leagues followed), old entries in the saved state are pruned hourly, and saved files are written
   atomically and flushed to disk. A damaged file is set aside (`*.damaged-<time>`) so the bot still starts.
 
+## Parlay calculator (web)
+
+`web/index.html` is a standalone page for pricing a parlay by hand. Open it in any browser; it needs no server or
+install. Enter each leg's price as American (`-110`, `+450`), decimal (`5.5`) or fractional (`9/2`). It shows each leg
+in all three formats with its implied chance, plus the ticket's combined odds and payout for your stake. Mark legs as
+**Won**, **Push** or **Lost** as they settle: a push comes off the ticket and one loss loses the bet, the same rules the
+bot uses to grade `/bet`. **Copy slip** puts the ticket on your clipboard as text. Your slip is saved in your browser.
+
 ## Tests
 
 ```bash
 pip install pytest
 python -m pytest
+node --test web/odds.test.js   # the parlay calculator's odds math
 ```
