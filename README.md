@@ -48,6 +48,24 @@ Results are reported correctly in tricky cases too: penalty shootouts (*Paraguay
 extra time, NHL shootouts, and postponed, suspended or cancelled games (posted as **Postponed** etc., never as a result).
 When a game ends on a score, such as a walk-off home run, the winning play is posted before the final result.
 
+### Player stats
+
+`/stats` shows the standout players of a live or finished game from ESPN's box score, and every half-time and
+final post has a **📊 Player stats** button (only the person who taps it sees the stats).
+
+| Command | What you get |
+| --- | --- |
+| `/stats team:Islanders` | That team's game today |
+| `/stats game:` | Pick from today's started games (live score shown in the suggestions) |
+| `/stats` | The game in progress, when the channel's league has just one |
+
+- **NBA:** points, rebounds, assists, made threes and minutes for each team's top scorers.
+- **NHL:** goals, assists and shots on goal, and each goalie's saves.
+- **NFL:** the quarterback, top rushers and receivers, sacks and interceptions.
+- **MLB:** hitters with hits, home runs, RBIs and runs; the pitchers' innings, hits, earned runs and strikeouts.
+- **Soccer:** goals, assists, shots (on target) and cards for each player, keeper saves, and team possession,
+  shots and corners.
+
 ### Betting research
 
 Everything is one command, `/research [league] [team] [parlay]` (the league can be left out in a channel that follows one):

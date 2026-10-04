@@ -170,7 +170,7 @@ def test_refollowing_ball_by_ball_starts_from_the_current_ball(tmp_path):
     following = [Subscription(1, "cricket", None, ball_by_ball=True)]
     sent = []
 
-    async def deliver(channel_id, game, kind, embed=None, content=None):
+    async def deliver(channel_id, game, kind, embed=None, content=None, view=None):
         sent.append(content)
     bot._deliver = deliver
     g = game()

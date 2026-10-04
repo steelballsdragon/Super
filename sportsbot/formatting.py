@@ -49,6 +49,8 @@ def _goal_line(game: Game, goal: Goal) -> str:
         line += f"\n🅰️ Assist: {goal.assist}"
     elif goal.fanduel:
         line += f"\n🅰️ FanDuel assist: {goal.fanduel} ({goal.fanduel_how})"
+    elif goal.assist is None and not goal.own_goal:
+        line += "\n🅰️ Assist: checking…"  # the post is edited when ESPN publishes it
     return line
 
 
