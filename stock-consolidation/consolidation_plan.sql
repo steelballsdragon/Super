@@ -18,7 +18,8 @@
     - only Prtnum, Stoloc, Curqvl, Fp Available, Maxqvl and Typcod are used;
     - rows with 0 or a negative current qty, max qty or available capacity are
       removed (available capacity only while @RemoveNoCapacity = 1);
-    - locations whose max qty is over @MaxLocationQty (23) are removed;
+    - only locations whose max qty is from @MinLocationQty (9) to
+      @MaxLocationQty (23) are kept;
     - the same item and location listed twice is kept once (largest values).
 
   Planning (Stock_Consolidation.xlsm applies exactly the same rules):
@@ -45,7 +46,8 @@ SET NOCOUNT ON;
 --------------------------------------------------------------------------------
 -- SETTINGS
 --------------------------------------------------------------------------------
-DECLARE @MaxLocationQty   decimal(18,4) = 23;   -- only locations whose max qty is at most this
+DECLARE @MinLocationQty   decimal(18,4) = 9;    -- only locations whose max qty is at least this
+DECLARE @MaxLocationQty   decimal(18,4) = 23;   -- ... and at most this
 DECLARE @RemoveNoCapacity bit           = 1;    -- 1 = also remove rows with 0 / negative available capacity
 DECLARE @SameTypeOnly     bit           = 0;    -- 1 = only move between locations of the same type (Typcod)
 DECLARE @AllowSplit       bit           = 1;    -- 1 = a location may be emptied into several locations
@@ -142,7 +144,7 @@ SELECT  UPPER(x.item) COLLATE Latin1_General_BIN2 AS item_key,
         CASE WHEN x.curqvl IS NULL OR x.curqvl <= 0
                OR x.maxqvl IS NULL OR x.maxqvl <= 0
                OR (@RemoveNoCapacity = 1 AND (x.avail IS NULL OR x.avail <= 0)) THEN 1
-             WHEN x.maxqvl > @MaxLocationQty                                    THEN 2
+             WHEN x.maxqvl > @MaxLocationQty OR x.maxqvl < @MinLocationQty      THEN 2
              WHEN EXISTS (SELECT 1 FROM @ExcludedType AS e
                           WHERE e.type_key = UPPER(x.typ) COLLATE Latin1_General_BIN2) THEN 3
         END AS dropped
@@ -361,7 +363,7 @@ ORDER BY n.seq;
 -- 3: Summary
 SELECT  (SELECT COUNT(*) FROM #tagged)                                                AS rows_read,
         (SELECT COUNT(*) FROM #tagged WHERE dropped = 1)                              AS removed_zero_or_negative,
-        (SELECT COUNT(*) FROM #tagged WHERE dropped = 2)                              AS removed_over_max_qty,
+        (SELECT COUNT(*) FROM #tagged WHERE dropped = 2)                              AS removed_max_qty_out_of_range,
         (SELECT COUNT(*) FROM #tagged WHERE dropped = 3)                              AS removed_ignored_type,
         (SELECT COUNT(*) FROM #work)                                                  AS rows_kept,
         (SELECT COUNT(DISTINCT item_key) FROM #work WHERE src_order IS NOT NULL)      AS items_in_multiple_locations,

@@ -22,7 +22,7 @@
 ' Cleaning:
 '   - rows with 0 or a negative current qty, max qty or available capacity
 '     are removed (available capacity only while that setting is Yes);
-'   - locations whose max qty is over the limit (23) are removed;
+'   - only locations whose max qty is from 9 to 23 are kept;
 '   - the same item and location listed twice is kept once (largest values).
 '
 ' Planning:
@@ -48,7 +48,8 @@ Option Compare Binary
 
 ' Settings used when the file has no Start sheet with settings (for example
 ' when you paste this code into your own file). Change them here.
-Private Const DEFAULT_MAX_LOCATION_QTY As Double = 23       ' only locations with max qty up to this
+Private Const DEFAULT_MIN_LOCATION_QTY As Double = 9        ' only locations with max qty from this ...
+Private Const DEFAULT_MAX_LOCATION_QTY As Double = 23       ' ... up to this
 Private Const DEFAULT_REMOVE_NO_CAPACITY As String = "Yes"  ' remove rows with 0 / negative available capacity
 Private Const DEFAULT_SAME_TYPE_ONLY As String = "No"       ' only move within the same location type
 Private Const DEFAULT_ALLOW_SPLIT As String = "Yes"         ' allow emptying a location into several
@@ -75,6 +76,7 @@ Private Const REASON_SINGLE As String = "No single location of this item has roo
 
 ' Settings
 Private mBook As Workbook               ' the workbook holding the report and the results
+Private mMinLocationQty As Double
 Private mMaxLocationQty As Double
 Private mRemoveNoCapacity As Boolean
 Private mSameTypeOnly As Boolean
@@ -86,7 +88,7 @@ Private mShowMessages As Boolean
 ' Cleaning counts
 Private statRead As Long
 Private statZero As Long
-Private statOverMax As Long
+Private statOutOfRange As Long
 Private statType As Long
 
 ' Cleaned item-location rows (1 To rowCount), sorted by item then location
@@ -204,6 +206,7 @@ End Sub
 '------------------------------------------------------------------------------
 Private Sub LoadSettings()
     Dim part As Variant, t As String
+    mMinLocationQty = SettingNumber("MinLocationQty", DEFAULT_MIN_LOCATION_QTY)
     mMaxLocationQty = SettingNumber("MaxLocationQty", DEFAULT_MAX_LOCATION_QTY)
     mRemoveNoCapacity = IsYes(SettingText("RemoveNoCapacity", DEFAULT_REMOVE_NO_CAPACITY))
     mSameTypeOnly = IsYes(SettingText("SameTypeOnly", DEFAULT_SAME_TYPE_ONLY))
@@ -254,7 +257,7 @@ Private Function LoadRawData(ByVal ws As Worksheet) As Boolean
     rowCount = 0
     statRead = 0
     statZero = 0
-    statOverMax = 0
+    statOutOfRange = 0
     statType = 0
 
     If lastRow >= 2 Then
@@ -288,7 +291,7 @@ Private Function LoadRawData(ByVal ws As Worksheet) As Boolean
                     dropped = 1
                 ElseIf mRemoveNoCapacity And avail <= 0 Then
                     dropped = 1
-                ElseIf mx > mMaxLocationQty Then
+                ElseIf mx > mMaxLocationQty Or mx < mMinLocationQty Then
                     dropped = 2
                 ElseIf Lookup(mExcluded, UCase$(typ)) > 0 Then
                     dropped = 3
@@ -299,7 +302,7 @@ Private Function LoadRawData(ByVal ws As Worksheet) As Boolean
                 Case 1
                     statZero = statZero + 1
                 Case 2
-                    statOverMax = statOverMax + 1
+                    statOutOfRange = statOutOfRange + 1
                 Case 3
                     statType = statType + 1
                 Case Else
@@ -645,7 +648,8 @@ Private Sub WriteCleanData()
     Set ws = OutputSheet("shtClean", "Clean Data")
     StartSheet ws, "Clean Data", "Rows read: " & statRead & _
                "   |   Removed - zero or negative qty/capacity: " & statZero & _
-               "   |   Removed - max qty over " & FormatQty(mMaxLocationQty) & ": " & statOverMax & _
+               "   |   Removed - max qty outside " & FormatQty(mMinLocationQty) & "-" & _
+               FormatQty(mMaxLocationQty) & ": " & statOutOfRange & _
                "   |   Removed - ignored type: " & statType & _
                "   |   Kept: " & rowCount
     WriteHeaders ws, CleanHeaders()
@@ -923,7 +927,7 @@ Private Function SettingsLine() As String
     ex = mExcludeText
     If Len(ex) = 0 Then ex = "none"
     SettingsLine = "Built " & Format$(Now, "dd-mmm-yyyy hh:mm") & _
-                   "   |   Max qty up to " & FormatQty(mMaxLocationQty) & _
+                   "   |   Max qty " & FormatQty(mMinLocationQty) & " to " & FormatQty(mMaxLocationQty) & _
                    "   |   Same type only: " & YesNo(mSameTypeOnly) & _
                    "   |   Split moves: " & YesNo(mAllowSplit) & _
                    "   |   Ignored types: " & ex

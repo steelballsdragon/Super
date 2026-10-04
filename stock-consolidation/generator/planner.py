@@ -16,14 +16,14 @@ def _text(v):
     return "" if v is None else str(v).strip(" ")
 
 
-def clean(raw, max_location_qty=23, remove_no_capacity=True, exclude_types=""):
+def clean(raw, max_location_qty=23, remove_no_capacity=True, exclude_types="", min_location_qty=9):
     """Filter and tidy the raw report.
 
     raw: iterable of (item, location, current_qty, available_capacity, max_qty, location_type)
     Returns (rows, stats); rows are dicts sorted by item, then location.
     """
     excluded = {t.strip(" ").upper() for t in exclude_types.split(",") if t.strip(" ")}
-    stats = {"rows_read": 0, "removed_zero_or_negative": 0, "removed_over_max_qty": 0,
+    stats = {"rows_read": 0, "removed_zero_or_negative": 0, "removed_max_qty_out_of_range": 0,
              "removed_ignored_type": 0, "rows_kept": 0}
     merged = {}
     for item, loc, qty, avail, mx, typ in raw:
@@ -37,8 +37,8 @@ def clean(raw, max_location_qty=23, remove_no_capacity=True, exclude_types=""):
                 or (remove_no_capacity and (avail is None or avail <= 0))):
             stats["removed_zero_or_negative"] += 1
             continue
-        if mx > max_location_qty:
-            stats["removed_over_max_qty"] += 1
+        if mx > max_location_qty or mx < min_location_qty:
+            stats["removed_max_qty_out_of_range"] += 1
             continue
         if typ.upper() in excluded:
             stats["removed_ignored_type"] += 1
@@ -151,8 +151,8 @@ def clean_rows_out(rows):
 
 
 def run(raw, max_location_qty=23, remove_no_capacity=True, same_type_only=False,
-        allow_split=True, exclude_types=""):
-    rows, stats = clean(raw, max_location_qty, remove_no_capacity, exclude_types)
+        allow_split=True, exclude_types="", min_location_qty=9):
+    rows, stats = clean(raw, max_location_qty, remove_no_capacity, exclude_types, min_location_qty)
     moves, not_moved, summary = plan(rows, same_type_only, allow_split)
     return clean_rows_out(rows), stats, moves, not_moved, summary
 
@@ -160,7 +160,7 @@ def run(raw, max_location_qty=23, remove_no_capacity=True, same_type_only=False,
 if __name__ == "__main__":
     import demo_data as d
     cl, st, mv, nm, sm = run(d.RAW, d.MAX_LOCATION_QTY, d.REMOVE_NO_CAPACITY, d.SAME_TYPE_ONLY,
-                             d.ALLOW_SPLIT, d.EXCLUDE_TYPES)
+                             d.ALLOW_SPLIT, d.EXCLUDE_TYPES, d.MIN_LOCATION_QTY)
     print(st)
     for m in mv:
         print(m)

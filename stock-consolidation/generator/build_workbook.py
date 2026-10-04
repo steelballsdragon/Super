@@ -50,7 +50,7 @@ FAIL_KEYS = ["item_number", "location", "location_type", "quantity", "room_elsew
 RULES = [
     "Only Prtnum, Stoloc, Max of Curqvl, Max of Fp Available, Max of Maxqvl and Typcod are used.",
     "Rows with 0 or a negative current qty or max qty are removed (and available capacity, if set above).",
-    "Locations whose max qty is over the limit above are removed.",
+    "Only locations whose max qty is within the limits above (9 to 23) are kept.",
     "Only items sitting in 2 or more locations are looked at; locations are emptied smallest quantity first.",
     "Stock only goes to locations that already hold the same item.",
     "A location is only planned if it can be emptied completely:",
@@ -81,15 +81,16 @@ def qty_text(v):
 
 
 def settings_line(built):
-    return (f"Built {built}   |   Max qty up to {qty_text(d.MAX_LOCATION_QTY)}   |   "
+    return (f"Built {built}   |   Max qty {qty_text(d.MIN_LOCATION_QTY)} to {qty_text(d.MAX_LOCATION_QTY)}   |   "
             f"Same type only: {yn(d.SAME_TYPE_ONLY)}   |   Split moves: {yn(d.ALLOW_SPLIT)}   |   "
             f"Ignored types: {d.EXCLUDE_TYPES or 'none'}")
 
 
 def stats_line(stats):
     return (f"Rows read: {stats['rows_read']}   |   Removed - zero or negative qty/capacity: "
-            f"{stats['removed_zero_or_negative']}   |   Removed - max qty over {qty_text(d.MAX_LOCATION_QTY)}: "
-            f"{stats['removed_over_max_qty']}   |   Removed - ignored type: {stats['removed_ignored_type']}"
+            f"{stats['removed_zero_or_negative']}   |   Removed - max qty outside "
+            f"{qty_text(d.MIN_LOCATION_QTY)}-{qty_text(d.MAX_LOCATION_QTY)}: "
+            f"{stats['removed_max_qty_out_of_range']}   |   Removed - ignored type: {stats['removed_ignored_type']}"
             f"   |   Kept: {stats['rows_kept']}")
 
 
@@ -159,7 +160,8 @@ def build():
     sql_demo.write_sql()
 
     clean, stats, moves, not_moved, summary = planner.run(
-        d.RAW, d.MAX_LOCATION_QTY, d.REMOVE_NO_CAPACITY, d.SAME_TYPE_ONLY, d.ALLOW_SPLIT, d.EXCLUDE_TYPES)
+        d.RAW, d.MAX_LOCATION_QTY, d.REMOVE_NO_CAPACITY, d.SAME_TYPE_ONLY, d.ALLOW_SPLIT, d.EXCLUDE_TYPES,
+        d.MIN_LOCATION_QTY)
     built = datetime.datetime.now().strftime("%d-%b-%Y %H:%M")
 
     vba = build_vba_project([("modConsolidation", BAS.read_text(encoding="cp1252"))],
@@ -205,7 +207,8 @@ def build():
     label = fmt(font_color="#262626", valign="vcenter")
     inp = fmt(bg_color=AMBER, border=1, border_color="#BF9000", align="center", valign="vcenter", bold=True)
     settings = [
-        ("MaxLocationQty", "Only locations with max qty (Maxqvl) up to", d.MAX_LOCATION_QTY, None),
+        ("MinLocationQty", "Only locations with max qty (Maxqvl) from", d.MIN_LOCATION_QTY, None),
+        ("MaxLocationQty", "... up to", d.MAX_LOCATION_QTY, None),
         ("RemoveNoCapacity", "Remove rows with 0 / negative available capacity", yn(d.REMOVE_NO_CAPACITY), "yn"),
         ("SameTypeOnly", "Only move within the same location type (Typcod)", yn(d.SAME_TYPE_ONLY), "yn"),
         ("AllowSplit", "Allow emptying a location into several locations", yn(d.ALLOW_SPLIT), "yn"),
@@ -224,20 +227,20 @@ def build():
         if kind == "yn":
             s.data_validation(row, 2, row, 2, {"validate": "list", "source": ["Yes", "No"]})
 
-    s.write("B19", "Status", h2)
-    s.write("C19", "", h2)
-    s.write("B20", "Showing the result for the sample rows. Paste your own report into Raw Data and press "
+    s.write("B20", "Status", h2)
+    s.write("C20", "", h2)
+    s.write("B21", "Showing the result for the sample rows. Paste your own report into Raw Data and press "
                    "Build Consolidation Plan.", fmt(italic=True, font_color=GREY_TEXT))
-    wb.define_name("LastRun", "=Start!$B$20")
+    wb.define_name("LastRun", "=Start!$B$21")
 
-    s.write("B22", "How it works", h2)
-    s.write("C22", "", h2)
+    s.write("B23", "How it works", h2)
+    s.write("C23", "", h2)
     n_rule = 0
     for i, rule in enumerate(RULES):
         if not rule.startswith(" "):
             n_rule += 1
             rule = f"{n_rule}.  {rule}"
-        s.write(22 + i, 1, rule, fmt(font_color=GREY_TEXT, font_size=9))
+        s.write(23 + i, 1, rule, fmt(font_color=GREY_TEXT, font_size=9))
 
     s.insert_button("E5", {"macro": "BuildConsolidationPlan", "caption": "Build Consolidation Plan",
                            "width": 210, "height": 46})

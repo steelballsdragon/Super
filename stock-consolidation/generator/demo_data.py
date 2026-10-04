@@ -5,7 +5,8 @@ these rows, so they produce the same consolidation plan.
 """
 
 # Default settings (the SQL script and the workbook start with these)
-MAX_LOCATION_QTY = 23        # only locations whose max qty is at most this
+MIN_LOCATION_QTY = 9         # only locations whose max qty is at least this
+MAX_LOCATION_QTY = 23        # ... and at most this
 REMOVE_NO_CAPACITY = True    # drop rows whose available capacity is 0 or negative
 SAME_TYPE_ONLY = False       # only move between locations of the same type
 ALLOW_SPLIT = True           # a location may be emptied into several locations

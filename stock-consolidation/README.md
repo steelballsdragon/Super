@@ -53,7 +53,7 @@ Columns used from the report: **Prtnum** (item), **Stoloc** (location),
 ignored.
 
 Rows are removed when current qty, max qty or available capacity is 0 or
-negative, and locations with a max qty over 23 are removed.
+negative, and only locations with a max qty from 9 to 23 are kept.
 
 ## How the moves are chosen
 
