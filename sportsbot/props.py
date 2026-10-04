@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 
 from .espn import Game
@@ -415,6 +415,66 @@ def apply_matchup(trends: list[Trend], game: Game, matchup: Matchup | None, bar:
     return sorted(out, key=lambda t: t.probability, reverse=True)
 
 
+LINEUP_MIN_STARTERS = 9  # a team's lineup counts as announced once ESPN marks this many starters (soccer 11, MLB 9)
+
+
+@dataclass(frozen=True)
+class Lineup:
+    """A team's announced lineup: who starts, and everyone named in the matchday squad."""
+    starters: frozenset[str]
+    squad: frozenset[str]
+    team: str = ""  # abbreviation
+
+
+def lineups_from(summary: dict) -> dict[str, Lineup]:
+    """Each team's lineup (by team id), for teams whose lineup is out. Soccer XIs appear on ESPN about an hour
+    before kickoff and MLB batting orders a few hours before; other sports have none before the game."""
+    out = {}
+    for roster in summary.get("rosters") or []:
+        players = roster.get("roster") or []
+        starters = frozenset(str((p.get("athlete") or {}).get("id")) for p in players if p.get("starter"))
+        if len(starters) >= LINEUP_MIN_STARTERS:
+            squad = frozenset(str((p.get("athlete") or {}).get("id")) for p in players)
+            team = roster.get("team") or {}
+            out[str(team.get("id"))] = Lineup(starters, squad, team.get("abbreviation", ""))
+    return out
+
+
+@dataclass(frozen=True)
+class Availability:
+    """Who can play in a game: injured players are out, and once a team's lineup is announced only its
+    starters count (a substitute might play 20 minutes, or not at all)."""
+    injured: frozenset[str] = frozenset()  # names
+    lineups: dict = field(default_factory=dict)  # team id -> Lineup, for teams whose lineup is out
+
+    def allows(self, team_id: str, player_id: str, name: str) -> bool:
+        if name in self.injured:
+            return False
+        lineup = self.lineups.get(str(team_id))
+        return lineup is None or str(player_id) in lineup.starters
+
+    def announced(self, team: str) -> bool:
+        """Whether this team's lineup is out (team: abbreviation)."""
+        return any(lineup.team == team for lineup in self.lineups.values())
+
+    def status(self, player_id: str, name: str, team: str = "") -> str:
+        """'starts', 'bench' or 'out' (not in the squad) once the player's lineup is out; else 'injured' or
+        'unknown'."""
+        pid = str(player_id)
+        for lineup in self.lineups.values():
+            if pid in lineup.starters:
+                return "starts"
+            if pid in lineup.squad:
+                return "bench"
+        if self.announced(team) or len(self.lineups) >= 2:
+            return "out"  # the lineup is out and the player isn't in the squad
+        return "injured" if name in self.injured else "unknown"
+
+
+def availability(summary: dict) -> Availability:
+    return Availability(frozenset(injured_names(summary)), lineups_from(summary))
+
+
 class PropsClient:
     """Fetches key players and game logs (cached), and builds trends for a game."""
 
@@ -546,14 +606,14 @@ class PropsClient:
         games, pitcher = _slim(parse_gamelog(data), url)
         return games, pitcher, seasons_from(data)
 
-    async def longshot_trends(self, game: Game, shot: Longshot, injured: set[str] = frozenset(),
+    async def longshot_trends(self, game: Game, shot: Longshot, available: Availability = Availability(),
                               band: tuple[float, float] | None = None) -> list[Trend]:
         """Each player in the round robin's pool, at the highest line inside its price range."""
         low, high = band or (shot.low, shot.high)
         league = game.league
 
         async def one(team, opponent, aid, name):
-            if name in injured:
+            if not available.allows(team.id, aid, name):
                 return []
             try:
                 games, _ = await self.player_games(league.path, aid)
@@ -572,14 +632,14 @@ class PropsClient:
         found = [t for result in await asyncio.gather(*jobs) for t in result]
         return sorted(found, key=lambda t: t.probability, reverse=True)
 
-    async def game_trends(self, game: Game, injured: set[str] = frozenset(), bigger: bool = False,
+    async def game_trends(self, game: Game, available: Availability = Availability(), bigger: bool = False,
                           scorers: bool = False) -> list[Trend]:
         """Every key player's most likely lines for this game, most likely first."""
         league = game.league
         trends: list[Trend] = []
 
         async def one(team, opponent, aid, name):
-            if name in injured:
+            if not available.allows(team.id, aid, name):
                 return []
             try:
                 games, pitcher = await self.player_games(league.path, aid)
@@ -643,12 +703,13 @@ class Leg:
     path: str = ""  # ESPN path for this game, e.g. "football/nfl" or "cricket/24289"
     player: str = ""  # the player's name, for matching match commentary
     team: str = ""  # the player's team (abbreviation)
+    start: str = ""  # the game's start (ISO), for the lineup check before it
 
 
 def trend_legs(game: Game, trends: list[Trend]) -> list[Leg]:
     label = f"{game.away.name} @ {game.home.name}"
     return [Leg(t.pick, t.probability, t.evidence, label, game.id, t.player_id, "prop", t.prop.stat, t.line,
-                None, game.league_key, game.path, t.player, t.team) for t in trends]
+                None, game.league_key, game.path, t.player, t.team, game.start) for t in trends]
 
 
 def moneyline_leg(game: Game, chances: dict[str, float] | None, odds, underdog: bool = False) -> Leg | None:
@@ -663,7 +724,7 @@ def moneyline_leg(game: Game, chances: dict[str, float] | None, odds, underdog: 
     price = odds.home_ml if team is game.home else odds.away_ml
     return Leg(f"{team.name} Moneyline", chances[tid], f"{odds.provider} {price} → {chances[tid]:.0%} implied (no-vig)",
                f"{game.away.name} @ {game.home.name}", game.id, None, "moneyline", None, None, tid,
-               game.league_key, game.path)
+               game.league_key, game.path, start=game.start)
 
 
 @dataclass(frozen=True)

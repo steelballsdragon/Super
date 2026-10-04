@@ -28,7 +28,7 @@ from .odds import OddsBook, grade_text, line_text
 from .cricket_props import CricketHistory
 from .parlays import ParlayBook, record_field, settle
 from .props import (LONGSHOTS, MAX_LEGS, MAX_LEGS_PER_GAME, TARGETS, PropsClient, apply_matchup, build_to_target,
-                    chance_at_least, combined, expected_goals, injured_names, moneyline_leg, parlay_embed, pick_round_robin, round_robin_embed,
+                    chance_at_least, combined, availability, expected_goals, moneyline_leg, parlay_embed, pick_round_robin, round_robin_embed,
                     scorer_lines, trend_legs, trends_embed)
 from .research import LeanBook, leans, market_chances, parse_research, picks_embed, record_embed, report_embed
 from .schedule import COMMON_TIMEZONES, games_on, today
@@ -61,6 +61,8 @@ WEEK_CACHE_SECONDS = 600
 GAME_INFO_SECONDS = 120
 PARLAY_GAMES = 8  # parlays look ahead (up to a week) until there are at least this many games to build from
 SETTLE_SECONDS = 60  # how often finished parlay legs are graded
+LINEUP_CHECK_SECONDS = 75 * 60  # open slips' players are checked against lineups and injuries this long before kickoff
+LINEUP_SPORTS = ("soccer", "baseball")  # sports whose starting lineups ESPN has before the game
 PRUNE_SECONDS = 3600  # how often old state entries are cleaned out
 LOOP_RESTART_SECONDS = 5
 # The daily schedule goes out once a day, at the chosen hour or within the next
@@ -272,6 +274,7 @@ class SportsBot(discord.Client):
             await self._guarded("grading parlays", settle(self, self.parlays))
             await self._guarded("grading leans", self.leans.settle_pending(self))
         await self._guarded("reminders", self._send_reminders())
+        await self._guarded("lineup checks", self._check_lineups())
         await self._guarded("daily schedules", self._post_daily_schedules())
         if time.monotonic() - self._last_prune >= PRUNE_SECONDS:
             self._last_prune = time.monotonic()
@@ -282,6 +285,7 @@ class SportsBot(discord.Client):
         release_memory()
         self._prune_threads()
         self._prune_reminders()
+        self._prune_lineup_checks()
         self.odds.prune()
         now = time.time()
         self.result_lookups = {k: t for k, t in self.result_lookups.items() if t > now}
@@ -482,9 +486,9 @@ class SportsBot(discord.Client):
         within the chances for the payout picked (Lotto: the +450 to +1500 kind)."""
         shot = LONGSHOTS[kind]
         low, high = shot.band(payout)
-        r, injured = await self._game_info(game)
+        r, available = await self._game_info(game)
         # A little either side of the range at first: the matchup can move players in or out of it.
-        trends = await self.props.longshot_trends(game, shot, injured, (low, high))
+        trends = await self.props.longshot_trends(game, shot, available, (low, high))
         if game.league.sport in ("soccer", "hockey"):  # assists come and go with the team's goals
             matchup = expected_goals(game, market_chances(r), r.odds.total if r.odds else None, r.form)
             trends = apply_matchup(trends, game, matchup, bar=0.0)
@@ -493,23 +497,88 @@ class SportsBot(discord.Client):
     async def game_props(self, game, bigger: bool = False, underdog: bool = False, scorers: bool = False):
         """Player trends and a moneyline leg (the favorite's, or with underdog=True the underdog's) for one game.
         With scorers=True, the trends are goalscorer and assist bets only."""
-        r, injured = await self._game_info(game)
+        r, available = await self._game_info(game)
         if game.league.sport == "cricket":
             trends = await self.cricket.trends(game, bigger)
         else:
-            trends = await self.props.game_trends(game, injured, bigger, scorers)
+            trends = await self.props.game_trends(game, available, bigger, scorers)
             if scorers:  # who's likely to score depends on the matchup, not just the player's record
                 matchup = expected_goals(game, market_chances(r), r.odds.total if r.odds else None, r.form)
                 trends = apply_matchup(trends, game, matchup)
         return trends, moneyline_leg(game, market_chances(r), r.odds, underdog)
 
     async def _game_info(self, game):
-        """A game's ESPN summary, boiled down to the research data and who's injured. Kept for a couple of
-        minutes: one parlay or report looks at each game several times (normal, longer and goalscorer lines)."""
+        """A game's ESPN summary, boiled down to the research data and who can play (injuries, and the starting
+        lineups once they're out). Kept for a couple of minutes: one parlay or report looks at each game several
+        times (normal, longer and goalscorer lines), and lineups drop about an hour before kickoff."""
         async def fetch():
             summary = await self.espn.summary(game.path or LEAGUES[game.league_key].path, game.id)
-            return parse_research(summary, game), frozenset(injured_names(summary))
+            return parse_research(summary, game), availability(summary)
         return await self.props.cached(f"game-info:{game.league_key}:{game.id}", GAME_INFO_SECONDS, fetch)
+
+    async def _availability(self, league_key: str, game_id: str, path: str = ""):
+        """Who can play in a game, for checking a slip's players before kickoff."""
+        async def fetch():
+            return availability(await self.espn.summary(path or LEAGUES[league_key].path, game_id))
+        return await self.props.cached(f"available:{league_key}:{game_id}", GAME_INFO_SECONDS, fetch)
+
+    async def _check_lineups(self, now: float | None = None) -> None:
+        """In the last LINEUP_CHECK_SECONDS before kickoff, checks every open slip's players: as each team's
+        lineup comes out (soccer about an hour before, MLB batting orders), says which of its players start;
+        in any sport, says if a player is ruled out on the injury report. Each thing is said once."""
+        now = now or time.time()
+        for parlay in self.parlays.pending():
+            games: dict[tuple, list[dict]] = {}
+            for leg in parlay["legs"]:
+                start = _iso_seconds(leg.get("start", ""))
+                if (leg["status"] == "pending" and leg.get("player_id") and start is not None
+                        and 0 < start - now <= LINEUP_CHECK_SECONDS):
+                    games.setdefault((leg["league"], leg["game_id"], leg.get("path", "")), []).append(leg)
+            for (league, gid, path), legs in games.items():
+                start = _iso_seconds(legs[0]["start"])
+                key = f"{parlay['id']}:{gid}"
+                done = self.records.get("lineup_checks", key) or {"at": now, "said": []}
+                try:
+                    available = await self._availability(league, gid, path)
+                except Exception:
+                    log.warning("Couldn't check lineups for %s %s", league, gid, exc_info=True)
+                    continue
+                said = list(done["said"])
+                news, ruled_out = [], []
+                for leg in legs:
+                    team = leg.get("team", "")
+                    status = available.status(leg["player_id"], leg.get("player", ""), team)
+                    if available.announced(team):
+                        if f"lineups:{team}" not in done["said"]:  # this team's lineup just came out
+                            news.append((leg, status))
+                            said.append(f"lineups:{team}")
+                    elif status == "injured" and f"injured:{leg['player_id']}" not in said:
+                        ruled_out.append((leg, status))
+                        said.append(f"injured:{leg['player_id']}")
+                said = list(dict.fromkeys(said))
+                lines = [lineup_line(leg, status) for leg, status in news + ruled_out]
+                when = f"{legs[0]['game']} (kickoff in {_minutes(start - now)})"
+                if news:
+                    problems = sum(status != "starts" for _, status in news + ruled_out)
+                    head = (f"📋 **Lineups are out** for {when}: "
+                            + ("they all start ✅" if not problems else
+                               f"**{problems} of your picks {'is' if problems == 1 else 'are'} not starting**: "
+                               "swap or drop them before kickoff"))
+                else:
+                    head = f"🩹 **Pick ruled out** for {when}"
+                if not lines:
+                    continue
+                self.records.set("lineup_checks", key, {"at": done["at"], "said": said})
+                bettors = sorted({b["user"] for b in self.bets.bets() if b["parlay"] == parlay["id"]})
+                text = "\n".join([f"{head} · your {parlay['style']} slip:", *lines]
+                                  + ([" ".join(f"<@{u}>" for u in bettors)] if bettors else []))
+                await self._send(parlay["channel"], content=clip(text, MESSAGE))
+
+    def _prune_lineup_checks(self) -> None:
+        cutoff = time.time() - 3 * 86400
+        for key, entry in self.records.items("lineup_checks"):
+            if entry.get("at", 0) < cutoff:
+                self.records.delete("lineup_checks", key)
 
     async def research(self, game):
         """The research report and leans for a game; pre-game leans are recorded for grading."""
@@ -609,6 +678,30 @@ class SportsBot(discord.Client):
                 self.settings.update(channel_id, board_message_id=None)
             except discord.HTTPException:
                 log.exception("Failed to update the scoreboard in channel %s", channel_id)
+
+
+def _iso_seconds(iso: str) -> float | None:
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _minutes(seconds: float) -> str:
+    return f"{max(1, round(seconds / 60))} min"
+
+
+LINEUP_WORDS = {
+    "starts": "✅ {pick}: starts",
+    "bench": "🪑 {pick}: **on the bench**",
+    "out": "❌ {pick}: **not in the squad**",
+    "injured": "❌ {pick}: **ruled out** (injury report)",
+    "unknown": "❔ {pick}: not in the lineup ESPN has",
+}
+
+
+def lineup_line(leg: dict, status: str) -> str:
+    return LINEUP_WORDS[status].format(pick=leg["pick"])
 
 
 def _ago(ts: float | None) -> str:
@@ -964,6 +1057,31 @@ def register_commands(bot: SportsBot) -> None:
                                 value=text, inline=False)
         await interaction.followup.send(embed=fit_embed(embed))
 
+    async def _lineup_note(legs) -> str:
+        """Whether the slip's players come from confirmed lineups, and the check to come if not."""
+        players = [leg for leg in legs if leg.player_id]
+        if not players:
+            return ""
+        lined = {(l.league, l.game_id, l.path) for l in players if LEAGUES[l.league].sport in LINEUP_SPORTS}
+        if not lined:
+            return "\n🩹 I'll post here if a pick is ruled out before the game."
+
+        async def out(league, gid, path):
+            try:
+                return bool((await bot._availability(league, gid, path)).lineups)
+            except Exception:
+                return False
+        confirmed = sum(await asyncio.gather(*(out(*g) for g in lined)))
+        if confirmed == len(lined):
+            return "\n✅ Picked from the **confirmed lineups**: every player starts."
+        later = ("When the lineups drop (about an hour before kickoff) I'll check every pick and post here "
+                 "if anyone isn't starting.")
+        if confirmed:
+            return f"\n✅ {confirmed} of {len(lined)} games' lineups are out: only starters picked there. ⏳ {later}"
+        return f"\n⏳ Lineups aren't out yet. {later}"
+
+    bot._lineup_note_for_tests = _lineup_note
+
     def _units_text(chance: float) -> str:
         units = units_for(chance)
         return f"{units:g} unit{'s' if units > 1 else ''} (see /bankroll)"
@@ -1005,7 +1123,8 @@ def register_commands(bot: SportsBot) -> None:
         embed, slip = parlay_embed(lg.name, lg.emoji, chosen, target, same_game=same_game)
         pid = bot.parlays.record(interaction.channel_id, lg.key, target.name, chosen)
         await interaction.followup.send(embed=embed)
-        await interaction.followup.send(f"📋 Copy or screenshot for your odds bot:\n{slip}\n"
+        note = await _lineup_note(chosen)
+        await interaction.followup.send(f"📋 Copy or screenshot for your odds bot:\n{slip}{note}\n"
                                         f"💵 Stake: {_units_text(combined(chosen))}. Tap **I placed it** to log your "
                                         "stake and price.\nI'll grade every leg after the games and post the result here.",
                                         view=placed_view(pid))
@@ -1056,7 +1175,8 @@ def register_commands(bot: SportsBot) -> None:
         pid = bot.parlays.record(interaction.channel_id, lg.key, shot.name, chosen, round_robin=2)
         await interaction.followup.send(embed=embed)
         pairs = math.comb(len(chosen), 2)
-        await interaction.followup.send(f"📋 Copy or screenshot for your odds bot:\n{slip}\n"
+        note = await _lineup_note(chosen)
+        await interaction.followup.send(f"📋 Copy or screenshot for your odds bot:\n{slip}{note}\n"
                                         f"Bet them as a round robin of 2's. 💵 Stake: "
                                         f"{_units_text(chance_at_least([leg.probability for leg in chosen], 2))} in total, "
                                         f"split across the {pairs} bets. Tap **I placed it** to log your stake and "

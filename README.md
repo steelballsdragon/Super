@@ -133,6 +133,24 @@ on long shots:
   book pays more. The post lists every 2-leg combination with its price and the chance at least one pair cashes.
 - **Graded as a round robin.** After the games the result shows how many picks hit and how many of the bets cashed.
 
+### Confirmed lineups
+
+Picks are only as good as the lineup. ESPN publishes soccer starting XIs about an hour before kickoff and MLB batting
+orders a few hours before the first pitch; the NBA, NHL and NFL have no lineups before the game, only the injury
+report.
+
+- **Only starters once the lineup is out.** From the moment a team's lineup is on ESPN, every pick for that team
+  (parlays, goalscorers and assists, round robins) comes from its starters: substitutes and players left out of the
+  squad are skipped. Before that, and in other sports, players ruled out on the injury report (Out, Doubtful, injured
+  reserve, suspended) are skipped.
+- **Every slip says where it stands:** "✅ Picked from the confirmed lineups", or "⏳ Lineups aren't out yet" with
+  the check to come. For the best soccer slips, run `/research` once the lineups are out (about 50 minutes before
+  kickoff).
+- **Open slips are checked before kickoff.** In the last 75 minutes before a game, the bot watches each open slip's
+  players. When a team's lineup comes out it posts which of your picks start, are on the bench or aren't in the
+  squad, so you can swap a leg before kickoff. In any sport it posts if a pick is ruled out on the injury report.
+  Anyone who logged a bet on the slip with **I placed it** is tagged.
+
 ### Your bets and bankroll
 
 The bot doesn't place bets: sportsbooks have no betting API, and automating their site breaks their terms (and puts
