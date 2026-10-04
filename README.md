@@ -81,6 +81,8 @@ Everything is one command, `/research [league] [team] [parlay]` (the league can 
 | `/research game:Bournemouth @ Chelsea parlay:Lotto` | A same-game Lotto from the game you pick (suggestions list the week's games) |
 | `/research bets:Assists round robin` | 3 long-shot assist picks (full-backs, set-piece takers) from different games, as a round robin of 2's (`parlay:Lotto` for +450 to +1500 picks, `picks:4` for more) |
 | `/research league:NBA bets:3-pointers round robin` | 3 role-player 3+ / 4+ made threes picks as a round robin of 2's |
+| `/research league:MLS bets:Goalscorer slate lotto` | Each team's likeliest goalscorer across the next big slate (a Saturday MLS card), 10 legs by default (`picks:` up to 15), grouped game by game like a book's SGPs |
+| `/research league:NFL bets:Anytime TD scorers` | The likeliest touchdown scorer from each team on the next NFL slate (Sunday), 6 legs by default (`picks:` up to 15) |
 | `/research bets:Goalscorers & assists` | A goalscorer/assist slip: anytime goalscorers and assisters, taking turns (soccer, NHL); a Lotto unless you pick another payout |
 
 `/record` shows how the leans and parlays have done. `/bankroll` shows your own money: see below.

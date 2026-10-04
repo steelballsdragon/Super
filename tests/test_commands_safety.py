@@ -370,3 +370,22 @@ def test_slow_suggestions_keep_loading_for_next_time():
         await asyncio.sleep(0.3)  # the slow one wasn't cancelled: it finished (and would have been cached)
         return first
     assert asyncio.run(run()) == ["quick"] and finished == ["slow"]
+
+
+def test_slate_and_round_robin_options_check_the_league_and_picks(tmp_path):
+    bot = bot_with_teams(tmp_path)
+    research = bot.tree.get_command("research")
+    choice = lambda v: SimpleNamespace(value=v, name=v)
+    i = Inter()
+    asyncio.run(research.callback(i, league=choice("nba"), bets=choice("nfl-tds")))
+    assert i.sent == ["The Anytime TD scorers is for the NFL."]
+    i = Inter()
+    asyncio.run(research.callback(i, league=choice("nfl"), bets=choice("slate-goals")))
+    assert i.sent == ["The Goalscorer slate lotto is for soccer."]
+    i = Inter()
+    asyncio.run(research.callback(i, league=choice("nba"), bets=choice("rr-threes"), picks=10))
+    assert i.sent == ["A round robin takes 3 to 6 picks."]
+    i = Inter()
+    asyncio.run(research.callback(i, league=choice("nfl"), bets=choice("nfl-tds")))
+    assert i.sent == ["No NFL games in the next week on ESPN."]  # the fake scoreboard is empty
+    asyncio.run(bot.espn.close())

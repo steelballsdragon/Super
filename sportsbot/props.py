@@ -38,6 +38,10 @@ SCORER_BAR, SCORER_MIN_L10 = 0.22, 0.2
 # Two assists (or two goalscorers) from one team rarely both land: a parlay takes at most one of each per team.
 SCORER_KIND = {"totalGoals": "goal", "goals": "goal", "goalAssists": "assist", "assists": "assist",
                "goalOrAssist": "goal or assist"}
+# Goals, assists and touchdowns are rare in any one game, so a small sample is pulled toward a low prior
+# (the Laplace 50% made 1 goal in 5 games look like a 29% chance).
+RARE_STATS = SCORER_STATS + ("anytimeTouchdowns", "homeRuns")
+RARE_PRIOR, RARE_WEIGHT = 0.25, 3
 # Before the matchup adjustment, players a little under the bar are kept too: a good matchup can lift them over it.
 SCORER_PRE_BAR = 0.15
 WEIGHTS = {"l10": 0.45, "season": 0.30, "last": 0.25}
@@ -195,6 +199,11 @@ class Rate:
         """Hit rate adjusted for sample size (Laplace): 10/10 -> 92%, 3/3 -> 80%, never 100%."""
         return (self.hits + 1) / (self.games + 2)
 
+    def rare_estimate(self) -> float:
+        """The same for rare events (a goal, an assist, a touchdown): pulled toward RARE_PRIOR rather than 50%,
+        so 1 goal in 5 games is ~22%, not ~29%, while a long record speaks for itself (10 in 30 -> ~33%)."""
+        return (self.hits + RARE_PRIOR * RARE_WEIGHT) / (self.games + RARE_WEIGHT)
+
     def __str__(self) -> str:
         return f"{self.hits}/{self.games}"
 
@@ -242,12 +251,12 @@ def _rate(games: list[PlayerGame], stat: str, line: int) -> Rate:
     return Rate(sum(g.stats.get(stat, 0) >= line for g in games), len(games))
 
 
-def weighted(rates: dict[str, Rate]) -> float | None:
+def weighted(rates: dict[str, Rate], rare: bool = False) -> float | None:
     usable = {k: r for k, r in rates.items() if r.games >= MIN_GAMES[k]}
     if "l10" not in usable:
         return None
     total = sum(WEIGHTS[k] for k in usable)
-    return sum(WEIGHTS[k] * r.estimate for k, r in usable.items()) / total
+    return sum(WEIGHTS[k] * (r.rare_estimate() if rare else r.estimate) for k, r in usable.items()) / total
 
 
 def best_trends(name: str, pid: str, team: str, opponent: str, games: list[PlayerGame], sport: str,
@@ -285,7 +294,7 @@ def best_trends(name: str, pid: str, team: str, opponent: str, games: list[Playe
                 continue
             rates = {"l10": _rate(l10, prop.stat, line), "season": _rate(current, prop.stat, line),
                      "last": _rate(last, prop.stat, line)}
-            p = weighted(rates)
+            p = weighted(rates, rare=line == 1 and prop.stat in RARE_STATS)
             if p is None or p < target or rates["l10"].pct < l10_min or (ceiling is not None and p > ceiling):
                 continue
             best = Trend(name, pid, team, prop, line, rates["l10"], rates["season"], rates["last"],
@@ -333,6 +342,26 @@ LONGSHOTS = {
 LONGSHOT_MIN_L10 = 0.05  # it has happened at least once in the last 10 games: never a pick on a hunch
 
 
+@dataclass(frozen=True)
+class Slate(Longshot):
+    """A whole-slate lotto: the likeliest scorer from each team across a day's games, in one big parlay."""
+    legs: int = 10  # default number of legs
+    per_team: int = 1
+
+
+SLATES = {
+    # A Saturday MLS slate: each team's likeliest goalscorer (strikers and the attackers who shoot most).
+    "slate-goals": Slate("slate-goals", "Goalscorer slate lotto", "soccer",
+                         (("goalsLeaders", 4), ("shotsOnTarget", 3)), 6,
+                         Prop("Goals", "totalGoals", (1,), anytime="Anytime Goalscorer"), 0.12, 0.75, legs=10),
+    # Anytime touchdown scorers: the backs and receivers who find the end zone.
+    "nfl-tds": Slate("nfl-tds", "Anytime TD scorers", "football",
+                     (("rushingLeader", 2), ("receivingLeader", 4)), 6,
+                     Prop("Touchdowns", "anytimeTouchdowns", (1,), anytime="Anytime TD"), 0.15, 0.80, legs=6),
+}
+SLATE_MAX_LEGS = 15
+
+
 def chance_at_least(probabilities: list[float], k: int) -> float:
     """The chance that at least k of these independent legs hit."""
     dist = [1.0]  # dist[j] = chance exactly j have hit so far
@@ -346,6 +375,26 @@ def pick_round_robin(legs: list[Leg], size: int, per_game: int) -> list[Leg]:
     assists) one per team."""
     every_size = Target("rr", "", 0.0, 1.0, 1.0, bigger=False, min_legs=size, max_legs=size)
     return build_to_target(legs, every_size, per_game=per_game)
+
+
+def pick_slate(legs: list[Leg], size: int, per_team: int = 1) -> list[Leg]:
+    """The `size` likeliest scorers, each team's best first: one player each, `per_team` per team at most."""
+    out, per = [], {}
+    players = set()
+    for leg in sorted(legs, key=lambda l: l.probability, reverse=True):
+        team = (leg.game_id, leg.team)
+        if leg.player_id in players or per.get(team, 0) >= per_team:
+            continue
+        out.append(leg)
+        players.add(leg.player_id)
+        per[team] = per.get(team, 0) + 1
+        if len(out) == size:
+            break
+    # Shown game by game, like a book's slip (same-game legs together), likeliest game first.
+    order = {}
+    for leg in out:
+        order.setdefault(leg.game_id, len(order))
+    return sorted(out, key=lambda l: order[l.game_id])
 
 
 # ---------- matchup adjustment for goalscorer and assist bets ----------
@@ -754,7 +803,7 @@ MAX_LEGS = max(t.max_legs for t in TARGETS.values())
 
 def american(p: float) -> str:
     """Fair American odds for a chance p, e.g. 0.5 -> +100, 0.8 -> -400, 0.04 -> +2400."""
-    p = min(max(p, 1e-6), 1 - 1e-6)
+    p = min(max(p, 1e-9), 1 - 1e-6)
     if p > 0.5:
         return f"-{round(100 * p / (1 - p))}"
     return f"+{round(100 * (1 - p) / p)}"
@@ -945,3 +994,38 @@ def round_robin_embed(league_name: str, emoji: str, legs: list[Leg], shot: Longs
     embed.set_footer(text="One pick per player; for assists, one per team. " + NOTE)
     slip = "```\n" + "\n".join(leg.pick for leg in legs) + "\n```"
     return embed, slip
+
+
+def _odds_words(chance: float) -> str:
+    """A chance in words: 12% -> "12%", 0.03% -> "1 in 3,300"."""
+    if chance >= 0.01:
+        return f"{chance:.0%}"
+    n = 1 / max(chance, 1e-9)
+    return f"1 in {round(n, -2 if n < 100_000 else -3):,.0f}"
+
+
+@fitted
+def slate_embed(league_name: str, emoji: str, legs: list[Leg], slate: Slate, day: str) -> tuple[discord.Embed, str]:
+    """The slate lotto game by game (same-game legs grouped like a book's SGP), with each leg's fair price."""
+    chance = combined(legs)
+    embed = discord.Embed(title=f"🎰 {emoji} {league_name} · {slate.name}: {len(legs)} legs", color=discord.Color.purple())
+    lines, slip, game = [], [], None
+    for leg in legs:
+        if leg.game != game:
+            game = leg.game
+            together = sum(l.game == game for l in legs)
+            lines.append(f"**{game}**" + (" · SGP" if together > 1 else ""))
+            slip.append(f"[{game}]")
+        lines.append(f"• **{leg.pick}** ~{leg.probability:.0%} · fair {american(leg.probability)}\n  {leg.evidence}")
+        slip.append(leg.pick)
+    embed.description = (f"{day}\n\n" if day else "") + "\n".join(lines)
+    embed.add_field(
+        name=f"Estimated odds: {american(chance)}",
+        value=f"About **{_odds_words(chance)}** for all {len(legs)} to score, treating them as independent. A lotto: bet small. "
+              "Each leg's fair price is from its record and the matchup: legs your book pays more on are the value.",
+        inline=False)
+    if slate.prop.stat == "totalGoals":
+        embed.add_field(name="Lineups", value="Strikers get rested and rotated: build it once the lineups are out "
+                        "(about an hour before kickoff) and only starters are picked.", inline=False)
+    embed.set_footer(text=f"One player per team, each team's likeliest scorer · {NOTE}")
+    return embed, "```\n" + "\n".join(slip) + "\n```"
