@@ -18,7 +18,7 @@ from vba_project import build_vba_project
 
 ROOT = Path(__file__).resolve().parent.parent
 XLSM = ROOT / "Stock_Consolidation.xlsm"
-BAS = ROOT / "modConsolidation.bas"
+BAS = ROOT / "VBA_Code.txt"
 
 NAVY = "#1F3864"
 GREY_TEXT = "#595959"

@@ -1,8 +1,18 @@
-Attribute VB_Name = "modConsolidation"
 '==============================================================================
 ' STOCK CONSOLIDATION PLANNER
 '
-' Reads the location report pasted into "Raw Data", keeps only Prtnum, Stoloc,
+' HOW TO USE THIS CODE IN YOUR OWN EXCEL FILE
+'   1. Open the Excel file with your report (headers in row 1: Prtnum, Stoloc,
+'      Max of Curqvl, Max of Fp Available, Max of Maxqvl, Typcod, ...).
+'   2. Press Alt+F11, then click Insert > Module.
+'   3. Paste all of this code into the empty white window.
+'   4. Close that window, press Alt+F8, choose BuildConsolidationPlan, click Run.
+'   The sheets "Clean Data", "Consolidation Plan" and "Not Consolidated" are
+'   created for you. To keep the macro, save the file as "Excel Macro-Enabled
+'   Workbook (*.xlsm)". The settings are the DEFAULT_ lines below.
+'
+' Reads the location report (a sheet called "Raw Data", or else the sheet that
+' has the report headers), keeps only Prtnum, Stoloc,
 ' Curqvl, Fp Available, Maxqvl and Typcod, cleans it into "Clean Data", then
 ' finds items stored in more than one location and works out how many units
 ' to move from which location to which, so that locations can be emptied.
@@ -30,11 +40,19 @@ Attribute VB_Name = "modConsolidation"
 '      planned (and up when a location is emptied), shared by all items in
 '      the location.
 '
-' Raw Data columns are found by their header in row 1 ("Prtnum", "Stoloc",
+' Report columns are found by their header in row 1 ("Prtnum", "Stoloc",
 ' "Max of Curqvl", ...), in any order; other columns are ignored.
 '==============================================================================
 Option Explicit
 Option Compare Binary
+
+' Settings used when the file has no Start sheet with settings (for example
+' when you paste this code into your own file). Change them here.
+Private Const DEFAULT_MAX_LOCATION_QTY As Double = 23       ' only locations with max qty up to this
+Private Const DEFAULT_REMOVE_NO_CAPACITY As String = "Yes"  ' remove rows with 0 / negative available capacity
+Private Const DEFAULT_SAME_TYPE_ONLY As String = "No"       ' only move within the same location type
+Private Const DEFAULT_ALLOW_SPLIT As String = "Yes"         ' allow emptying a location into several
+Private Const DEFAULT_EXCLUDE_TYPES As String = ""          ' location types to ignore, e.g. "CONS"
 
 Private Const EPS As Double = 0.000001
 Private Const HEADER_ROW As Long = 4
@@ -56,6 +74,7 @@ Private Const REASON_ROOM As String = "Not enough room in the item's other locat
 Private Const REASON_SINGLE As String = "No single location of this item has room for all of it"
 
 ' Settings
+Private mBook As Workbook               ' the workbook holding the report and the results
 Private mMaxLocationQty As Double
 Private mRemoveNoCapacity As Boolean
 Private mSameTypeOnly As Boolean
@@ -110,17 +129,18 @@ End Sub
 
 Public Sub ClearResults()
     Dim ws As Worksheet
-    Set ws = GetSheet("shtClean", "Clean Data")
+    Set mBook = ActiveWorkbook
+    Set ws = FindSheet(mBook, "shtClean", "Clean Data")
     If Not ws Is Nothing Then
         StartSheet ws, "Clean Data", "Press 'Build Consolidation Plan' on the Start sheet."
         WriteHeaders ws, CleanHeaders()
     End If
-    Set ws = GetSheet("shtPlan", "Consolidation Plan")
+    Set ws = FindSheet(mBook, "shtPlan", "Consolidation Plan")
     If Not ws Is Nothing Then
         StartSheet ws, "Consolidation Plan", "Press 'Build Consolidation Plan' on the Start sheet."
         WriteHeaders ws, PlanHeaders()
     End If
-    Set ws = GetSheet("shtNotMoved", "Not Consolidated")
+    Set ws = FindSheet(mBook, "shtNotMoved", "Not Consolidated")
     If Not ws Is Nothing Then
         StartSheet ws, "Not Consolidated", "Press 'Build Consolidation Plan' on the Start sheet."
         WriteHeaders ws, FailHeaders()
@@ -130,7 +150,7 @@ End Sub
 
 ' Runs the whole thing. showMessages = False skips the message boxes.
 Public Sub RunConsolidation(ByVal showMessages As Boolean)
-    Dim oldCalc As Long
+    Dim oldCalc As Long, raw As Worksheet
     mShowMessages = showMessages
     oldCalc = Application.Calculation
     Application.ScreenUpdating = False
@@ -138,8 +158,17 @@ Public Sub RunConsolidation(ByVal showMessages As Boolean)
     Application.Calculation = xlCalculationManual
     On Error GoTo Failed
 
+    Set mBook = ActiveWorkbook
+    Set raw = FindRawSheet()
+    If raw Is Nothing Then
+        Report "Could not find the report. Paste it into a sheet with these headers in row 1: " & _
+               "Prtnum, Stoloc, Max of Curqvl, Max of Fp Available, Max of Maxqvl, Typcod."
+        GoTo Finish
+    End If
+    Set mBook = raw.Parent
+
     LoadSettings
-    If LoadRawData() Then
+    If LoadRawData(raw) Then
         PlanMoves
         WriteCleanData
         WritePlan
@@ -147,7 +176,7 @@ Public Sub RunConsolidation(ByVal showMessages As Boolean)
         SetStatus "Last run " & Format$(Now, "dd-mmm-yyyy hh:mm") & ": " & rowCount & " rows kept, " & _
                   moveCount & " moves, " & EmptiedCount() & " locations emptied, " & _
                   RemainingFailures() & " cannot be emptied"
-        GetSheet("shtPlan", "Consolidation Plan").Activate
+        OutputSheet("shtPlan", "Consolidation Plan").Activate
         If mShowMessages Then
             MsgBox "Plan ready." & vbCrLf & vbCrLf & _
                    statRead & " report rows read, " & rowCount & " kept after cleaning." & vbCrLf & _
@@ -175,11 +204,11 @@ End Sub
 '------------------------------------------------------------------------------
 Private Sub LoadSettings()
     Dim part As Variant, t As String
-    mMaxLocationQty = SettingNumber("MaxLocationQty", 23)
-    mRemoveNoCapacity = IsYes(SettingText("RemoveNoCapacity", "Yes"))
-    mSameTypeOnly = IsYes(SettingText("SameTypeOnly", "No"))
-    mAllowSplit = IsYes(SettingText("AllowSplit", "Yes"))
-    mExcludeText = SettingText("ExcludeTypes", "")
+    mMaxLocationQty = SettingNumber("MaxLocationQty", DEFAULT_MAX_LOCATION_QTY)
+    mRemoveNoCapacity = IsYes(SettingText("RemoveNoCapacity", DEFAULT_REMOVE_NO_CAPACITY))
+    mSameTypeOnly = IsYes(SettingText("SameTypeOnly", DEFAULT_SAME_TYPE_ONLY))
+    mAllowSplit = IsYes(SettingText("AllowSplit", DEFAULT_ALLOW_SPLIT))
+    mExcludeText = SettingText("ExcludeTypes", DEFAULT_EXCLUDE_TYPES)
     Set mExcluded = New Collection
     For Each part In Split(mExcludeText, ",")
         t = UCase$(Trim$(CStr(part)))
@@ -189,19 +218,14 @@ Private Sub LoadSettings()
     Next part
 End Sub
 
-Private Function LoadRawData() As Boolean
-    Dim ws As Worksheet, data As Variant, rowIndex As Collection, locIndex As Collection
+Private Function LoadRawData(ByVal ws As Worksheet) As Boolean
+    Dim data As Variant, rowIndex As Collection, locIndex As Collection
     Dim lastCol As Long, lastRow As Long, n As Long, r As Long, idx As Long, li As Long, dropped As Long
     Dim cItem As Long, cLoc As Long, cQty As Long, cAvail As Long, cMax As Long, cType As Long
     Dim item As String, loc As String, typ As String, key As String
     Dim qty As Double, avail As Double, mx As Double
     Dim hasQty As Boolean, hasAvail As Boolean, hasMax As Boolean
 
-    Set ws = GetSheet("shtRaw", "Raw Data")
-    If ws Is Nothing Then
-        Report "The 'Raw Data' sheet is missing."
-        Exit Function
-    End If
     lastCol = FindLastColumn(ws)
     cItem = FindColumn(ws, lastCol, ITEM_HEADERS)
     cLoc = FindColumn(ws, lastCol, LOC_HEADERS)
@@ -210,7 +234,7 @@ Private Function LoadRawData() As Boolean
     cMax = FindColumn(ws, lastCol, MAX_HEADERS)
     cType = FindColumn(ws, lastCol, TYPE_HEADERS)
     If cItem = 0 Or cLoc = 0 Or cQty = 0 Or cMax = 0 Then
-        Report "The 'Raw Data' sheet needs these headers in row 1: Prtnum, Stoloc, Max of Curqvl, " & _
+        Report "The '" & ws.Name & "' sheet needs these headers in row 1: Prtnum, Stoloc, Max of Curqvl, " & _
                "Max of Maxqvl (and ideally Max of Fp Available and Typcod)."
         Exit Function
     End If
@@ -618,7 +642,7 @@ End Function
 Private Sub WriteCleanData()
     Dim ws As Worksheet, out() As Variant, r As Long, lastRow As Long, fmt As String
 
-    Set ws = GetSheet("shtClean", "Clean Data")
+    Set ws = OutputSheet("shtClean", "Clean Data")
     StartSheet ws, "Clean Data", "Rows read: " & statRead & _
                "   |   Removed - zero or negative qty/capacity: " & statZero & _
                "   |   Removed - max qty over " & FormatQty(mMaxLocationQty) & ": " & statOverMax & _
@@ -678,7 +702,7 @@ End Sub
 Private Sub WritePlan()
     Dim ws As Worksheet, out() As Variant, r As Long, c As Long, lastRow As Long
 
-    Set ws = GetSheet("shtPlan", "Consolidation Plan")
+    Set ws = OutputSheet("shtPlan", "Consolidation Plan")
     StartSheet ws, "Consolidation Plan", SettingsLine()
     WriteHeaders ws, PlanHeaders()
 
@@ -727,7 +751,7 @@ End Sub
 Private Sub WriteNotMoved()
     Dim ws As Worksheet, out() As Variant, idx() As Long, n As Long, i As Long, s As Long, lastRow As Long
 
-    Set ws = GetSheet("shtNotMoved", "Not Consolidated")
+    Set ws = OutputSheet("shtNotMoved", "Not Consolidated")
     StartSheet ws, "Not Consolidated", _
                "Locations of multi-location items that cannot be emptied with the space available.   " & SettingsLine()
     WriteHeaders ws, FailHeaders()
@@ -933,25 +957,69 @@ End Function
 ' Helpers
 '------------------------------------------------------------------------------
 ' Finds a sheet by its code name, or failing that by its tab name
-Private Function GetSheet(ByVal codeName As String, ByVal tabName As String) As Worksheet
+Private Function FindSheet(ByVal wb As Workbook, ByVal codeName As String, ByVal tabName As String) As Worksheet
     Dim ws As Worksheet
-    For Each ws In ThisWorkbook.Worksheets
+    For Each ws In wb.Worksheets
         If ws.CodeName = codeName Then
-            Set GetSheet = ws
+            Set FindSheet = ws
             Exit Function
         End If
     Next ws
-    For Each ws In ThisWorkbook.Worksheets
+    For Each ws In wb.Worksheets
         If StrComp(ws.Name, tabName, vbTextCompare) = 0 Then
-            Set GetSheet = ws
+            Set FindSheet = ws
             Exit Function
         End If
     Next ws
 End Function
 
+' A results sheet; it is added at the end if the workbook does not have it yet
+Private Function OutputSheet(ByVal codeName As String, ByVal tabName As String) As Worksheet
+    Dim ws As Worksheet
+    Set ws = FindSheet(mBook, codeName, tabName)
+    If ws Is Nothing Then
+        Set ws = mBook.Worksheets.Add(After:=mBook.Worksheets(mBook.Worksheets.Count))
+        ws.Name = tabName
+    End If
+    Set OutputSheet = ws
+End Function
+
+' The report: a sheet called "Raw Data", otherwise the active sheet or the
+' first sheet whose row 1 has the report headers
+Private Function FindRawSheet() As Worksheet
+    Dim ws As Worksheet
+    Set ws = FindSheet(mBook, "shtRaw", "Raw Data")
+    If ws Is Nothing Then Set ws = FindSheet(ThisWorkbook, "shtRaw", "Raw Data")
+    If Not ws Is Nothing Then
+        Set FindRawSheet = ws
+        Exit Function
+    End If
+    If TypeName(ActiveSheet) = "Worksheet" Then
+        If IsReportSheet(ActiveSheet) Then
+            Set FindRawSheet = ActiveSheet
+            Exit Function
+        End If
+    End If
+    For Each ws In mBook.Worksheets
+        If IsReportSheet(ws) Then
+            Set FindRawSheet = ws
+            Exit Function
+        End If
+    Next ws
+End Function
+
+Private Function IsReportSheet(ByVal ws As Worksheet) As Boolean
+    Dim lastCol As Long
+    lastCol = FindLastColumn(ws)
+    If FindColumn(ws, lastCol, ITEM_HEADERS) = 0 Then Exit Function
+    If FindColumn(ws, lastCol, LOC_HEADERS) = 0 Then Exit Function
+    If FindColumn(ws, lastCol, QTY_HEADERS) = 0 Then Exit Function
+    IsReportSheet = (FindColumn(ws, lastCol, MAX_HEADERS) > 0)
+End Function
+
 Private Function SettingText(ByVal settingName As String, ByVal fallback As String) As String
     On Error GoTo UseFallback
-    SettingText = CellText(ThisWorkbook.Names(settingName).RefersToRange.Value)
+    SettingText = CellText(mBook.Names(settingName).RefersToRange.Value)
     Exit Function
 UseFallback:
     SettingText = fallback
@@ -961,14 +1029,14 @@ Private Function SettingNumber(ByVal settingName As String, ByVal fallback As Do
     Dim v As Variant
     SettingNumber = fallback
     On Error GoTo Done
-    v = ThisWorkbook.Names(settingName).RefersToRange.Value
+    v = mBook.Names(settingName).RefersToRange.Value
     If IsNumber(v) Then SettingNumber = CDbl(v)
 Done:
 End Function
 
 Private Sub SetStatus(ByVal msg As String)
     On Error Resume Next
-    ThisWorkbook.Names("LastRun").RefersToRange.Value = msg
+    mBook.Names("LastRun").RefersToRange.Value = msg
 End Sub
 
 Private Sub Report(ByVal msg As String)
