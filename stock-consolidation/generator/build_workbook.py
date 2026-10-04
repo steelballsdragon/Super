@@ -17,7 +17,9 @@ import sql_demo
 from vba_project import build_vba_project
 
 ROOT = Path(__file__).resolve().parent.parent
-XLSM = ROOT / "Stock_Consolidation.xlsm"
+XLSM = ROOT / "Stock_Consolidation.xlsm"                # empty, ready for your report
+XLSM_SAMPLE = ROOT / "Stock_Consolidation_Sample.xlsm"  # with the screenshot rows and their result
+PRESS = "Press 'Build Consolidation Plan' on the Start sheet."
 BAS = ROOT / "VBA_Code.txt"
 
 NAVY = "#1F3864"
@@ -127,7 +129,7 @@ def write_result_sheet(ws, fmt, title, subtitle, headers, keys, rows, text_cols,
                        widths, empty_msg, left_cols=(0,), bold_qty_col=None):
     """Mirrors the formatting the VBA macro applies (FormatTable / BandGroup)."""
     sheet_top(ws, fmt, title, subtitle, headers, widths)
-    if not rows:
+    if not rows and empty_msg:
         ws.write(4, 0, empty_msg, fmt(italic=True, font_color=GREY_TEXT))
     nf = num_format(rows, keys, qty_cols)
     shade, prev = False, None
@@ -158,16 +160,22 @@ def write_result_sheet(ws, fmt, title, subtitle, headers, keys, rows, text_cols,
 
 def build():
     sql_demo.write_sql()
+    build_one(XLSM, sample=False)
+    return build_one(XLSM_SAMPLE, sample=True)
 
+
+def build_one(path, sample):
+    """sample=True: Raw Data holds the screenshot rows and the result sheets show their plan.
+    sample=False: Raw Data has only its header row and the result sheets are empty."""
     clean, stats, moves, not_moved, summary = planner.run(
-        d.RAW, d.MAX_LOCATION_QTY, d.REMOVE_NO_CAPACITY, d.SAME_TYPE_ONLY, d.ALLOW_SPLIT, d.EXCLUDE_TYPES,
-        d.MIN_LOCATION_QTY)
+        d.RAW if sample else [], d.MAX_LOCATION_QTY, d.REMOVE_NO_CAPACITY, d.SAME_TYPE_ONLY, d.ALLOW_SPLIT,
+        d.EXCLUDE_TYPES, d.MIN_LOCATION_QTY)
     built = datetime.datetime.now().strftime("%d-%b-%Y %H:%M")
 
     vba = build_vba_project([("modConsolidation", BAS.read_text(encoding="cp1252"))],
                             "ThisWorkbook", [code for _, code in SHEETS])
 
-    wb = xlsxwriter.Workbook(str(XLSM))
+    wb = xlsxwriter.Workbook(str(path))
     wb.set_vba_name("ThisWorkbook")
     wb.add_vba_project(io.BytesIO(vba), is_stream=True)
     wb.set_properties({"title": "Stock Consolidation", "subject": "Location consolidation planner"})
@@ -229,8 +237,10 @@ def build():
 
     s.write("B20", "Status", h2)
     s.write("C20", "", h2)
-    s.write("B21", "Showing the result for the sample rows. Paste your own report into Raw Data and press "
-                   "Build Consolidation Plan.", fmt(italic=True, font_color=GREY_TEXT))
+    status = ("Showing the result for the sample rows. Paste your own report into Raw Data and press "
+              "Build Consolidation Plan." if sample else
+              "Paste your report into the Raw Data sheet (headers in row 1) and press Build Consolidation Plan.")
+    s.write("B21", status, fmt(italic=True, font_color=GREY_TEXT))
     wb.define_name("LastRun", "=Start!$B$21")
 
     s.write("B23", "How it works", h2)
@@ -261,7 +271,7 @@ def build():
                    text_wrap=True, valign="vcenter")
     raw.set_row(0, 30)
     raw.write_row(0, 0, d.RAW_HEADERS, raw_head)
-    for i, row in enumerate(d.RAW_ROWS, start=1):
+    for i, row in enumerate(d.RAW_ROWS if sample else [], start=1):
         for c, v in enumerate(row):
             if isinstance(v, str):
                 raw.write_string(i, c, v, text if c < 2 else None)
@@ -270,7 +280,8 @@ def build():
 
     # ---- Clean Data ----------------------------------------------------------
     cl = ws["Clean Data"]
-    sheet_top(cl, fmt, "Clean Data", stats_line(stats), CLEAN_HEADERS, [14, 12, 12, 13, 10, 13, 3, 22])
+    sheet_top(cl, fmt, "Clean Data", stats_line(stats) if sample else PRESS, CLEAN_HEADERS,
+              [14, 12, 12, 13, 10, 13, 3, 22])
     multi = {k for k, n in Counter(r["item_number"].upper() for r in clean).items() if n >= 2}
     nf = num_format(clean, CLEAN_KEYS, [2, 3, 4])
     for i, r in enumerate(clean):
@@ -284,20 +295,26 @@ def build():
                 if c == 0:
                     p["bold"] = True
             cl.write(4 + i, c, r[k], fmt(**p))
-    if not clean:
-        cl.write(4, 0, "No rows left after cleaning - check the Raw Data sheet and the settings.",
-                 fmt(italic=True, font_color=GREY_TEXT))
-    cl.write("H4", "Item in 2+ locations", fmt(bg_color=AMBER, bold=True, align="center", valign="vcenter",
-                                               border=1, border_color=GRID))
+    if sample:
+        cl.write("H4", "Item in 2+ locations", fmt(bg_color=AMBER, bold=True, align="center", valign="vcenter",
+                                                   border=1, border_color=GRID))
     sheet_bottom(cl, len(clean), len(CLEAN_HEADERS))
 
     # ---- Results ------------------------------------------------------------
     p = ws["Consolidation Plan"]
-    write_result_sheet(p, fmt, "Consolidation Plan", settings_line(built), PLAN_HEADERS, PLAN_KEYS,
-                       moves, text_cols={0, 1, 3, 6, 7}, qty_cols={2, 4, 5, 8},
+    write_result_sheet(p, fmt, "Consolidation Plan", settings_line(built) if sample else PRESS,
+                       PLAN_HEADERS, PLAN_KEYS, moves, text_cols={0, 1, 3, 6, 7}, qty_cols={2, 4, 5, 8},
                        widths=[14, 15, 12, 14, 13, 13, 13, 13, 14, 3, 22, 10],
-                       empty_msg="No moves found - nothing can be consolidated with this data and these settings.",
+                       empty_msg="No moves found - nothing can be consolidated with this data and these settings."
+                       if sample else None,
                        bold_qty_col=2)
+    if not sample:
+        write_result_sheet(ws["Not Consolidated"], fmt, "Not Consolidated", PRESS, FAIL_HEADERS, FAIL_KEYS, [],
+                           text_cols={0, 1, 2, 5}, qty_cols={3, 4}, widths=[14, 14, 13, 12, 14, 56],
+                           left_cols=(0, 5), empty_msg=None)
+        wb.close()
+        return clean, stats, moves, not_moved, summary
+
     sh = fmt(bold=True, font_color="#FFFFFF", bg_color=NAVY, border=1, border_color="#C8CED8", valign="vcenter")
     p.write("K4", "Summary", sh)
     p.write_blank("L4", None, sh)
@@ -325,5 +342,5 @@ def build():
 
 if __name__ == "__main__":
     cl, st, mv, nm, sm = build()
-    print(f"built {XLSM.name}: {st['rows_kept']} clean rows, {len(mv)} moves, "
+    print(f"built {XLSM.name} (empty) and {XLSM_SAMPLE.name}: {st['rows_kept']} clean rows, {len(mv)} moves, "
           f"{len(nm)} not consolidated, summary {sm}")

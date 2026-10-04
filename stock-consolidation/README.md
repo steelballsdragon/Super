@@ -14,9 +14,12 @@ Pick **one** of these. They give the same result.
 1. Right-click the downloaded file → **Properties** → tick **Unblock** → OK
    (Windows blocks macros in downloaded files).
 2. Open it and click **Enable Content** if Excel asks.
-3. Go to the **Raw Data** sheet, delete the sample rows and paste your report
-   (with its headers in row 1).
+3. Go to the **Raw Data** sheet, click cell **A1** and paste your whole report,
+   headers included (it replaces the header row that is already there).
 4. Go to the **Start** sheet and click **Build Consolidation Plan**.
+
+`Stock_Consolidation_Sample.xlsm` is the same file already filled with the rows
+from the screenshot, if you want to see a finished result first.
 
 ### Option 2: paste the code into your own Excel file
 
