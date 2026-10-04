@@ -28,8 +28,8 @@ from .limits import MESSAGE, clip, fit_embed
 from .odds import OddsBook, grade_text, line_text
 from .cricket_props import CricketHistory
 from .parlays import ParlayBook, record_field, settle
-from .props import (LONGSHOTS, MAX_LEGS, MAX_LEGS_PER_GAME, TARGETS, PropsClient, apply_matchup, build_to_target,
-                    chance_at_least, combined, availability, expected_goals, moneyline_leg, parlay_embed, pick_round_robin, round_robin_embed,
+from .props import (LONGSHOTS, MAX_LEGS, SLATE_MAX_LEGS, SLATES, MAX_LEGS_PER_GAME, TARGETS, PropsClient, apply_matchup, build_to_target,
+                    chance_at_least, combined, availability, expected_goals, moneyline_leg, parlay_embed, pick_round_robin, pick_slate, round_robin_embed, slate_embed,
                     scorer_lines, trend_legs, trends_embed)
 from .research import LeanBook, leans, market_chances, parse_research, picks_embed, record_embed, report_embed
 from .schedule import COMMON_TIMEZONES, games_on, today
@@ -509,8 +509,8 @@ class SportsBot(discord.Client):
     async def longshots(self, game, kind: str, payout: str | None = None):
         """The round robin's long shots in this game (e.g. full-backs to assist, role players' 3+ threes),
         within the chances for the payout picked (Lotto: the +450 to +1500 kind)."""
-        shot = LONGSHOTS[kind]
-        low, high = shot.band(payout)
+        shot = LONGSHOTS.get(kind) or SLATES[kind]
+        low, high = shot.band(payout) if kind in LONGSHOTS else (shot.low, shot.high)
         r, available = await self._game_info(game)
         # A little either side of the range at first: the matchup can move players in or out of it.
         trends = await self.props.longshot_trends(game, shot, available, (low, high))
@@ -1188,7 +1188,44 @@ def register_commands(bot: SportsBot) -> None:
     BETS = [app_commands.Choice(name="All bets", value="all"),
             app_commands.Choice(name="Goalscorers & assists", value="scorers"),
             app_commands.Choice(name="Assists round robin (soccer)", value="rr-assists"),
-            app_commands.Choice(name="3-pointers round robin (NBA)", value="rr-threes")]
+            app_commands.Choice(name="3-pointers round robin (NBA)", value="rr-threes"),
+            app_commands.Choice(name="Goalscorer slate lotto (soccer)", value="slate-goals"),
+            app_commands.Choice(name="Anytime TD scorers (NFL)", value="nfl-tds")]
+
+    async def _slate_games(lg) -> tuple[list, str]:
+        """The next slate: the soonest day with at least 3 games (a Saturday MLS card, an NFL Sunday), else the
+        soonest day. Returns the games and the day's name."""
+        days: dict = {}
+        for g in await _week(lg):
+            if (start := start_time(g)) is not None:
+                days.setdefault(start.astimezone(EASTERN).date(), []).append(g)
+        if not days:
+            return [], ""
+        day = next((d for d, games in days.items() if len(games) >= 3), next(iter(days)))
+        return days[day], f"{day:%A %B} {day.day} · {len(days[day])} games"
+
+    async def _slate(interaction, lg, slate, games, size: int, day: str, per_team: int = 1):
+        async def one(g):
+            try:
+                return trend_legs(g, await bot.longshots(g, slate.key))
+            except Exception:
+                log.warning("Slate research failed for %s", g.id, exc_info=True)
+                return []
+        candidates = [leg for found in await asyncio.gather(*(one(g) for g in games)) for leg in found]
+        chosen = pick_slate(candidates, size, per_team)
+        if len(chosen) < 3:
+            await interaction.followup.send(f"Not enough likely scorers in those {lg.name} games for a {slate.name} yet. "
+                                            "Try again closer to game day.")
+            return
+        embed, slip = slate_embed(lg.name, lg.emoji, chosen, slate, day)
+        pid = bot.parlays.record(interaction.channel_id, lg.key, slate.name, chosen)
+        await interaction.followup.send(embed=embed)
+        note = await _lineup_note(chosen)
+        short = f" (only {len(chosen)} teams had a likely scorer)" if len(chosen) < size else ""
+        await interaction.followup.send(f"📋 Copy or screenshot for your odds bot{short}:\n{slip}{note}\n"
+                                        f"💵 Stake: {_units_text(combined(chosen))}. Tap **I placed it** to log your "
+                                        "stake and price.\nI'll grade every leg after the games and post the result here.",
+                                        view=placed_view(pid))
 
     async def _round_robin(interaction, lg, shot, games, one_game: bool, size: int, payout: str | None = None):
         async def one(g):
@@ -1223,15 +1260,15 @@ def register_commands(bot: SportsBot) -> None:
         team="A team: everything on its next game (with a parlay: legs from that game only)",
         game="A specific game: everything on it (with a parlay: a same-game parlay)",
         parlay="Safe (around +100), Big payout (+1000 to +10000) or Lotto (4-10 legs, +3000 to +20000)",
-        bets="Goalscorers & assists, or a round robin of long shots: assists (soccer) or 3-pointers (NBA)",
-        picks="Round robins: how many picks (3-6, default 3)",
+        bets="Goalscorers & assists, a round robin (assists, 3-pointers), a goalscorer slate lotto or NFL anytime TDs",
+        picks="How many picks: round robins 3-6 (default 3); slate lottos up to 15 (default 10 soccer, 6 NFL)",
     )
     @app_commands.choices(league=LEAGUE_CHOICES, bets=BETS,
                           parlay=[app_commands.Choice(name=t.name, value=t.key) for t in TARGETS.values()])
     async def research(interaction: discord.Interaction, league: app_commands.Choice[str] | None = None,
                        team: TeamName | None = None, game: app_commands.Range[str, 1, 100] | None = None,
                        parlay: app_commands.Choice[str] | None = None, bets: app_commands.Choice[str] | None = None,
-                       picks: app_commands.Range[int, 3, 6] = 3):
+                       picks: app_commands.Range[int, 2, SLATE_MAX_LEGS] | None = None):
         await interaction.response.defer(thinking=True)
         key, problem = await pick_league(interaction, league, team, game)
         if key is None:
@@ -1243,8 +1280,13 @@ def register_commands(bot: SportsBot) -> None:
             await interaction.followup.send("Goalscorer and assist bets are for soccer and the NHL.")
             return
         shot = LONGSHOTS.get(bets.value) if bets is not None else None
-        if shot and lg.sport != shot.sport:
-            await interaction.followup.send(f"The {shot.name} is for {'soccer' if shot.sport == 'soccer' else 'the NBA'}.")
+        slate = SLATES.get(bets.value) if bets is not None else None
+        if (shot or slate) and lg.sport != (shot or slate).sport:
+            where = {"soccer": "soccer", "basketball": "the NBA", "football": "the NFL"}[(shot or slate).sport]
+            await interaction.followup.send(f"The {(shot or slate).name} is for {where}.")
+            return
+        if shot and picks is not None and not 3 <= picks <= 6:
+            await interaction.followup.send("A round robin takes 3 to 6 picks.")
             return
         try:
             picked = None
@@ -1259,15 +1301,27 @@ def register_commands(bot: SportsBot) -> None:
                 if picked is None:
                     await interaction.followup.send(f"No {lg.name} game for **{team}** in the next week on ESPN.")
                     return
-            if shot:
+            if slate:
+                if picked is not None:  # one game: both teams' likeliest scorers, two per team
+                    if picked.state != "pre":
+                        await interaction.followup.send("That game has already started.")
+                        return
+                    await _slate(interaction, lg, slate, [picked], picks or 4, _when(picked), per_team=2)
+                else:
+                    games, day = await _slate_games(lg)
+                    if games:
+                        await _slate(interaction, lg, slate, games, picks or slate.legs, day)
+                    else:
+                        await interaction.followup.send(f"No {lg.name} games in the next week on ESPN.")
+            elif shot:
                 if picked is not None:
                     if picked.state != "pre":
                         await interaction.followup.send("That game has already started.")
                         return
-                    await _round_robin(interaction, lg, shot, [picked], one_game=True, size=picks,
+                    await _round_robin(interaction, lg, shot, [picked], one_game=True, size=picks or 3,
                                        payout=parlay.value if parlay else None)
                 elif games := await _upcoming(lg, want=PARLAY_GAMES):
-                    await _round_robin(interaction, lg, shot, games, one_game=False, size=picks,
+                    await _round_robin(interaction, lg, shot, games, one_game=False, size=picks or 3,
                                        payout=parlay.value if parlay else None)
                 else:
                     await interaction.followup.send(f"No {lg.name} games in the next week on ESPN.")

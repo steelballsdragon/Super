@@ -349,3 +349,27 @@ def test_round_robin_post_and_long_shot_lines():
     text = embed.description + "".join(f.name + f.value for f in embed.fields)
     assert "Round robin (2's): 3 bets" in text and "fair +233" in text and "At least one pair cashes" in text
     assert slip.count("Made Threes") == 3
+
+
+def test_rare_events_shrink_toward_a_low_prior():
+    assert round(Rate(1, 5).rare_estimate(), 2) == 0.22  # Laplace would say 0.29
+    assert round(Rate(10, 30).rare_estimate(), 2) == 0.33  # a long record speaks for itself
+    assert round(Rate(1, 5).estimate, 2) == 0.29
+
+
+def test_slate_takes_each_teams_likeliest_scorer_grouped_by_game():
+    from sportsbot.props import SLATES, _odds_words, pick_slate, slate_embed
+
+    def leg(pid, team, game, p):
+        return Leg(f"P{pid} Anytime Goalscorer", p, "L10 4/10", f"Game {game}", game, pid, "prop", "totalGoals", 1,
+                   None, "mls", "", f"P{pid}", team)
+    legs = [leg("1", "ORL", "g1", 0.5), leg("2", "ORL", "g1", 0.45), leg("3", "CLB", "g1", 0.3),
+            leg("4", "MIA", "g2", 0.55), leg("5", "DC", "g2", 0.2), leg("4", "MIA", "g2", 0.55)]
+    chosen = pick_slate(legs, 3)
+    assert [l.player_id for l in chosen] == ["4", "1", "3"]  # one per team; g2's leg first, as its scorer is likeliest
+    assert [l.player_id for l in pick_slate(legs, 10, per_team=2)] == ["4", "5", "1", "2", "3"]
+    embed, slip = slate_embed("MLS", "⚽", chosen, SLATES["slate-goals"], "Saturday October 10 · 14 games")
+    assert embed.title == "🎰 ⚽ MLS · Goalscorer slate lotto: 3 legs"
+    assert "**Game g1** · SGP" in embed.description and "**Game g2**\n" in embed.description
+    assert slip == "```\n[Game g2]\nP4 Anytime Goalscorer\n[Game g1]\nP1 Anytime Goalscorer\nP3 Anytime Goalscorer\n```"
+    assert _odds_words(0.12) == "12%" and _odds_words(0.0003) == "1 in 3,300" and _odds_words(1.3e-7) == "1 in 7,692,000"
