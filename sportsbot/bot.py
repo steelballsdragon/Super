@@ -35,7 +35,7 @@ from .schedule import COMMON_TIMEZONES, games_on, today
 from .plays import AssistResolver, PlayResolver
 from .settings import SettingsStore, StateStore, move_sections
 from .storage import SubscriptionStore
-from .tracker import CALLED_OFF, FINAL, KICKOFF, OVERS, WICKET, Tracker
+from .tracker import CALLED_OFF, FINAL, KICKOFF, OVERS, SCORE, WICKET, Tracker
 
 log = logging.getLogger("sportsbot")
 
@@ -366,17 +366,16 @@ class SportsBot(discord.Client):
             for channel_id in channels:
                 embed = with_odds if with_odds and self.settings.get(channel_id).odds else plain
                 message = await self._deliver(channel_id, update.game, update.kind, embed=embed)
-                if update.play is not None and message is not None:
-                    self.play_posts.setdefault((update.game.id, update.play.id), []).append(
-                        (time.time(), channel_id, message))
+                if (key := _post_key(update)) and message is not None:
+                    self.play_posts.setdefault((update.game.id, key), []).append((time.time(), channel_id, message))
 
     async def _edit_play(self, update, plain, with_odds) -> None:
-        for _, channel_id, message in self.play_posts.get((update.game.id, update.play.id), []):
+        for _, channel_id, message in self.play_posts.get((update.game.id, _post_key(update)), []):
             embed = with_odds if with_odds and self.settings.get(channel_id).odds else plain
             try:
                 await message.edit(embed=embed)
             except discord.HTTPException:
-                log.warning("Couldn't edit the post for play %s", update.play.id, exc_info=True)
+                log.warning("Couldn't edit the post for %s", _post_key(update), exc_info=True)
 
     def _prune_play_posts(self) -> None:
         cutoff = time.time() - PLAY_POST_SECONDS
@@ -701,6 +700,15 @@ class SportsBot(discord.Client):
                 self.settings.update(channel_id, board_message_id=None)
             except discord.HTTPException:
                 log.exception("Failed to update the scoreboard in channel %s", channel_id)
+
+
+def _post_key(update) -> str:
+    """Which scoring play or goals a post is about, to find it again when ESPN fills them in."""
+    if update.kind != SCORE:
+        return ""
+    if update.play is not None:
+        return f"play:{update.play.id}"
+    return "goals:" + ",".join(f"{g.minute}|{g.scorer}" for g in update.new_goals) if update.new_goals else ""
 
 
 def _iso_seconds(iso: str) -> float | None:

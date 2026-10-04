@@ -3,7 +3,7 @@ import asyncio
 from sportsbot.espn import parse_goal_details, parse_scoreboard
 from sportsbot.formatting import _hockey_text, update_embed
 from sportsbot.leagues import LEAGUES
-from sportsbot.plays import ASSIST_WAIT_SECONDS, AssistResolver
+from sportsbot.plays import WATCH_CHECK_SECONDS, WATCH_SECONDS, AssistResolver
 from sportsbot.tracker import FINAL, SCORE, Tracker
 
 EPL = LEAGUES["epl"]
@@ -39,9 +39,13 @@ class Feed:
         return parse_goal_details(summary)
 
 
+NOW = [0.0]
+
+
 def setup():
     feed = Feed()
-    t, r = Tracker(), AssistResolver(feed)
+    NOW[0] = 0.0
+    t, r = Tracker(), AssistResolver(feed, clock=lambda: NOW[0])
     step = lambda games: asyncio.run(r.resolve(games, t.update("epl", games)))
     step(match())
     return feed, step
@@ -71,21 +75,29 @@ def test_own_goal_has_no_assist():
     assert d.assist is None
 
 
-def test_waits_briefly_for_assist_then_posts_anyway():
+def test_goal_posts_at_once_and_is_edited_when_the_assist_is_out():
     feed, step = setup()
-    assert step(match(home=1, goals=[CHERKI])) == []  # details not published yet
+    [u] = step(match(home=1, goals=[CHERKI]))  # details not published yet: post anyway
+    assert not u.edit and "29' Rayan Cherki (Manchester City)\n🅰️ Assist: checking…" in update_embed(u).description
     feed.events = [key_event("29'", "Rayan Cherki", "Antoine Semenyo")]
-    [u] = step(match(home=1, goals=[CHERKI]))
-    assert "Assist: Antoine Semenyo" in update_embed(u).description
+    NOW[0] = WATCH_CHECK_SECONDS - 1
+    assert step(match(home=1, goals=[CHERKI])) == []  # re-checked every WATCH_CHECK_SECONDS
+    NOW[0] = WATCH_CHECK_SECONDS
+    [e] = step(match(home=1, goals=[CHERKI]))
+    assert e.edit and "🅰️ Assist: Antoine Semenyo" in update_embed(e).description
+    NOW[0] = 2 * WATCH_CHECK_SECONDS
+    assert step(match(home=1, goals=[CHERKI])) == []  # found: no longer checked
 
-    now = [0.0]
-    t, r = Tracker(), AssistResolver(Feed(), clock=lambda: now[0])
-    step2 = lambda games: asyncio.run(r.resolve(games, t.update("epl", games)))
-    step2(match())
-    assert step2(match(home=1, goals=[CHERKI])) == []
-    now[0] = ASSIST_WAIT_SECONDS
-    [u] = step2(match(home=1, goals=[CHERKI]))
-    assert "29' Rayan Cherki" in update_embed(u).description and "Assist" not in update_embed(u).description
+
+def test_assist_never_found_stops_saying_checking():
+    feed, step = setup()
+    [u] = step(match(home=1, goals=[CHERKI]))
+    assert "checking…" in update_embed(u).description
+    NOW[0] = WATCH_SECONDS
+    [e] = step(match(home=1, goals=[CHERKI]))
+    assert e.edit and "Assist" not in update_embed(e).description
+    NOW[0] = WATCH_SECONDS + WATCH_CHECK_SECONDS
+    assert step(match(home=1, goals=[CHERKI])) == []
 
 
 def test_goal_is_posted_before_the_final_whistle():
@@ -94,14 +106,17 @@ def test_goal_is_posted_before_the_final_whistle():
     assert [u.kind for u in ups] == [SCORE, FINAL]
 
 
-def test_two_goals_while_waiting_are_posted_together():
+def test_each_goal_posts_and_is_edited_on_its_own():
     feed, step = setup()
     semenyo = ("382", "43'", "Antoine Semenyo")
-    assert step(match(home=1, goals=[CHERKI])) == []
+    [first] = step(match(home=1, goals=[CHERKI]))
+    [second] = step(match(home=2, goals=[CHERKI, semenyo]))
+    assert [g.scorer for g in first.new_goals] == ["Rayan Cherki"] and [g.scorer for g in second.new_goals] == ["Antoine Semenyo"]
     feed.events = [key_event("29'", "Rayan Cherki", "Antoine Semenyo"), key_event("43'", "Antoine Semenyo", "Marc Guéhi")]
-    [u] = step(match(home=2, goals=[CHERKI, semenyo]))
-    desc = update_embed(u).description
-    assert "Assist: Antoine Semenyo" in desc and "Assist: Marc Guéhi" in desc
+    NOW[0] = WATCH_CHECK_SECONDS
+    edits = step(match(home=2, goals=[CHERKI, semenyo]))
+    assert [update_embed(e).description.splitlines()[-1] for e in edits] == ["🅰️ Assist: Antoine Semenyo",
+                                                                             "🅰️ Assist: Marc Guéhi"]
 
 
 def test_hockey_assists_on_their_own_line():
@@ -119,9 +134,11 @@ FREE_KICK_GOAL = [("8'", "Iliman Ndiaye (Manchester City) wins a free kick on th
 def test_fanduel_assist_for_winning_the_free_kick_shows_with_the_goal():
     feed, step = setup()
     feed.events = [key_event("9'", "Enzo Fernández", kind="Goal - Free-kick")]
-    feed.commentary = FREE_KICK_GOAL[:2]  # ESPN's commentary hasn't written the goal up yet: wait for it
-    assert step(match(home=1, goals=[("382", "9'", "Enzo Fernández")])) == []
+    feed.commentary = FREE_KICK_GOAL[:2]  # ESPN's commentary hasn't written the goal up yet: keep checking
+    [u] = step(match(home=1, goals=[("382", "9'", "Enzo Fernández")]))
+    assert "checking…" in update_embed(u).description
     feed.commentary = FREE_KICK_GOAL
+    NOW[0] = WATCH_CHECK_SECONDS
     [u] = step(match(home=1, goals=[("382", "9'", "Enzo Fernández")]))
     assert ("⚽ 9' Enzo Fernández (Manchester City)\n🅰️ FanDuel assist: Iliman Ndiaye (won the free kick)"
             in update_embed(u).description)
@@ -168,3 +185,49 @@ def test_fanduel_assist_rules():
         "took his own penalty: no assist": [],
         "shot a minute earlier is not a rebound": [],
     }
+
+
+def test_bot_edits_a_soccer_goal_post_when_the_assist_is_out(tmp_path):
+    from sportsbot.bot import SportsBot
+    from sportsbot.storage import SubscriptionStore
+    bot = SportsBot(SubscriptionStore(tmp_path / "s.json"), 10, None)
+    bot.store.add(5, "epl")
+    feed = Feed()
+    NOW[0] = 0.0
+    bot.play_resolvers["epl"] = AssistResolver(feed, clock=lambda: NOW[0])
+    boards = [match()]
+
+    async def scoreboard(league, date=None):
+        return boards[0]
+    bot.espn.scoreboard = scoreboard
+
+    class Message:
+        def __init__(self, embed):
+            self.embed = embed
+
+        async def edit(self, embed=None):
+            self.embed = embed
+    posts = []
+
+    async def send(channel_id, embed=None, content=None):
+        posts.append(Message(embed))
+        return posts[-1]
+    bot._send = send
+    asyncio.run(bot._poll_league("epl"))
+    boards[0] = match(home=1, goals=[CHERKI])
+    asyncio.run(bot._poll_league("epl"))
+    [post] = posts
+    assert "🅰️ Assist: checking…" in post.embed.description
+    feed.events = [key_event("29'", "Rayan Cherki", "Antoine Semenyo")]
+    NOW[0] = WATCH_CHECK_SECONDS
+    asyncio.run(bot._poll_league("epl"))
+    assert len(posts) == 1 and "🅰️ Assist: Antoine Semenyo" in post.embed.description
+    asyncio.run(bot.espn.close())
+
+
+def test_own_goal_is_not_watched():
+    feed, step = setup()
+    feed.events = [key_event("63'", "Lisandro Martínez", kind="Own Goal")]
+    [u] = step(match(home=1, goals=[("382", "63'", "Lisandro Martínez")]))
+    NOW[0] = WATCH_SECONDS
+    assert step(match(home=1, goals=[("382", "63'", "Lisandro Martínez")])) == []

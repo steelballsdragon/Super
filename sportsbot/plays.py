@@ -147,55 +147,62 @@ class PlayResolver:
 
 FetchGoalDetails = Callable[[str], Awaitable[list[GoalDetail]]]
 
-# How long a soccer goal waits for its assist before posting without it.
-ASSIST_WAIT_SECONDS = 45
+
+def _waiting(goal: Goal) -> bool:
+    """Whether a goal's assist is still to come (an own goal has none)."""
+    return goal.assist is None and not goal.own_goal
 
 
 @dataclass
-class _PendingGoals:
-    update: Update
+class _Watched:
+    update: Update  # as last posted
     since: float
+    checked: float
 
 
 class AssistResolver:
     """Adds the assister to soccer goal updates.
 
     The scoreboard only names the scorer, so each new goal is looked up in the
-    match details. Goals wait briefly for ESPN to publish those details, then
-    post without the assist rather than being held back.
+    match details. The goal posts straight away with whatever is known; if the
+    assist isn't out yet, the post says it's being checked and is edited when
+    ESPN publishes it (or FanDuel's extra assist, e.g. who won the penalty),
+    for up to WATCH_SECONDS.
     """
 
     def __init__(self, fetch: FetchGoalDetails, clock: Clock = time.monotonic) -> None:
         self._fetch = fetch
         self._clock = clock
-        self._pending: dict[str, _PendingGoals] = {}
+        self._watching: list[_Watched] = []
 
     async def resolve(self, games: list[Game], updates: list[Update]) -> list[Update]:
-        others: list[Update] = []
+        now, out = self._clock(), []
+        edits = await self._recheck(now)
         for u in updates:
             if u.kind == SCORE and u.new_goals:
-                waiting = self._pending.get(u.game.id)
-                goals = (waiting.update.new_goals if waiting else ()) + u.new_goals
-                since = waiting.since if waiting else self._clock()
-                self._pending[u.game.id] = _PendingGoals(replace(u, new_goals=goals), since)
-            else:
-                others.append(u)
+                goals = await self._with_assists(u.game.id, u.new_goals)
+                u = replace(u, new_goals=goals)
+                if any(_waiting(g) for g in goals):
+                    self._watching.append(_Watched(u, now, now))
+            out.append(u)
+        return edits + out
 
-        live = {g.id for g in games}
-        due = {u.game.id for u in others}  # e.g. the final whistle must come after the goal
-        ready: list[Update] = []
-        for game_id in list(self._pending):
-            pending = self._pending[game_id]
-            goals = await self._with_assists(game_id, pending.update.new_goals)
-            if (
-                all(g.assist is not None for g in goals)
-                or self._clock() - pending.since >= ASSIST_WAIT_SECONDS
-                or game_id in due
-                or game_id not in live
-            ):
-                del self._pending[game_id]
-                ready.append(replace(pending.update, new_goals=goals))
-        return ready + others
+    async def _recheck(self, now: float) -> list[Update]:
+        edits = []
+        for w in list(self._watching):
+            expired = now - w.since >= WATCH_SECONDS
+            if not expired and now - w.checked < WATCH_CHECK_SECONDS:
+                continue
+            w.checked = now
+            goals = await self._with_assists(w.update.game.id, w.update.new_goals)
+            if expired:  # no assist found in time: stop saying it's being checked
+                goals = tuple(replace(g, assist="") if _waiting(g) else g for g in goals)
+            if goals != w.update.new_goals:
+                w.update = replace(w.update, new_goals=goals)
+                edits.append(replace(w.update, edit=True))
+            if expired or not any(_waiting(g) for g in goals):
+                self._watching.remove(w)
+        return edits
 
     async def _with_assists(self, game_id: str, goals: tuple[Goal, ...]) -> tuple[Goal, ...]:
         try:
@@ -209,7 +216,7 @@ class AssistResolver:
         out = []
         for g in goals:
             d = found.get((g.minute, g.scorer))
-            if d is None or (not d.assist and not d.in_commentary):
+            if g.assist is not None or d is None or (not d.assist and not d.in_commentary):
                 out.append(g)
             else:
                 out.append(replace(g, assist=d.assist or "", fanduel=d.fanduel, fanduel_how=d.fanduel_how))
