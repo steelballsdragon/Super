@@ -109,6 +109,7 @@ class ScoringPlay:
     when: str  # e.g. "Q1 2:59", "Bottom 1st" or "2nd 16:58"
     away_score: int
     home_score: int
+    ready: bool = True  # False while ESPN is still filling the play in (an NHL goal with no scorer yet)
 
     @property
     def total(self) -> int:
@@ -356,6 +357,7 @@ def _parse_hockey_plays(summary: dict) -> list[ScoringPlay]:
             category = "Goal"
         period = (p.get("period") or {}).get("displayValue", "")
         clock = (p.get("clock") or {}).get("displayValue", "")
+        text, ready = _hockey_goal_text(text, p.get("participants") or [])
         plays.append(
             ScoringPlay(
                 id=str(p.get("id", "")),
@@ -367,9 +369,27 @@ def _parse_hockey_plays(summary: dict) -> list[ScoringPlay]:
                 when=f"{period} {clock}".strip(),
                 away_score=_int(p.get("awayScore")),
                 home_score=_int(p.get("homeScore")),
+                ready=ready,
             )
         )
     return plays
+
+
+def _hockey_goal_text(text: str, participants: list) -> tuple[str, bool]:
+    """An NHL goal's text with its scorer, and whether it's complete. ESPN first posts a goal as a placeholder
+    (e.g. "Goal, assists: none") and fills in the scorer and assists a little later; the scorer is also in
+    the play's participants, sometimes before the text has it."""
+    scorer = next(((x.get("athlete") or {}).get("displayName", "") for x in participants if x.get("type") == "scorer"), "")
+    head, sep, rest = text.partition(", assists: ")
+    if not sep:
+        head, sep, rest = text.partition(", Unassisted")
+    head = head.strip()
+    found = re.match(r"(.*?)\s*\bGoal\b", head)
+    named = (found.group(1) if found else head).strip()
+    if not named and scorer:
+        head, named = (f"{scorer} {head}" if head else f"{scorer} Goal"), scorer
+    placeholder = sep == ", assists: " and rest.strip().lower() in ("", "none")
+    return f"{head}{sep}{rest}", bool(named) and not placeholder
 
 
 @dataclass(frozen=True)
