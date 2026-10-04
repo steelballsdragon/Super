@@ -3,7 +3,7 @@ import asyncio
 from sportsbot.espn import parse_scoreboard, parse_scoring_plays
 from sportsbot.formatting import update_embed
 from sportsbot.leagues import LEAGUES
-from sportsbot.plays import PLAY_WAIT_SECONDS, PlayResolver
+from sportsbot.plays import PLAY_WAIT_SECONDS, WATCH_CHECK_SECONDS, WATCH_SECONDS, PlayResolver
 from sportsbot.tracker import FINAL, SCORE, Tracker
 
 NFL = LEAGUES["nfl"]
@@ -141,7 +141,7 @@ def nhl_goal(text, participants=()):
             "participants": list(participants)}
 
 
-def test_nhl_goal_waits_for_espn_to_name_the_scorer():
+def test_nhl_goal_posts_at_once_and_is_edited_when_espn_names_the_scorer():
     now = [0.0]
     plays = []
 
@@ -153,26 +153,72 @@ def test_nhl_goal_waits_for_espn_to_name_the_scorer():
         return asyncio.run(resolver.resolve(games, tracker.update("nhl", games)))
     nhl_step(nhl_board())
     plays.append(nhl_goal("Goal, assists: none"))  # ESPN's first version of the goal: a placeholder
-    assert nhl_step(nhl_board(home=1)) == []
-    now[0] = 30
-    plays[0] = nhl_goal("Brayden Schenn Goal (1) Snap Shot, assists: Victor Eklund (1), Matthew Schaefer (1)")
     [u] = nhl_step(nhl_board(home=1))
-    desc = update_embed(u).description
-    assert "Brayden Schenn Goal (1) Snap Shot" in desc and "🅰️ Assists: Victor Eklund (1), Matthew Schaefer (1)" in desc
+    assert not u.edit and "⏳ Scorer and assists coming…" in update_embed(u).description
+    plays[0] = nhl_goal("Brayden Schenn Goal (1) Snap Shot, assists: Victor Eklund (1)")
+    now[0] = WATCH_CHECK_SECONDS - 1
+    assert nhl_step(nhl_board(home=1)) == []  # re-checked every WATCH_CHECK_SECONDS, not every update
+    now[0] = WATCH_CHECK_SECONDS
+    [e] = nhl_step(nhl_board(home=1))
+    desc = update_embed(e).description
+    assert e.edit and "Brayden Schenn Goal (1) Snap Shot" in desc and "🅰️ Assists: Victor Eklund (1)" in desc
+    # A correction minutes later (a second assist added) edits the post again; no change, no edit.
+    plays[0] = nhl_goal("Brayden Schenn Goal (1) Snap Shot, assists: Victor Eklund (1), Matthew Schaefer (1)")
+    now[0] = 5 * 60
+    [e] = nhl_step(nhl_board(home=1))
+    assert e.edit and "Matthew Schaefer (1)" in update_embed(e).description
+    now[0] = 6 * 60
+    assert nhl_step(nhl_board(home=1)) == []
+    # After WATCH_SECONDS the post is left alone.
+    plays[0] = nhl_goal("Someone Else Goal (1) Snap Shot, Unassisted")
+    now[0] = WATCH_SECONDS + 1
+    assert nhl_step(nhl_board(home=1)) == []
 
 
-def test_nhl_scorer_comes_from_the_participants_and_a_placeholder_still_posts_in_time():
+def test_nhl_scorer_comes_from_the_participants():
     [p] = parse_scoring_plays({"plays": [nhl_goal(", assists: Victor Eklund (1)",
                                                   [{"type": "scorer", "athlete": {"displayName": "Brayden Schenn"}}])]},
                               "hockey")
     assert p.ready and p.text == "Brayden Schenn Goal, assists: Victor Eklund (1)"
+
+
+def test_bot_edits_the_posts_of_a_corrected_play(tmp_path):
+    from sportsbot.bot import SportsBot
+    from sportsbot.storage import SubscriptionStore
+    bot = SportsBot(SubscriptionStore(tmp_path / "s.json"), 10, None)
+    bot.store.add(5, "nhl")
+    plays = [nhl_goal("Goal, assists: none")]
     now = [0.0]
 
     async def feed(event_id):
-        return parse_scoring_plays({"plays": [nhl_goal("Goal, assists: none")]}, "hockey")
-    tracker, resolver = Tracker(), PlayResolver(feed, clock=lambda: now[0])
-    asyncio.run(resolver.resolve([], tracker.update("nhl", nhl_board())))
-    assert asyncio.run(resolver.resolve(nhl_board(home=1), tracker.update("nhl", nhl_board(home=1)))) == []
-    now[0] = PLAY_WAIT_SECONDS  # never filled in: post what ESPN has rather than nothing
-    [u] = asyncio.run(resolver.resolve(nhl_board(home=1), tracker.update("nhl", nhl_board(home=1))))
-    assert u.play is not None
+        return parse_scoring_plays({"plays": plays}, "hockey")
+    bot.play_resolvers["nhl"] = PlayResolver(feed, clock=lambda: now[0])
+    boards = [nhl_board()]
+
+    async def scoreboard(league, date=None):
+        return boards[0]
+    bot.espn.scoreboard = scoreboard
+
+    class Message:
+        def __init__(self, embed):
+            self.embed = embed
+
+        async def edit(self, embed=None):
+            self.embed = embed
+    posts = []
+
+    async def send(channel_id, embed=None, content=None):
+        posts.append(Message(embed))
+        return posts[-1]
+    bot._send = send
+    asyncio.run(bot._poll_league("nhl"))
+    boards[0] = nhl_board(home=1)
+    asyncio.run(bot._poll_league("nhl"))
+    [post] = posts
+    assert "⏳ Scorer and assists coming…" in post.embed.description
+    plays[0] = nhl_goal("Brayden Schenn Goal (1) Snap Shot, assists: Victor Eklund (1)")
+    now[0] = WATCH_CHECK_SECONDS
+    asyncio.run(bot._poll_league("nhl"))
+    assert len(posts) == 1  # edited, not posted again
+    assert "Brayden Schenn Goal (1) Snap Shot\n🅰️ Assists: Victor Eklund (1)" in post.embed.description
+    asyncio.run(bot.espn.close())

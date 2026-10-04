@@ -46,6 +46,7 @@ class Update:
     prev_total: int = 0  # combined score before this update
     play: ScoringPlay | None = None  # NFL/MLB/NHL scoring play details, when known
     count: int = 1  # wickets that fell, or the over count reached (OVERS)
+    edit: bool = False  # a correction to a scoring play already posted (e.g. ESPN named the scorer): edit that post
 
 
 def _batting(game: Game) -> str | None:
