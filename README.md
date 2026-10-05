@@ -271,6 +271,10 @@ from the last ball posted, with no repeats or gaps; after a long outage it skips
 posting overs of backlog. Ball-by-ball channels still get the match start, innings break and result, but not the
 separate wicket and every-5/10-overs posts.
 
+Ball by ball is for senior teams: Under-19 matches aren't posted ball by ball when a channel follows all matches or a
+country (following "India" doesn't bring in India Under-19s). To get one, follow the youth team by name, e.g.
+`team:India Under-19s`.
+
 ## Setup
 
 1. Create an application at https://discord.com/developers/applications, add a **Bot**, and copy its token.
