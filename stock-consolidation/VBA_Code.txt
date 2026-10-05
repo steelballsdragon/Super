@@ -31,14 +31,16 @@
 '   - the same item and location listed twice is kept once (largest values).
 '
 ' Planning:
-'   1. Only items sitting in 2 or more locations are looked at.
-'   2. Locations are emptied smallest quantity first.
-'   3. Stock only goes to locations that already hold the same item.
-'   4. A location is only planned if it can be emptied completely:
-'        - one move if any location has room for all of it (the one holding
-'          the most of the item wins, then the one with least spare room);
-'        - otherwise, if splitting is allowed, it is spread over the
-'          locations with the most room first.
+'   1. Only items sitting in 2 or more locations are looked at, and stock
+'      only goes to locations that already hold the same item.
+'   2. For each item every combination of its locations is tried (items in
+'      more than 10 locations use a quicker rule), and the plan that empties
+'      the MOST locations is chosen; between equal plans, the one that moves
+'      the FEWEST units.
+'   3. A location is only emptied completely. When splitting is allowed it
+'      may be spread over several locations; otherwise it must fit whole.
+'   4. Each emptied location (largest first) goes to the kept location it
+'      fits most tightly; if none can take it all, to the ones with most room.
 '   5. A location that is emptied never receives stock, and a location that
 '      receives stock is never emptied.
 '   6. Open capacity starts at Fp Available and goes down as moves are
@@ -68,14 +70,16 @@ Private Const FIRST_ROW As Long = 5
 Private Const CLEAN_COLS As Long = 6
 Private Const PLAN_COLS As Long = 9
 Private Const FAIL_COLS As Long = 6
+Private Const MAX_SEARCH As Long = 10   ' items in more locations than this use the quicker "cheapest first" rule
 
-' Accepted headers (lower case, spaces as _, without a "Max of"/"Sum of" prefix)
-Private Const ITEM_HEADERS As String = "prtnum,item_number,item,item_no,part_number,part_no,part,sku"
-Private Const LOC_HEADERS As String = "stoloc,location,location_id,loc,bin"
-Private Const QTY_HEADERS As String = "curqvl,current_qty,current_quantity,quantity,qty"
-Private Const AVAIL_HEADERS As String = "fp_available,available_capacity,available,open_capacity"
-Private Const MAX_HEADERS As String = "maxqvl,max_qty,max_quantity,max_capacity,capacity"
-Private Const TYPE_HEADERS As String = "typcod,location_type,loc_type,type"
+' Accepted headers: letters and digits only, lower case. A Power BI prefix such as
+' "Max of", "Sum of" or "First" and a table name such as "Report[Prtnum]" are ignored.
+Private Const ITEM_HEADERS As String = "prtnum,itemnumber,item,itemno,itemcode,partnumber,partno,part,sku"
+Private Const LOC_HEADERS As String = "stoloc,location,locationid,loc,bin,binlocation"
+Private Const QTY_HEADERS As String = "curqvl,currentqty,currentquantity,quantity,qty"
+Private Const AVAIL_HEADERS As String = "fpavailable,availablecapacity,available,opencapacity,fpavail"
+Private Const MAX_HEADERS As String = "maxqvl,maxqty,maxquantity,maxcapacity,capacity"
+Private Const TYPE_HEADERS As String = "typcod,locationtype,loctype,type"
 
 Private Const REASON_TYPE As String = "No other location of this item with the same location type"
 Private Const REASON_ROOM As String = "Not enough room in the item's other locations"
@@ -456,77 +460,295 @@ Private Sub PlanMoves()
             For k = g1 To g2
                 rMulti(ord(k)) = True
             Next k
-            For i = g1 To g2
-                If rState(ord(i)) = 0 Then TryToEmpty ord, g1, g2, ord(i)
-            Next i
+            PlanItem ord, g1, g2
         End If
         g1 = g2 + 1
     Loop
 End Sub
 
-' Tries to empty row s into the other locations of the same item (ord(g1..g2)).
-Private Sub TryToEmpty(ord() As Long, ByVal g1 As Long, ByVal g2 As Long, ByVal s As Long)
-    Dim cand() As Long, nc As Long, nOther As Long
-    Dim i As Long, k As Long, t As Long, best As Long
-    Dim need As Double, room As Double, sumOpen As Double, maxOpen As Double
-    Dim remaining As Double, take As Double
+' Plans one item: its locations are ord(g1..g2), smallest quantity first.
+Private Sub PlanItem(ord() As Long, ByVal g1 As Long, ByVal g2 As Long)
+    Dim n As Long, i As Long, j As Long, nk As Long, k As Long, r As Long, x As Long
+    Dim rowKey() As String, keys() As String, tmp As String, grp() As Long
+    Dim remaining As Long, cnt As Long, sumRoom As Double, maxRoom As Double, f As Double
 
-    need = rQty(s)
-    ReDim cand(1 To g2 - g1 + 1)
+    n = g2 - g1 + 1
+    ReDim rowKey(1 To n)
+    ReDim keys(1 To n)
+    ReDim grp(0 To n - 1)
+    For i = 1 To n
+        If mSameTypeOnly Then rowKey(i) = lTypeKey(rLocIdx(ord(g1 + i - 1))) Else rowKey(i) = ""
+    Next i
+    ' The groups: one per location type when moving within a type only, else one
+    For i = 1 To n
+        For j = 1 To nk
+            If keys(j) = rowKey(i) Then Exit For
+        Next j
+        If j > nk Then
+            nk = nk + 1
+            keys(nk) = rowKey(i)
+        End If
+    Next i
+    For i = 2 To nk
+        tmp = keys(i)
+        j = i - 1
+        Do While j >= 1
+            If keys(j) <= tmp Then Exit Do
+            keys(j + 1) = keys(j)
+            j = j - 1
+        Loop
+        keys(j + 1) = tmp
+    Next i
+    For j = 1 To nk
+        k = 0
+        For i = 1 To n
+            If rowKey(i) = keys(j) Then
+                grp(k) = ord(g1 + i - 1)
+                k = k + 1
+            End If
+        Next i
+        If k >= 2 Then PlanGroup grp, k
+    Next j
+
+    ' Locations that stay without receiving stock, while the item is still in 2+ places
     For i = g1 To g2
-        t = ord(i)
-        If t <> s And rState(t) <> 1 Then
-            If SameTypeOk(s, t) Then
-                nOther = nOther + 1
-                room = OpenCap(t)
-                If room > EPS Then
-                    nc = nc + 1
-                    cand(nc) = t
-                    sumOpen = sumOpen + room
-                    If room > maxOpen Then maxOpen = room
-                    If room >= need - EPS Then
-                        If best = 0 Then
-                            best = t
-                        ElseIf SingleBefore(t, best) Then
-                            best = t
-                        End If
-                    End If
+        If rState(ord(i)) <> 1 Then remaining = remaining + 1
+    Next i
+    If remaining < 2 Then Exit Sub
+    For i = 1 To n
+        r = ord(g1 + i - 1)
+        If rState(r) = 0 Then
+            cnt = 0
+            sumRoom = 0
+            maxRoom = 0
+            For j = 1 To n
+                x = ord(g1 + j - 1)
+                If x <> r And rState(x) <> 1 And rowKey(j) = rowKey(i) Then
+                    cnt = cnt + 1
+                    f = FreeOf(x)
+                    sumRoom = sumRoom + f
+                    If f > maxRoom Then maxRoom = f
                 End If
+            Next j
+            failCount = failCount + 1
+            failRow(failCount) = r
+            If cnt = 0 Then
+                failReason(failCount) = REASON_TYPE
+                failRoom(failCount) = 0
+            ElseIf mAllowSplit Then
+                failReason(failCount) = REASON_ROOM
+                failRoom(failCount) = sumRoom
+            Else
+                failReason(failCount) = REASON_SINGLE
+                failRoom(failCount) = maxRoom
             End If
         End If
     Next i
+End Sub
 
-    If best > 0 Then
-        AddMove s, best, need
-    ElseIf mAllowSplit And nc > 0 And sumOpen >= need - EPS Then
-        SortCandidates cand, nc
-        remaining = need
-        For k = 1 To nc
-            If remaining <= EPS Then Exit For
-            take = OpenCap(cand(k))
-            If take > remaining Then take = remaining
-            AddMove s, cand(k), take
-            remaining = remaining - take
-        Next k
+' Chooses which locations of a group (grp(0..k-1), smallest qty first) to empty and moves them.
+' Every combination is tried: the one emptying the most locations wins, then the one moving the
+' fewest units. Emptying a location needs its qty moved and loses its room, so it "costs"
+' qty + room, and the chosen locations' costs must fit in the room of all the group's locations.
+Private Sub PlanGroup(grp() As Long, ByVal k As Long)
+    Dim fr() As Double, w() As Double, chosen() As Boolean, bit() As Long, order() As Long
+    Dim budget As Double, sw As Double, units As Double, bestUnits As Double, used As Double
+    Dim i As Long, j As Long, m As Long, cnt As Long, bestCnt As Long, bestM As Long, v As Long
+    Dim better As Boolean
+
+    ReDim fr(0 To k - 1)
+    ReDim w(0 To k - 1)
+    ReDim chosen(0 To k - 1)
+    ReDim bit(0 To k - 1)
+    For i = 0 To k - 1
+        fr(i) = FreeOf(grp(i))
+        w(i) = rQty(grp(i)) + fr(i)
+        budget = budget + fr(i)
+        If i <= MAX_SEARCH Then bit(i) = 2 ^ i
+    Next i
+
+    If k > MAX_SEARCH Then
+        ' Too many to try every combination: cheapest first while they fit
+        ReDim order(0 To k - 1)
+        For i = 0 To k - 1
+            v = i
+            j = i - 1
+            Do While j >= 0
+                If Not CheaperFirst(w(v), rQty(grp(v)), v, w(order(j)), rQty(grp(order(j))), order(j)) Then Exit Do
+                order(j + 1) = order(j)
+                j = j - 1
+            Loop
+            order(j + 1) = v
+        Next i
+        For i = 0 To k - 1
+            If cnt < k - 1 And used + w(order(i)) <= budget + EPS Then
+                chosen(order(i)) = True
+                used = used + w(order(i))
+                cnt = cnt + 1
+            Else
+                Exit For
+            End If
+        Next i
     Else
-        failCount = failCount + 1
-        failRow(failCount) = s
-        If mAllowSplit Then failRoom(failCount) = sumOpen Else failRoom(failCount) = maxOpen
-        If nOther = 0 Then
-            failReason(failCount) = REASON_TYPE
-        ElseIf mAllowSplit Then
-            failReason(failCount) = REASON_ROOM
-        Else
-            failReason(failCount) = REASON_SINGLE
-        End If
-        Exit Sub
+        bestM = 0
+        For m = 1 To 2 ^ k - 2
+            sw = 0
+            cnt = 0
+            units = 0
+            For i = 0 To k - 1
+                If (m And bit(i)) <> 0 Then
+                    sw = sw + w(i)
+                    cnt = cnt + 1
+                    units = units + rQty(grp(i))
+                End If
+            Next i
+            If sw <= budget + EPS Then
+                If bestM = 0 Then
+                    better = True
+                ElseIf cnt > bestCnt Then
+                    better = True
+                ElseIf cnt = bestCnt And units < bestUnits - EPS Then
+                    better = True
+                Else
+                    better = False
+                End If
+                If better And Not mAllowSplit Then
+                    For i = 0 To k - 1
+                        chosen(i) = ((m And bit(i)) <> 0)
+                    Next i
+                    better = Allocate(grp, k, chosen, False)     ' each must fit whole somewhere
+                End If
+                If better Then
+                    bestM = m
+                    bestCnt = cnt
+                    bestUnits = units
+                End If
+            End If
+        Next m
+        For i = 0 To k - 1
+            chosen(i) = ((bestM And bit(i)) <> 0)
+        Next i
     End If
 
-    ' The source location is now empty, so its space is free again
-    rState(s) = 1
-    rCur(s) = 0
-    lOpen(rLocIdx(s)) = lOpen(rLocIdx(s)) + need
+    Allocate grp, k, chosen, True
 End Sub
+
+' Places each chosen location of the group (largest first) into the kept ones: the tightest
+' fit if one can take it all, otherwise (when splitting is allowed) the ones with the most room.
+' With makeMoves = False nothing changes; the result says whether everything could be placed.
+Private Function Allocate(grp() As Long, ByVal k As Long, chosen() As Boolean, ByVal makeMoves As Boolean) As Boolean
+    Dim room() As Double, cur() As Double, kept() As Boolean, order() As Long
+    Dim i As Long, j As Long, n As Long, e As Long, t As Long, v As Long
+    Dim need As Double, toPlace As Double, take As Double
+
+    ReDim room(0 To k - 1)
+    ReDim cur(0 To k - 1)
+    ReDim kept(0 To k - 1)
+    ReDim order(1 To k)
+    For i = 0 To k - 1
+        room(i) = FreeOf(grp(i))
+        cur(i) = rCur(grp(i))
+        kept(i) = Not chosen(i)
+        If chosen(i) Then
+            ' insert into order: largest qty first, then position
+            v = i
+            j = n
+            Do While j >= 1
+                If rQty(grp(order(j))) > rQty(grp(v)) + EPS Then Exit Do
+                If Abs(rQty(grp(order(j))) - rQty(grp(v))) <= EPS And order(j) < v Then Exit Do
+                order(j + 1) = order(j)
+                j = j - 1
+            Loop
+            order(j + 1) = v
+            n = n + 1
+        End If
+    Next i
+
+    Allocate = True
+    For j = 1 To n
+        e = order(j)
+        need = rQty(grp(e))
+        t = -1
+        For i = 0 To k - 1                              ' tightest fit
+            If kept(i) Then
+                If room(i) >= need - EPS Then
+                    If t < 0 Then
+                        t = i
+                    ElseIf FirstBefore(room(i), room(t), cur(i), cur(t), rLocKey(grp(i)), rLocKey(grp(t)), False) Then
+                        t = i
+                    End If
+                End If
+            End If
+        Next i
+        If t >= 0 Then
+            If makeMoves Then AddMove grp(e), grp(t), need
+            room(t) = room(t) - need
+            cur(t) = cur(t) + need
+        ElseIf mAllowSplit Then
+            toPlace = need
+            Do While toPlace > EPS                         ' most room first
+                t = -1
+                For i = 0 To k - 1
+                    If kept(i) And room(i) > EPS Then
+                        If t < 0 Then
+                            t = i
+                        ElseIf FirstBefore(room(i), room(t), cur(i), cur(t), rLocKey(grp(i)), rLocKey(grp(t)), True) Then
+                            t = i
+                        End If
+                    End If
+                Next i
+                If t < 0 Then Exit Do
+                take = room(t)
+                If take > toPlace Then take = toPlace
+                If makeMoves Then AddMove grp(e), grp(t), take
+                room(t) = room(t) - take
+                cur(t) = cur(t) + take
+                toPlace = toPlace - take
+            Loop
+        Else
+            Allocate = False                            ' cannot be placed whole
+            If Not makeMoves Then Exit Function
+            kept(e) = True                              ' it stays; its room can take smaller ones
+            GoTo NextLocation
+        End If
+        If makeMoves Then                               ' the location is now empty
+            rState(grp(e)) = 1
+            rCur(grp(e)) = 0
+            lOpen(rLocIdx(grp(e))) = lOpen(rLocIdx(grp(e))) + need
+        End If
+NextLocation:
+    Next j
+End Function
+
+' Target order. mostRoom = False: least room first (tightest fit); True: most room first.
+' Then the one holding the most of the item, then the location code.
+Private Function FirstBefore(ByVal roomA As Double, ByVal roomB As Double, ByVal curA As Double, _
+                             ByVal curB As Double, ByVal keyA As String, ByVal keyB As String, _
+                             ByVal mostRoom As Boolean) As Boolean
+    If Abs(roomA - roomB) > EPS Then
+        If mostRoom Then FirstBefore = (roomA > roomB) Else FirstBefore = (roomA < roomB)
+    ElseIf Abs(curA - curB) > EPS Then
+        FirstBefore = (curA > curB)
+    Else
+        FirstBefore = (keyA < keyB)
+    End If
+End Function
+
+' Cheapest first: smallest cost (qty + room), then smallest qty, then position
+Private Function CheaperFirst(ByVal wA As Double, ByVal qA As Double, ByVal iA As Long, _
+                              ByVal wB As Double, ByVal qB As Double, ByVal iB As Long) As Boolean
+    If Abs(wA - wB) > EPS Then
+        CheaperFirst = (wA < wB)
+    ElseIf Abs(qA - qB) > EPS Then
+        CheaperFirst = (qA < qB)
+    Else
+        CheaperFirst = (iA < iB)
+    End If
+End Function
+
+Private Function FreeOf(ByVal r As Long) As Double
+    If lOpen(rLocIdx(r)) > 0 Then FreeOf = lOpen(rLocIdx(r))
+End Function
 
 Private Sub AddMove(ByVal s As Long, ByVal t As Long, ByVal qty As Double)
     Dim li As Long, before As Double
@@ -547,18 +769,6 @@ Private Sub AddMove(ByVal s As Long, ByVal t As Long, ByVal qty As Double)
     rState(t) = 2
 End Sub
 
-Private Function SameTypeOk(ByVal s As Long, ByVal t As Long) As Boolean
-    If mSameTypeOnly Then
-        SameTypeOk = (lTypeKey(rLocIdx(s)) = lTypeKey(rLocIdx(t)))
-    Else
-        SameTypeOk = True
-    End If
-End Function
-
-Private Function OpenCap(ByVal t As Long) As Double
-    OpenCap = lOpen(rLocIdx(t))
-End Function
-
 ' Sort orders: 1 = item, location (clean data)   2 = item, smallest qty, location (order of work)
 Private Function RowBefore(ByVal a As Long, ByVal b As Long, ByVal order As Long) As Boolean
     If rItemKey(a) <> rItemKey(b) Then
@@ -567,28 +777,6 @@ Private Function RowBefore(ByVal a As Long, ByVal b As Long, ByVal order As Long
         RowBefore = (rQty(a) < rQty(b))
     Else
         RowBefore = (rLocKey(a) < rLocKey(b))
-    End If
-End Function
-
-' Single target: holds the most of the item, then least spare room, then location
-Private Function SingleBefore(ByVal a As Long, ByVal b As Long) As Boolean
-    If Abs(rCur(a) - rCur(b)) > EPS Then
-        SingleBefore = (rCur(a) > rCur(b))
-    ElseIf Abs(OpenCap(a) - OpenCap(b)) > EPS Then
-        SingleBefore = (OpenCap(a) < OpenCap(b))
-    Else
-        SingleBefore = (rLocKey(a) < rLocKey(b))
-    End If
-End Function
-
-' Split targets: most spare room, then holds the most of the item, then location
-Private Function SplitBefore(ByVal a As Long, ByVal b As Long) As Boolean
-    If Abs(OpenCap(a) - OpenCap(b)) > EPS Then
-        SplitBefore = (OpenCap(a) > OpenCap(b))
-    ElseIf Abs(rCur(a) - rCur(b)) > EPS Then
-        SplitBefore = (rCur(a) > rCur(b))
-    Else
-        SplitBefore = (rLocKey(a) < rLocKey(b))
     End If
 End Function
 
@@ -623,21 +811,6 @@ Private Sub SortIndex(arr() As Long, ByVal lo As Long, ByVal hi As Long, ByVal o
     Loop
 End Sub
 
-' Few candidates per item, so a simple insertion sort is enough
-Private Sub SortCandidates(arr() As Long, ByVal n As Long)
-    Dim i As Long, j As Long, v As Long
-    For i = 2 To n
-        v = arr(i)
-        j = i - 1
-        Do While j >= 1
-            If Not SplitBefore(v, arr(j)) Then Exit Do
-            arr(j + 1) = arr(j)
-            j = j - 1
-        Loop
-        arr(j + 1) = v
-    Next i
-End Sub
-
 '------------------------------------------------------------------------------
 ' Output
 '------------------------------------------------------------------------------
@@ -657,7 +830,7 @@ Private Function FailHeaders() As Variant
 End Function
 
 Private Sub WriteCleanData()
-    Dim ws As Worksheet, out() As Variant, r As Long, lastRow As Long, fmt As String
+    Dim ws As Worksheet, out() As Variant, r As Long, r2 As Long, lastRow As Long, fmt As String
 
     Set ws = OutputSheet("shtClean", "Clean Data")
     StartSheet ws, "Clean Data", "Rows read: " & statRead & _
@@ -692,13 +865,20 @@ Private Sub WriteCleanData()
         End With
         ws.Range(ws.Cells(FIRST_ROW, 1), ws.Cells(lastRow, 1)).HorizontalAlignment = xlLeft
         ws.Range(ws.Cells(FIRST_ROW, 3), ws.Cells(lastRow, 5)).NumberFormat = fmt
-        ' Highlight the items that sit in 2 or more locations
-        For r = 1 To rowCount
+        ' Highlight the items that sit in 2 or more locations (their rows are next to each other)
+        r = 1
+        Do While r <= rowCount
+            r2 = r
+            Do While r2 < rowCount
+                If rItemKey(r2 + 1) <> rItemKey(r) Then Exit Do
+                r2 = r2 + 1
+            Loop
             If rMulti(r) Then
-                ws.Range(ws.Cells(FIRST_ROW + r - 1, 1), ws.Cells(FIRST_ROW + r - 1, CLEAN_COLS)).Interior.Color = RGB(255, 242, 204)
-                ws.Cells(FIRST_ROW + r - 1, 1).Font.Bold = True
+                ws.Range(ws.Cells(FIRST_ROW + r - 1, 1), ws.Cells(FIRST_ROW + r2 - 1, CLEAN_COLS)).Interior.Color = RGB(255, 242, 204)
+                ws.Range(ws.Cells(FIRST_ROW + r - 1, 1), ws.Cells(FIRST_ROW + r2 - 1, 1)).Font.Bold = True
             End If
-        Next r
+            r = r2 + 1
+        Loop
     Else
         NoRowsMessage ws, "No rows left after cleaning - check the Raw Data sheet and the settings."
     End If
@@ -1006,12 +1186,13 @@ End Function
 ' first sheet whose row 1 has the report headers
 Private Function FindRawSheet() As Worksheet
     Dim ws As Worksheet
+    ' 1. "Raw Data" in the workbook you are looking at
     Set ws = FindSheet(mBook, "shtRaw", "Raw Data")
-    If ws Is Nothing Then Set ws = FindSheet(ThisWorkbook, "shtRaw", "Raw Data")
     If Not ws Is Nothing Then
         Set FindRawSheet = ws
         Exit Function
     End If
+    ' 2. The sheet you are looking at, or another sheet of that workbook, with the report headers
     If TypeName(ActiveSheet) = "Worksheet" Then
         If IsReportSheet(ActiveSheet) Then
             Set FindRawSheet = ActiveSheet
@@ -1024,6 +1205,8 @@ Private Function FindRawSheet() As Worksheet
             Exit Function
         End If
     Next ws
+    ' 3. "Raw Data" in the workbook that holds this code
+    Set FindRawSheet = FindSheet(ThisWorkbook, "shtRaw", "Raw Data")
 End Function
 
 Private Function IsReportSheet(ByVal ws As Worksheet) As Boolean
@@ -1076,25 +1259,56 @@ End Function
 ' done. Returns "" when there was nothing to refresh, "OK" when it worked, or
 ' the names of the connections that could not be refreshed.
 Private Function RefreshConnections() As String
-    Dim cn As Object, n As Long, failed As String
+    Dim cn As Object, ws As Worksheet, lo As Object, n As Long, src As Long
+    Dim failed As String, done As String, nm As String
     If Not mRefreshFirst Then Exit Function
     On Error Resume Next
     n = mBook.Connections.Count
     If Err.Number <> 0 Or n = 0 Then Exit Function
     Application.StatusBar = "Refreshing data from Power BI / connected sources..."
+    ' 1. Tables filled from a connection (a Power BI live export, Power Query, a data model):
+    '    refresh each one and wait for its data
+    For Each ws In mBook.Worksheets
+        For Each lo In ws.ListObjects
+            Err.Clear
+            src = 0
+            src = lo.SourceType
+            If src = 3 Or src = 4 Then              ' xlSrcQuery or xlSrcModel
+                nm = ""
+                Err.Clear
+                If src = 3 Then
+                    nm = lo.QueryTable.WorkbookConnection.Name
+                    Err.Clear
+                    lo.QueryTable.Refresh False         ' False = wait until it is done
+                Else
+                    nm = lo.TableObject.WorkbookConnection.Name
+                    Err.Clear
+                    lo.TableObject.Refresh
+                End If
+                If Err.Number <> 0 Then
+                    If Len(failed) > 0 Then failed = failed & ", "
+                    failed = failed & lo.Name
+                End If
+                done = done & "|" & nm & "|"
+            End If
+        Next lo
+    Next ws
+    ' 2. Any other connection
     For Each cn In mBook.Connections
-        Err.Clear
-        Select Case cn.Type
-        Case 1                              ' OLE DB: Power BI, Power Query, SQL Server
-            cn.OLEDBConnection.BackgroundQuery = False
-        Case 2                              ' ODBC
-            cn.ODBCConnection.BackgroundQuery = False
-        End Select
-        Err.Clear
-        cn.Refresh                          ' waits, because background refresh is off
-        If Err.Number <> 0 Then
-            If Len(failed) > 0 Then failed = failed & ", "
-            failed = failed & cn.Name
+        If InStr(done, "|" & cn.Name & "|") = 0 Then
+            Err.Clear
+            Select Case cn.Type
+            Case 1                              ' OLE DB: Power BI, Power Query, SQL Server
+                cn.OLEDBConnection.BackgroundQuery = False
+            Case 2                              ' ODBC
+                cn.ODBCConnection.BackgroundQuery = False
+            End Select
+            Err.Clear
+            cn.Refresh                          ' waits, because background refresh is off
+            If Err.Number <> 0 Then
+                If Len(failed) > 0 Then failed = failed & ", "
+                failed = failed & cn.Name
+            End If
         End If
     Next cn
     Application.CalculateUntilAsyncQueriesDone
@@ -1131,22 +1345,43 @@ Private Sub Report(ByVal msg As String)
 End Sub
 
 ' Column whose header (in row hdr) matches one of the comma-separated names
+' (An exact name anywhere in the row wins over a name with a Power BI prefix.)
 Private Function FindColumn(ByVal ws As Worksheet, ByVal hdr As Long, ByVal lastCol As Long, _
                             ByVal aliases As String) As Long
-    Dim c As Long, h As String, nm As Variant, prefix As Variant
-    For c = 1 To lastCol
-        h = LCase$(CellText(ws.Cells(hdr, c).Value))
-        For Each prefix In Array("max of ", "sum of ", "min of ", "average of ", "count of ")
-            If Left$(h, Len(prefix)) = prefix Then h = Mid$(h, Len(prefix) + 1)
-        Next prefix
-        h = Replace(Replace(Trim$(h), " ", "_"), "-", "_")
-        For Each nm In Split(aliases, ",")
-            If h = nm Then
-                FindColumn = c
-                Exit Function
-            End If
-        Next nm
-    Next c
+    Dim c As Long, pass As Long, h As String, nm As Variant, prefix As Variant
+    For pass = 1 To 2
+        For c = 1 To lastCol
+            h = HeaderKey(CellText(ws.Cells(hdr, c).Value))
+            For Each nm In Split(aliases, ",")
+                If pass = 1 Then
+                    If h = nm Then
+                        FindColumn = c
+                        Exit Function
+                    End If
+                Else
+                    For Each prefix In Array("maxof", "sumof", "minof", "averageof", "avgof", "countof", _
+                                             "max", "sum", "min", "first", "last", "average")
+                        If h = prefix & nm Then
+                            FindColumn = c
+                            Exit Function
+                        End If
+                    Next prefix
+                End If
+            Next nm
+        Next c
+    Next pass
+End Function
+
+' "Max of Curqvl" -> "maxofcurqvl", "'Report'[Prtnum]" -> "prtnum"
+Private Function HeaderKey(ByVal h As String) As String
+    Dim i As Long, p As Long, ch As String
+    h = LCase$(h)
+    p = InStrRev(h, "[")
+    If p > 0 Then h = Mid$(h, p + 1)
+    For i = 1 To Len(h)
+        ch = Mid$(h, i, 1)
+        If (ch >= "a" And ch <= "z") Or (ch >= "0" And ch <= "9") Then HeaderKey = HeaderKey & ch
+    Next i
 End Function
 
 Private Function FindLastColumn(ByVal ws As Worksheet, ByVal hdr As Long) As Long

@@ -72,12 +72,16 @@ negative, and only locations with a max qty from 9 to 23 are kept.
 
 ## How the moves are chosen
 
-1. Only items sitting in 2 or more locations are looked at.
-2. The location with the smallest quantity is emptied first.
-3. Stock only goes to locations that already hold the same item.
-4. A location is only planned if it can be emptied completely: one move if a
-   location has room for all of it (the one already holding the most of the
-   item wins). Otherwise it is spread over the locations with the most room.
+1. Only items sitting in 2 or more locations are looked at, and stock only goes
+   to locations that already hold the same item.
+2. For each item, every combination of its locations is tried, and the plan that
+   empties the **most** locations is chosen. Between equal plans, the one that
+   moves the **fewest** units wins. (Items in more than 10 locations use a
+   quicker rule that still empties the most locations.)
+3. A location is only emptied completely: whole into one location, or spread
+   over several if splitting is allowed.
+4. Each emptied location (largest first) goes to the kept location it fits most
+   tightly; if none can take it all, to the ones with the most room.
 5. A location that is emptied never receives stock, and a location that
    receives stock is never emptied.
 6. Open capacity starts at Fp Available and is updated after every planned

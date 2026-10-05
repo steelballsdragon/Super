@@ -23,14 +23,16 @@
     - the same item and location listed twice is kept once (largest values).
 
   Planning (Stock_Consolidation.xlsm applies exactly the same rules):
-    1. Only items sitting in 2 or more locations are looked at.
-    2. Locations are emptied smallest quantity first.
-    3. Stock only goes to locations that already hold the same item.
-    4. A location is only planned if it can be emptied completely:
-         - one move if any location has room for all of it (the one holding
-           the most of the item wins, then the one with least spare room);
-         - otherwise, if @AllowSplit = 1, it is spread over the locations
-           with the most room first.
+    1. Only items sitting in 2 or more locations are looked at, and stock
+       only goes to locations that already hold the same item.
+    2. For each item every combination of its locations is tried (items in
+       more than 10 locations use a quicker rule), and the plan that empties
+       the MOST locations is chosen; between equal plans, the one that moves
+       the FEWEST units.
+    3. A location is only emptied completely. With @AllowSplit = 1 it may be
+       spread over several locations; with 0 it must fit whole into one.
+    4. Each emptied location (largest first) goes to the kept location it
+       fits most tightly; if none can take it all, to the ones with most room.
     5. A location that is emptied never receives stock, and a location that
        receives stock is never emptied.
     6. Open capacity starts at Fp Available and goes down as moves are
@@ -170,7 +172,10 @@ CREATE TABLE #work (
     location_type varchar(100) NOT NULL,
     cur_qty       decimal(18,4) NOT NULL,          -- quantity as moves are planned
     state         tinyint NOT NULL DEFAULT 0,      -- 0 untouched, 1 emptied, 2 received stock
-    src_order     int NULL                         -- order in which locations are tried
+    item_seq      int NULL,                        -- items in 2+ locations, in order
+    sub_key       varchar(100) COLLATE Latin1_General_BIN2 NULL,   -- location type when @SameTypeOnly = 1
+    grp           int NULL,                        -- item (and type) group, in order of work
+    idx           int NULL                         -- position in the group: smallest qty first
 );
 
 -- Kept rows; the same item and location twice keeps the largest values
@@ -196,17 +201,27 @@ SELECT  loc_key, MAX(location_type), UPPER(MAX(location_type)), MAX(max_qty), MA
 FROM    #work
 GROUP BY loc_key;
 
--- Order of work: by item, then smallest quantity first
+-- Order of work: items in 2+ locations; within an item (and location type when
+-- @SameTypeOnly = 1) the locations are numbered smallest quantity first
 UPDATE w
-SET    src_order = o.rn
+SET    sub_key = CASE WHEN @SameTypeOnly = 1 THEN l.type_key ELSE '' END
 FROM   #work AS w
-JOIN  (SELECT row_id, ROW_NUMBER() OVER (ORDER BY item_key, current_qty, loc_key) AS rn
+JOIN   #locstate AS l ON l.loc_key = w.loc_key;
+
+UPDATE w
+SET    item_seq = o.item_seq, grp = o.grp, idx = o.idx
+FROM   #work AS w
+JOIN  (SELECT row_id,
+              DENSE_RANK() OVER (ORDER BY item_key)                                   AS item_seq,
+              DENSE_RANK() OVER (ORDER BY item_key, sub_key)                          AS grp,
+              ROW_NUMBER() OVER (PARTITION BY item_key, sub_key
+                                 ORDER BY current_qty, loc_key) - 1                   AS idx
        FROM   #work
        WHERE  item_key IN (SELECT item_key FROM #work GROUP BY item_key HAVING COUNT(*) >= 2)) AS o
        ON o.row_id = w.row_id;
 
-CREATE INDEX ix_work_item  ON #work (item_key) INCLUDE (state, loc_key, cur_qty);
-CREATE INDEX ix_work_order ON #work (src_order);
+CREATE INDEX ix_work_item ON #work (item_key) INCLUDE (state, loc_key, cur_qty);
+CREATE INDEX ix_work_grp  ON #work (grp) INCLUDE (idx, loc_key, current_qty, cur_qty, state);
 
 --------------------------------------------------------------------------------
 -- 3. PLAN THE MOVES
@@ -231,104 +246,200 @@ CREATE TABLE #not_moved (
     reason         varchar(100) NOT NULL
 );
 
-DECLARE @cand  TABLE (row_id int PRIMARY KEY,
-                      loc_key varchar(100) COLLATE Latin1_General_BIN2 NOT NULL,
-                      cur_qty decimal(18,4) NOT NULL,
-                      open_cap decimal(18,4) NOT NULL);
-DECLARE @alloc TABLE (seq int PRIMARY KEY, row_id int NOT NULL, take decimal(18,4) NOT NULL);
+-- Every combination of up to 10 locations, as a bit mask (bit i = location idx i)
+DECLARE @MaxSearch int = 10;
+IF OBJECT_ID('tempdb..#masks') IS NOT NULL DROP TABLE #masks;
+CREATE TABLE #masks (m int PRIMARY KEY);
+WITH n AS (SELECT 1 AS m UNION ALL SELECT m + 1 FROM n WHERE m < 1022)
+INSERT INTO #masks (m) SELECT m FROM n OPTION (MAXRECURSION 1100);
 
-DECLARE @i int = 1,
-        @n int = ISNULL((SELECT MAX(src_order) FROM #work), 0),
-        @src int, @item varchar(100), @src_loc varchar(100), @src_type varchar(100),
-        @need decimal(18,4), @state tinyint,
-        @n_other int, @sum_open decimal(18,4), @max_open decimal(18,4), @best int;
+DECLARE @grp    TABLE (idx int PRIMARY KEY, row_id int NOT NULL,
+                       loc_key varchar(100) COLLATE Latin1_General_BIN2 NOT NULL,
+                       qty decimal(18,4) NOT NULL, cur decimal(18,4) NOT NULL,
+                       room decimal(18,4) NOT NULL, w decimal(18,4) NOT NULL);
+DECLARE @chosen TABLE (idx int PRIMARY KEY);
+DECLARE @cands  TABLE (ord int PRIMARY KEY, m int NOT NULL);
+DECLARE @keep   TABLE (idx int PRIMARY KEY, row_id int NOT NULL,
+                       loc_key varchar(100) COLLATE Latin1_General_BIN2 NOT NULL,
+                       room decimal(18,4) NOT NULL, cur decimal(18,4) NOT NULL);
+DECLARE @alloc  TABLE (seq int PRIMARY KEY, idx int NOT NULL, take decimal(18,4) NOT NULL);
 
-WHILE @i <= @n
+DECLARE @grp_no int = 1, @groups int = ISNULL((SELECT MAX(grp) FROM #work), 0),
+        @k int, @budget decimal(18,4), @best int, @c int, @nc int, @ok bit,
+        @e int, @e_row int, @need decimal(18,4), @mask_try int, @tgt int, @item_seq int;
+
+WHILE @grp_no <= @groups
 BEGIN
-    SELECT @src = w.row_id, @item = w.item_key, @src_loc = w.loc_key, @src_type = l.type_key,
-           @need = w.current_qty, @state = w.state
+    DELETE FROM @grp;
+    INSERT INTO @grp (idx, row_id, loc_key, qty, cur, room, w)
+    SELECT w.idx, w.row_id, w.loc_key, w.current_qty, w.cur_qty,
+           CASE WHEN l.open_cap > 0 THEN l.open_cap ELSE 0 END,
+           w.current_qty + CASE WHEN l.open_cap > 0 THEN l.open_cap ELSE 0 END
     FROM   #work AS w
     JOIN   #locstate AS l ON l.loc_key = w.loc_key
-    WHERE  w.src_order = @i;
-    SET @i += 1;
+    WHERE  w.grp = @grp_no;
+    SET @k = (SELECT COUNT(*) FROM @grp);
 
-    IF @state <> 0 CONTINUE;          -- has received stock, so it stays
-
-    -- Other locations of the item that may receive stock
-    DELETE FROM @cand;
-    INSERT INTO @cand (row_id, loc_key, cur_qty, open_cap)
-    SELECT t.row_id, t.loc_key, t.cur_qty, l.open_cap
-    FROM   #work AS t
-    JOIN   #locstate AS l ON l.loc_key = t.loc_key
-    WHERE  t.item_key = @item AND t.row_id <> @src AND t.state <> 1
-      AND (@SameTypeOnly = 0 OR l.type_key = @src_type);
-
-    SET @n_other = (SELECT COUNT(*) FROM @cand);
-    DELETE FROM @cand WHERE open_cap <= 0;
-
-    SELECT @sum_open = ISNULL(SUM(open_cap), 0),
-           @max_open = ISNULL(MAX(open_cap), 0)
-    FROM   @cand;
-
-    -- One move if a single location can take it all
-    SET @best = NULL;
-    SELECT TOP (1) @best = row_id
-    FROM   @cand
-    WHERE  open_cap >= @need
-    ORDER BY cur_qty DESC, open_cap ASC, loc_key ASC;
-
-    DELETE FROM @alloc;
-    IF @best IS NOT NULL
-        INSERT INTO @alloc (seq, row_id, take) VALUES (1, @best, @need);
-    ELSE IF @AllowSplit = 1 AND @sum_open >= @need
-        INSERT INTO @alloc (seq, row_id, take)
-        SELECT seq, row_id,
-               CASE WHEN prev_open + open_cap <= @need THEN open_cap ELSE @need - prev_open END
-        FROM  (SELECT row_id, open_cap,
-                      ROW_NUMBER() OVER (ORDER BY open_cap DESC, cur_qty DESC, loc_key ASC) AS seq,
-                      ISNULL(SUM(open_cap) OVER (ORDER BY open_cap DESC, cur_qty DESC, loc_key ASC
-                                                 ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0) AS prev_open
-               FROM   @cand) AS c
-        WHERE  prev_open < @need;
-    ELSE
+    IF @k >= 2
     BEGIN
-        INSERT INTO #not_moved (row_id, room_elsewhere, reason)
-        VALUES (@src,
-                CASE WHEN @AllowSplit = 1 THEN @sum_open ELSE @max_open END,
-                CASE WHEN @n_other = 0    THEN 'No other location of this item with the same location type'
-                     WHEN @AllowSplit = 1 THEN 'Not enough room in the item''s other locations'
-                     ELSE                      'No single location of this item has room for all of it'
-                END);
-        CONTINUE;
+        -- Emptying a location needs its qty moved and loses its room, so it "costs"
+        -- qty + room; together they must fit in the room of all the item's locations.
+        SET @budget = (SELECT SUM(room) FROM @grp);
+        DELETE FROM @chosen;
+
+        IF @k > @MaxSearch
+            -- too many to try every combination: cheapest first while they fit
+            INSERT INTO @chosen (idx)
+            SELECT idx
+            FROM  (SELECT idx,
+                          ROW_NUMBER() OVER (ORDER BY w, qty, idx)                        AS rn,
+                          SUM(w) OVER (ORDER BY w, qty, idx ROWS UNBOUNDED PRECEDING)     AS cum
+                   FROM   @grp) AS x
+            WHERE  rn <= @k - 1 AND cum <= @budget;
+        ELSE
+        BEGIN
+            -- combinations that fit, best first: most locations, fewest units, lowest mask
+            DELETE FROM @cands;
+            INSERT INTO @cands (ord, m)
+            SELECT ROW_NUMBER() OVER (ORDER BY e.cnt DESC, e.units ASC, mk.m ASC), mk.m
+            FROM   #masks AS mk
+            CROSS APPLY (SELECT COUNT(*) AS cnt, SUM(g.qty) AS units, SUM(g.w) AS sw
+                         FROM   @grp AS g
+                         WHERE  (mk.m & POWER(2, g.idx)) <> 0) AS e
+            WHERE  mk.m <= POWER(2, @k) - 2
+              AND  e.sw <= @budget;
+
+            SET @best = NULL;
+            IF @AllowSplit = 1
+                SELECT TOP (1) @best = m FROM @cands ORDER BY ord;
+            ELSE
+            BEGIN
+                -- each emptied location must fit whole into one kept location
+                SET @c = 1;
+                SET @nc = (SELECT COUNT(*) FROM @cands);
+                WHILE @best IS NULL AND @c <= @nc
+                BEGIN
+                    SELECT @mask_try = m FROM @cands WHERE ord = @c;
+                    DELETE FROM @keep;
+                    INSERT INTO @keep (idx, row_id, loc_key, room, cur)
+                    SELECT idx, row_id, loc_key, room, cur FROM @grp WHERE (@mask_try & POWER(2, idx)) = 0;
+                    SET @ok = 1;
+                    SET @e = (SELECT TOP (1) idx FROM @grp WHERE (@mask_try & POWER(2, idx)) <> 0
+                              ORDER BY qty DESC, idx ASC);
+                    WHILE @e IS NOT NULL AND @ok = 1
+                    BEGIN
+                        SET @need = (SELECT qty FROM @grp WHERE idx = @e);
+                        SET @tgt = NULL;
+                        SELECT TOP (1) @tgt = idx FROM @keep WHERE room >= @need
+                        ORDER BY room ASC, cur DESC, loc_key ASC;
+                        IF @tgt IS NULL
+                            SET @ok = 0;
+                        ELSE
+                            UPDATE @keep SET room = room - @need, cur = cur + @need WHERE idx = @tgt;
+                        SET @e = (SELECT TOP (1) idx FROM @grp
+                                  WHERE (@mask_try & POWER(2, idx)) <> 0
+                                    AND (qty < @need OR (qty = @need AND idx > @e))
+                                  ORDER BY qty DESC, idx ASC);
+                    END;
+                    SET @best = CASE WHEN @ok = 1 THEN @mask_try END;
+                    SET @c += 1;
+                END;
+            END;
+
+            IF @best IS NOT NULL
+                INSERT INTO @chosen (idx) SELECT idx FROM @grp WHERE (@best & POWER(2, idx)) <> 0;
+        END;
+
+        -- Move the chosen locations, largest first
+        DELETE FROM @keep;
+        INSERT INTO @keep (idx, row_id, loc_key, room, cur)
+        SELECT idx, row_id, loc_key, room, cur FROM @grp WHERE idx NOT IN (SELECT idx FROM @chosen);
+
+        SET @e = (SELECT TOP (1) g.idx FROM @grp AS g JOIN @chosen AS c ON c.idx = g.idx
+                  ORDER BY g.qty DESC, g.idx ASC);
+        WHILE @e IS NOT NULL
+        BEGIN
+            SELECT @need = qty, @e_row = row_id FROM @grp WHERE idx = @e;
+            DELETE FROM @alloc;
+
+            SET @mask_try = NULL;
+            SELECT TOP (1) @mask_try = idx FROM @keep WHERE room >= @need ORDER BY room ASC, cur DESC, loc_key ASC;
+            IF @mask_try IS NOT NULL
+                INSERT INTO @alloc (seq, idx, take) VALUES (1, @mask_try, @need);     -- one move: tightest fit
+            ELSE IF @AllowSplit = 1
+                INSERT INTO @alloc (seq, idx, take)                             -- spread: most room first
+                SELECT seq, idx, CASE WHEN prev_room + room <= @need THEN room ELSE @need - prev_room END
+                FROM  (SELECT idx, room,
+                              ROW_NUMBER() OVER (ORDER BY room DESC, cur DESC, loc_key ASC) AS seq,
+                              ISNULL(SUM(room) OVER (ORDER BY room DESC, cur DESC, loc_key ASC
+                                                     ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0) AS prev_room
+                       FROM   @keep
+                       WHERE  room > 0) AS x
+                WHERE  prev_room < @need;
+            ELSE
+                -- cannot be placed whole: it stays, and its room can take smaller ones
+                INSERT INTO @keep (idx, row_id, loc_key, room, cur)
+                SELECT idx, row_id, loc_key, room, cur FROM @grp WHERE idx = @e;
+
+            IF EXISTS (SELECT 1 FROM @alloc)
+            BEGIN
+                INSERT INTO #moves (item_number, from_location, quantity_to_move, to_location,
+                                    target_open_capacity, target_max_capacity, target_location_type,
+                                    from_location_type, target_open_after_move)
+                SELECT s.item_number, s.location, a.take, t.location,
+                       l.open_cap, l.max_qty, l.location_type,
+                       sl.location_type, l.open_cap - a.take
+                FROM   @alloc AS a
+                JOIN   @keep     AS k  ON k.idx = a.idx
+                JOIN   #work     AS t  ON t.row_id = k.row_id
+                JOIN   #locstate AS l  ON l.loc_key = t.loc_key
+                JOIN   #work     AS s  ON s.row_id = @e_row
+                JOIN   #locstate AS sl ON sl.loc_key = s.loc_key
+                ORDER BY a.seq;
+
+                UPDATE l SET open_cap = l.open_cap - a.take
+                FROM   #locstate AS l JOIN @keep AS k ON k.loc_key = l.loc_key JOIN @alloc AS a ON a.idx = k.idx;
+
+                UPDATE t SET cur_qty = t.cur_qty + a.take, state = 2
+                FROM   #work AS t JOIN @keep AS k ON k.row_id = t.row_id JOIN @alloc AS a ON a.idx = k.idx;
+
+                UPDATE k SET room = k.room - a.take, cur = k.cur + a.take
+                FROM   @keep AS k JOIN @alloc AS a ON a.idx = k.idx;
+
+                UPDATE #work     SET cur_qty = 0, state = 1 WHERE row_id = @e_row;
+                UPDATE #locstate SET open_cap = open_cap + @need
+                WHERE  loc_key = (SELECT loc_key FROM #work WHERE row_id = @e_row);
+            END;
+
+            SET @e = (SELECT TOP (1) g.idx FROM @grp AS g JOIN @chosen AS c ON c.idx = g.idx
+                      WHERE g.qty < @need OR (g.qty = @need AND g.idx > @e)
+                      ORDER BY g.qty DESC, g.idx ASC);
+        END;
     END;
 
-    INSERT INTO #moves (item_number, from_location, quantity_to_move, to_location,
-                        target_open_capacity, target_max_capacity, target_location_type,
-                        from_location_type, target_open_after_move)
-    SELECT s.item_number, s.location, a.take, t.location,
-           l.open_cap, l.max_qty, l.location_type,
-           s.location_type, l.open_cap - a.take
-    FROM   @alloc AS a
-    JOIN   #work     AS t ON t.row_id  = a.row_id
-    JOIN   #locstate AS l ON l.loc_key = t.loc_key
-    CROSS JOIN (SELECT w.item_number, w.location, ls.location_type
-                FROM   #work AS w JOIN #locstate AS ls ON ls.loc_key = w.loc_key
-                WHERE  w.row_id = @src) AS s
-    ORDER BY a.seq;
+    -- After the item's last group: list its locations that stay without receiving stock
+    SET @item_seq = (SELECT MAX(item_seq) FROM #work WHERE grp = @grp_no);
+    IF NOT EXISTS (SELECT 1 FROM #work WHERE grp = @grp_no + 1 AND item_seq = @item_seq)
+       AND (SELECT COUNT(*) FROM #work WHERE item_seq = @item_seq AND state <> 1) >= 2
+        INSERT INTO #not_moved (row_id, room_elsewhere, reason)
+        SELECT r.row_id,
+               CASE WHEN m.cnt = 0 THEN 0 WHEN @AllowSplit = 1 THEN m.sum_room ELSE m.max_room END,
+               CASE WHEN m.cnt = 0    THEN 'No other location of this item with the same location type'
+                    WHEN @AllowSplit = 1 THEN 'Not enough room in the item''s other locations'
+                    ELSE                      'No single location of this item has room for all of it'
+               END
+        FROM   #work AS r
+        CROSS APPLY (SELECT COUNT(*) AS cnt,
+                            ISNULL(SUM(CASE WHEN l.open_cap > 0 THEN l.open_cap ELSE 0 END), 0) AS sum_room,
+                            ISNULL(MAX(CASE WHEN l.open_cap > 0 THEN l.open_cap ELSE 0 END), 0) AS max_room
+                     FROM   #work AS x
+                     JOIN   #locstate AS l ON l.loc_key = x.loc_key
+                     WHERE  x.item_seq = r.item_seq AND x.sub_key = r.sub_key
+                       AND  x.row_id <> r.row_id AND x.state <> 1) AS m
+        WHERE  r.item_seq = @item_seq AND r.state = 0
+        ORDER BY r.current_qty, r.loc_key;
 
-    UPDATE l
-    SET    open_cap = l.open_cap - a.take
-    FROM   #locstate AS l
-    JOIN   #work AS t ON t.loc_key = l.loc_key
-    JOIN   @alloc AS a ON a.row_id = t.row_id;
-
-    UPDATE t
-    SET    cur_qty = t.cur_qty + a.take, state = 2
-    FROM   #work AS t
-    JOIN   @alloc AS a ON a.row_id = t.row_id;
-
-    UPDATE #work     SET cur_qty = 0, state = 1        WHERE row_id  = @src;
-    UPDATE #locstate SET open_cap = open_cap + @need   WHERE loc_key = @src_loc;
+    SET @grp_no += 1;
 END;
 
 --------------------------------------------------------------------------------
@@ -366,7 +477,7 @@ SELECT  (SELECT COUNT(*) FROM #tagged)                                          
         (SELECT COUNT(*) FROM #tagged WHERE dropped = 2)                              AS removed_max_qty_out_of_range,
         (SELECT COUNT(*) FROM #tagged WHERE dropped = 3)                              AS removed_ignored_type,
         (SELECT COUNT(*) FROM #work)                                                  AS rows_kept,
-        (SELECT COUNT(DISTINCT item_key) FROM #work WHERE src_order IS NOT NULL)      AS items_in_multiple_locations,
+        (SELECT COUNT(DISTINCT item_key) FROM #work WHERE grp IS NOT NULL)            AS items_in_multiple_locations,
         (SELECT COUNT(*) FROM #work WHERE state = 1)                                  AS locations_emptied,
         (SELECT COUNT(*) FROM #moves)                                                 AS moves,
         (SELECT ISNULL(SUM(quantity_to_move), 0) FROM #moves)                         AS units_to_move,

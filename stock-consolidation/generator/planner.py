@@ -6,6 +6,7 @@ data, and the tests compare the SQL and VBA output with it.
 """
 
 EPS = 1e-6
+MAX_SEARCH = 10   # items in more locations than this use the quicker "cheapest first" rule
 
 REASON_TYPE = "No other location of this item with the same location type"
 REASON_ROOM = "Not enough room in the item's other locations"
@@ -73,12 +74,15 @@ def plan(rows, same_type_only=False, allow_split=True):
         l["type"] = max(l["type"], r["type"])
 
     work = [dict(r, cur=r["qty"], state=0, l=locs[r["loc_key"]]) for r in rows]
-    groups = {}
+    items = {}
     for r in sorted(work, key=lambda r: (r["item_key"], r["qty"], r["loc_key"])):
-        groups.setdefault(r["item_key"], []).append(r)
-    groups = [g for g in groups.values() if len(g) >= 2]
+        items.setdefault(r["item_key"], []).append(r)
+    items = [g for g in items.values() if len(g) >= 2]
 
-    moves, failures = [], []
+    moves, not_moved = [], []
+
+    def free(r):
+        return max(r["l"]["open"], 0.0)
 
     def add_move(s, t, q):
         before = t["l"]["open"]
@@ -92,49 +96,110 @@ def plan(rows, same_type_only=False, allow_split=True):
         t["cur"] += q
         t["state"] = 2
 
-    for g in groups:
-        for s in g:
-            if s["state"] != 0:
-                continue
-            need = s["qty"]
-            others = [t for t in g if t is not s and t["state"] != 1
-                      and (not same_type_only or t["l"]["type"].upper() == s["l"]["type"].upper())]
-            cand = [t for t in others if t["l"]["open"] > EPS]
-            sum_open = sum(t["l"]["open"] for t in cand)
-            max_open = max((t["l"]["open"] for t in cand), default=0.0)
-
-            fits = [t for t in cand if t["l"]["open"] >= need - EPS]
-            if fits:
-                best = sorted(fits, key=lambda t: (-t["cur"], t["l"]["open"], t["loc_key"]))[0]
-                add_move(s, best, need)
-            elif allow_split and cand and sum_open >= need - EPS:
-                remaining = need
-                for t in sorted(cand, key=lambda t: (-t["l"]["open"], -t["cur"], t["loc_key"])):
-                    if remaining <= EPS:
+    def allocate(empty, keep, split):
+        """Plan where each location in `empty` (largest first) goes, without changing anything.
+        Returns (steps, stays): steps = [(location, [(target, qty), ...])], stays = could not be placed."""
+        keep = list(keep)
+        room = {id(t): free(t) for t in keep}
+        cur = {id(t): t["cur"] for t in keep}
+        steps, stays = [], []
+        for e in empty:
+            need = e["qty"]
+            fits = [t for t in keep if room[id(t)] >= need - EPS]
+            if fits:                                    # one move: the tightest fit
+                t = min(fits, key=lambda t: (room[id(t)], -cur[id(t)], t["loc_key"]))
+                parts = [(t, need)]
+            elif split:                                 # spread: most room first
+                parts, rem = [], need
+                for t in sorted(keep, key=lambda t: (-room[id(t)], -cur[id(t)], t["loc_key"])):
+                    if rem <= EPS:
                         break
-                    take = min(t["l"]["open"], remaining)
-                    add_move(s, t, take)
-                    remaining -= take
-            else:
-                if not others:
-                    reason = REASON_TYPE
-                elif allow_split:
-                    reason = REASON_ROOM
-                else:
-                    reason = REASON_SINGLE
-                failures.append((s, sum_open if allow_split else max_open, reason))
+                    take = min(room[id(t)], rem)
+                    if take > EPS:
+                        parts.append((t, take))
+                        rem -= take
+            else:                                       # stays; its room can take smaller ones
+                stays.append(e)
+                keep.append(e)
+                room[id(e)], cur[id(e)] = free(e), e["cur"]
                 continue
-            s["state"] = 1
-            s["cur"] = 0.0
-            s["l"]["open"] += need
+            for t, take in parts:
+                room[id(t)] -= take
+                cur[id(t)] += take
+            steps.append((e, parts))
+        return steps, stays
 
-    not_moved = [{
-        "item_number": s["item"], "location": s["loc"], "location_type": s["l"]["type"],
-        "quantity": s["qty"], "room_elsewhere": room, "reason": reason,
-    } for s, room, reason in failures if s["state"] == 0]
+    def largest_first(sub, idx):
+        return [sub[i] for i in sorted(idx, key=lambda i: (-sub[i]["qty"], i))]
+
+    def choose(sub):
+        """Which locations of `sub` to empty: the most locations, then the fewest units moved."""
+        k = len(sub)
+        fr = [free(r) for r in sub]
+        w = [r["qty"] + fr[i] for i, r in enumerate(sub)]   # emptying i needs its qty moved and loses its room
+        budget = sum(fr)
+        if k > MAX_SEARCH:                                  # too many to try all: cheapest first
+            chosen, used = [], 0.0
+            for i in sorted(range(k), key=lambda i: (w[i], sub[i]["qty"], i)):
+                if len(chosen) < k - 1 and used + w[i] <= budget + EPS:
+                    chosen.append(i)
+                    used += w[i]
+                else:
+                    break
+            return chosen
+        best = None
+        for m in range(1, (1 << k) - 1):
+            idx = [i for i in range(k) if m >> i & 1]
+            if sum(w[i] for i in idx) > budget + EPS:       # not enough room for these
+                continue
+            cnt, units = len(idx), sum(sub[i]["qty"] for i in idx)
+            if best is not None and (cnt < best[0] or (cnt == best[0] and units >= best[1] - EPS)):
+                continue
+            if not allow_split:
+                _, stays = allocate(largest_first(sub, idx), [sub[i] for i in range(k) if i not in idx], False)
+                if stays:
+                    continue
+            best = (cnt, units, idx)
+        return best[2] if best else []
+
+    for g in items:
+        subs = {}
+        for r in g:
+            subs.setdefault(r["l"]["type"].upper() if same_type_only else "", []).append(r)
+        for key in sorted(subs):
+            sub = subs[key]
+            if len(sub) < 2:
+                continue
+            idx = choose(sub)
+            steps, _ = allocate(largest_first(sub, idx), [sub[i] for i in range(len(sub)) if i not in idx],
+                                allow_split)
+            for e, parts in steps:
+                for t, take in parts:
+                    add_move(e, t, take)
+                e["state"] = 1
+                e["cur"] = 0.0
+                e["l"]["open"] += e["qty"]
+        remaining = [r for r in g if r["state"] != 1]
+        if len(remaining) < 2:
+            continue
+        for r in g:                                       # locations that stay without receiving stock
+            if r["state"] != 0:
+                continue
+            key = r["l"]["type"].upper() if same_type_only else ""
+            mates = [x for x in subs[key] if x is not r and x["state"] != 1]
+            if not mates:
+                reason, room = REASON_TYPE, 0.0
+            elif allow_split:
+                reason, room = REASON_ROOM, sum(free(x) for x in mates)
+            else:
+                reason, room = REASON_SINGLE, max(free(x) for x in mates)
+            not_moved.append({
+                "item_number": r["item"], "location": r["loc"], "location_type": r["l"]["type"],
+                "quantity": r["qty"], "room_elsewhere": room, "reason": reason,
+            })
 
     summary = {
-        "items_in_multiple_locations": len(groups),
+        "items_in_multiple_locations": len(items),
         "locations_emptied": sum(1 for r in work if r["state"] == 1),
         "moves": len(moves),
         "units_to_move": sum(m["quantity_to_move"] for m in moves),
