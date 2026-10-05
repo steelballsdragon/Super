@@ -37,6 +37,14 @@ RETRY_BASE_SECONDS = 1.0
 
 # ESPN has no team list for international cricket, so team suggestions start
 # from the national sides and add any team currently playing.
+YOUTH_TEAM = re.compile(r"\b(under[- ]?\d{2}s?|u-?\d{2}s?)\b", re.IGNORECASE)
+
+
+def is_youth(name: str) -> bool:
+    """An age-group side: "India Under-19s", "Pakistan U19", "England U-19"."""
+    return bool(YOUTH_TEAM.search(name or ""))
+
+
 INTERNATIONAL_CRICKET_TEAMS = (
     "Afghanistan", "Australia", "Bangladesh", "Canada", "England", "India", "Ireland",
     "Namibia", "Nepal", "Netherlands", "New Zealand", "Oman", "Pakistan", "Scotland",
@@ -153,6 +161,11 @@ class Game:
         if self.league.sport in ("soccer", "cricket"):
             return (self.home, self.away)
         return (self.away, self.home)
+
+    @property
+    def youth(self) -> bool:
+        """An age-group match, e.g. India Under-19s v Australia Under-19s."""
+        return any(is_youth(t.name) for t in self.teams)
 
     def involves(self, query: str) -> bool:
         q = query.strip().lower()

@@ -20,7 +20,7 @@ from discord.ext import tasks
 from .balls import BallFeed
 from .boxscore import STATS_SPORTS, StatsButton, stats_embed, stats_view
 from .bankroll import STYLES, BetBook, PlacedButton, bankroll_embed, money, placed_view, units_for
-from .espn import EASTERN, ESPNClient
+from .espn import EASTERN, ESPNClient, is_youth
 from .espn import start_time
 from .formatting import ball_messages, board_embed, reminder_text, schedule_embed, scoreboard_embed, update_embed
 from .leagues import LEAGUES
@@ -405,7 +405,10 @@ class SportsBot(discord.Client):
     async def _post_balls(self, feed: BallFeed, games, subs) -> None:
         wanted = []
         for game in (g for g in games if g.state == "in"):
-            if channels := {s.channel_id for s in subs if s.team is None or game.involves(s.team)}:
+            # Senior teams only: following "India" (or all matches) doesn't bring in the Under-19s ball by ball,
+            # unless the channel follows the youth team by name.
+            if channels := {s.channel_id for s in subs if (s.team is None or game.involves(s.team))
+                            and (not game.youth or (s.team is not None and is_youth(s.team)))}:
                 wanted.append((game, channels))
         # Matches nobody follows ball by ball are dropped, so following again starts from the current ball.
         feed.forget_except({g.id for g, _ in wanted})

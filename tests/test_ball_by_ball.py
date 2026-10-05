@@ -32,10 +32,10 @@ def test_parse_balls_cleans_dismissal_text():
     assert balls[0].dismissal == "Shubman Gill c †Hope b Seales 1 (6b 0x4 0x6)"
 
 
-def game():
+def game(home="India", away="West Indies"):
     c = {"class": {"internationalClassId": "2"}, "status": {"type": {"state": "in"}},
-         "competitors": [{"homeAway": "home", "score": "4/2", "team": {"id": "6", "abbreviation": "IND", "displayName": "India"}, "linescores": []},
-                         {"homeAway": "away", "score": "", "team": {"id": "4", "abbreviation": "WI", "displayName": "West Indies"}, "linescores": []}]}
+         "competitors": [{"homeAway": "home", "score": "4/2", "team": {"id": "6", "abbreviation": "IND", "displayName": home}, "linescores": []},
+                         {"homeAway": "away", "score": "", "team": {"id": "4", "abbreviation": "WI", "displayName": away}, "linescores": []}]}
     [g] = parse_scorepanel({"scores": [{"leagues": [{"id": "24289"}], "events": [{"id": "1529229", "competitions": [c]}]}]}, CRICKET)
     return g
 
@@ -184,4 +184,29 @@ def test_refollowing_ball_by_ball_starts_from_the_current_ball(tmp_path):
     pages[1].append(item(101001, "10.1", "Lawes to Rahul, 1 run", "1 run", 1, 0))
     asyncio.run(bot._post_balls(feed, [g], following))
     assert len(sent) == 1 and "10.1" in sent[0]
+    asyncio.run(bot.espn.close())
+
+
+def test_under_19_matches_are_not_followed_ball_by_ball(tmp_path):
+    from sportsbot.bot import SportsBot
+    from sportsbot.espn import is_youth
+    from sportsbot.storage import Subscription
+    assert is_youth("India Under-19s") and is_youth("Pakistan U19") and is_youth("England U-19")
+    assert not is_youth("India") and not is_youth("West Indies Women") and not is_youth("Sunrisers Hyderabad")
+    bot = SportsBot(SubscriptionStore(tmp_path / "subscriptions.json"), 10, None)
+    sent = []
+
+    async def deliver(channel_id, game, kind, embed=None, content=None, view=None):
+        sent.append(channel_id)
+    bot._deliver = deliver
+    youth = game("India Under-19s", "Australia Under-19s")
+    assert youth.youth and not game().youth
+    pages = {1: overs(0, 1)}
+    feed = BallFeed(feed_with(pages))
+    follows = [Subscription(1, "cricket", None, ball_by_ball=True), Subscription(2, "cricket", "India", ball_by_ball=True),
+               Subscription(3, "cricket", "India Under-19s", ball_by_ball=True)]
+    asyncio.run(bot._post_balls(feed, [youth], follows))
+    pages[1].append(item(101001, "2.1", "Lawes to Rahul, 1 run", "1 run", 1, 0))
+    asyncio.run(bot._post_balls(feed, [youth], follows))
+    assert sent == [3]  # only the channel that follows the Under-19s by name
     asyncio.run(bot.espn.close())
