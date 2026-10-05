@@ -20,7 +20,9 @@
       removed (available capacity only while @RemoveNoCapacity = 1);
     - only locations whose max qty is from @MinLocationQty (9) to
       @MaxLocationQty (23) are kept;
-    - the same item and location listed twice is kept once (largest values).
+    - the same item and location listed twice is kept once (largest values);
+    - available capacity is the smaller of Fp Available and Maxqvl - Curqvl,
+      so no location is ever planned past its max.
 
   Planning (Stock_Consolidation.xlsm applies exactly the same rules):
     1. Only items sitting in 2 or more locations are looked at, and stock
@@ -143,6 +145,7 @@ SELECT  UPPER(x.item) COLLATE Latin1_General_BIN2 AS item_key,
         x.avail,
         x.maxqvl,
         x.typ COLLATE Latin1_General_BIN2          AS location_type,
+        x.capped,
         CASE WHEN x.curqvl IS NULL OR x.curqvl <= 0
                OR x.maxqvl IS NULL OR x.maxqvl <= 0
                OR (@RemoveNoCapacity = 1 AND (x.avail IS NULL OR x.avail <= 0)) THEN 1
@@ -156,7 +159,10 @@ FROM   (SELECT LTRIM(RTRIM(prtnum))               AS item,
                LTRIM(RTRIM(ISNULL(typcod, '')))   AS typ,
                curqvl,
                maxqvl,
-               ISNULL(fp_available, maxqvl - curqvl) AS avail
+               -- never more room than max - current, whatever Fp Available says
+               CASE WHEN fp_available IS NULL OR fp_available > maxqvl - curqvl
+                    THEN maxqvl - curqvl ELSE fp_available END             AS avail,
+               CASE WHEN fp_available > maxqvl - curqvl THEN 1 ELSE 0 END  AS capped
         FROM   #raw) AS x
 WHERE   ISNULL(x.item, '') <> '' AND ISNULL(x.loc, '') <> '';
 
@@ -181,7 +187,9 @@ CREATE TABLE #work (
 -- Kept rows; the same item and location twice keeps the largest values
 INSERT INTO #work (item_key, loc_key, item_number, location, current_qty, available, max_qty,
                    location_type, cur_qty)
-SELECT  item_key, loc_key, MIN(item_number), MIN(location), MAX(curqvl), MAX(ISNULL(avail, 0)),
+SELECT  item_key, loc_key, MIN(item_number), MIN(location), MAX(curqvl),
+        CASE WHEN MAX(ISNULL(avail, 0)) > MAX(maxqvl) - MAX(curqvl)      -- never more room than max - current
+             THEN MAX(maxqvl) - MAX(curqvl) ELSE MAX(ISNULL(avail, 0)) END,
         MAX(maxqvl), MAX(location_type), MAX(curqvl)
 FROM    #tagged
 WHERE   dropped IS NULL
@@ -197,7 +205,7 @@ CREATE TABLE #locstate (
     open_cap      decimal(18,4) NOT NULL
 );
 INSERT INTO #locstate (loc_key, location_type, type_key, max_qty, open_cap)
-SELECT  loc_key, MAX(location_type), UPPER(MAX(location_type)), MAX(max_qty), MAX(available)
+SELECT  loc_key, MAX(location_type), UPPER(MAX(location_type)), MAX(max_qty), MIN(available)
 FROM    #work
 GROUP BY loc_key;
 
@@ -477,6 +485,7 @@ SELECT  (SELECT COUNT(*) FROM #tagged)                                          
         (SELECT COUNT(*) FROM #tagged WHERE dropped = 2)                              AS removed_max_qty_out_of_range,
         (SELECT COUNT(*) FROM #tagged WHERE dropped = 3)                              AS removed_ignored_type,
         (SELECT COUNT(*) FROM #work)                                                  AS rows_kept,
+        (SELECT COUNT(*) FROM #tagged WHERE dropped IS NULL AND capped = 1)           AS capacity_capped,
         (SELECT COUNT(DISTINCT item_key) FROM #work WHERE grp IS NOT NULL)            AS items_in_multiple_locations,
         (SELECT COUNT(*) FROM #work WHERE state = 1)                                  AS locations_emptied,
         (SELECT COUNT(*) FROM #moves)                                                 AS moves,

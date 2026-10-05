@@ -28,7 +28,9 @@
 '   - rows with 0 or a negative current qty, max qty or available capacity
 '     are removed (available capacity only while that setting is Yes);
 '   - only locations whose max qty is from 9 to 23 are kept;
-'   - the same item and location listed twice is kept once (largest values).
+'   - the same item and location listed twice is kept once (largest values);
+'   - available capacity is the smaller of Fp Available and Maxqvl - Curqvl,
+'     so no location is ever planned past its max.
 '
 ' Planning:
 '   1. Only items sitting in 2 or more locations are looked at, and stock
@@ -103,6 +105,7 @@ Private statRead As Long
 Private statZero As Long
 Private statOutOfRange As Long
 Private statType As Long
+Private statCapped As Long              ' rows whose Fp Available was more than max - current
 
 ' Cleaned item-location rows (1 To rowCount), sorted by item then location
 Private rowCount As Long
@@ -243,7 +246,7 @@ Private Function LoadRawData(ByVal ws As Worksheet) As Boolean
     Dim cItem As Long, cLoc As Long, cQty As Long, cAvail As Long, cMax As Long, cType As Long
     Dim item As String, loc As String, typ As String, key As String
     Dim qty As Double, avail As Double, mx As Double
-    Dim hasQty As Boolean, hasAvail As Boolean, hasMax As Boolean
+    Dim hasQty As Boolean, hasAvail As Boolean, hasMax As Boolean, capped As Boolean
 
     hdr = FindHeaderRow(ws)
     If hdr = 0 Then hdr = 1
@@ -277,6 +280,7 @@ Private Function LoadRawData(ByVal ws As Worksheet) As Boolean
     statZero = 0
     statOutOfRange = 0
     statType = 0
+    statCapped = 0
 
     If lastRow > hdr Then
         data = ws.Range(ws.Cells(hdr + 1, 1), ws.Cells(lastRow, lastCol)).Value
@@ -298,6 +302,13 @@ Private Function LoadRawData(ByVal ws As Worksheet) As Boolean
                 ElseIf hasQty And hasMax Then
                     avail = mx - qty                ' no Fp Available: max - current
                     hasAvail = True
+                End If
+                capped = False
+                If hasAvail And hasQty And hasMax Then
+                    If avail > mx - qty + EPS Then  ' never more room than max - current
+                        avail = mx - qty
+                        capped = True
+                    End If
                 End If
 
                 dropped = 0
@@ -324,6 +335,7 @@ Private Function LoadRawData(ByVal ws As Worksheet) As Boolean
                 Case 3
                     statType = statType + 1
                 Case Else
+                    If capped Then statCapped = statCapped + 1
                     key = UCase$(item) & vbTab & UCase$(loc)
                     idx = Lookup(rowIndex, key)
                     If idx = 0 Then
@@ -351,6 +363,11 @@ Private Function LoadRawData(ByVal ws As Worksheet) As Boolean
         Next r
     End If
 
+    ' Combined duplicates: still never more room than max - current
+    For idx = 1 To rowCount
+        If rAvail(idx) > rMax(idx) - rQty(idx) Then rAvail(idx) = rMax(idx) - rQty(idx)
+    Next idx
+
     SortByItemAndLocation
 
     ' Location level values
@@ -375,7 +392,7 @@ Private Function LoadRawData(ByVal ws As Worksheet) As Boolean
             lMax(li) = rMax(idx)
             lType(li) = rType(idx)
         Else
-            If rAvail(idx) > lOpen(li) Then lOpen(li) = rAvail(idx)
+            If rAvail(idx) < lOpen(li) Then lOpen(li) = rAvail(idx)    ' shared location: smallest room wins
             If rMax(idx) > lMax(li) Then lMax(li) = rMax(idx)
             If rType(idx) > lType(li) Then lType(li) = rType(idx)
         End If
@@ -838,7 +855,8 @@ Private Sub WriteCleanData()
                "   |   Removed - max qty outside " & FormatQty(mMinLocationQty) & "-" & _
                FormatQty(mMaxLocationQty) & ": " & statOutOfRange & _
                "   |   Removed - ignored type: " & statType & _
-               "   |   Kept: " & rowCount
+               "   |   Kept: " & rowCount & _
+               "   |   Fp Available above Max - Current (capped): " & statCapped
     WriteHeaders ws, CleanHeaders()
 
     If rowCount > 0 Then

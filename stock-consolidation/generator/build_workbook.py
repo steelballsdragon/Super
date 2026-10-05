@@ -59,7 +59,7 @@ RULES = [
     "Each emptied location (largest first) goes to the kept location it fits most tightly, or is spread over",
     "     the ones with most room if splitting is allowed.",
     "A location that is emptied never receives stock, and a location that receives stock is never emptied.",
-    "Open capacity starts at Fp Available and is updated as moves are planned, so no location is overfilled.",
+    "Free space = the smaller of Fp Available and Max - Current, updated as moves are planned: never past the max.",
     "If the report is a table exported from Power BI with live connection, it is refreshed first.",
 ]
 
@@ -94,7 +94,8 @@ def stats_line(stats):
             f"{stats['removed_zero_or_negative']}   |   Removed - max qty outside "
             f"{qty_text(d.MIN_LOCATION_QTY)}-{qty_text(d.MAX_LOCATION_QTY)}: "
             f"{stats['removed_max_qty_out_of_range']}   |   Removed - ignored type: {stats['removed_ignored_type']}"
-            f"   |   Kept: {stats['rows_kept']}")
+            f"   |   Kept: {stats['rows_kept']}"
+            f"   |   Fp Available above Max - Current (capped): {stats['capacity_capped']}")
 
 
 def num_format(rows, keys, cols):

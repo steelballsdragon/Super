@@ -84,7 +84,9 @@ negative, and only locations with a max qty from 9 to 23 are kept.
    tightly; if none can take it all, to the ones with the most room.
 5. A location that is emptied never receives stock, and a location that
    receives stock is never emptied.
-6. Open capacity starts at Fp Available and is updated after every planned
-   move, so no location is overfilled.
+6. Free space is the smaller of Fp Available and Maxqvl − Curqvl, and is
+   updated after every planned move, so no location is ever planned past its
+   max. Clean Data shows how many rows had Fp Available higher than
+   Maxqvl − Curqvl.
 
 (`generator/` holds the scripts that build the Excel file. You don't need it.)

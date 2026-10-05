@@ -25,15 +25,20 @@ def clean(raw, max_location_qty=23, remove_no_capacity=True, exclude_types="", m
     """
     excluded = {t.strip(" ").upper() for t in exclude_types.split(",") if t.strip(" ")}
     stats = {"rows_read": 0, "removed_zero_or_negative": 0, "removed_max_qty_out_of_range": 0,
-             "removed_ignored_type": 0, "rows_kept": 0}
+             "removed_ignored_type": 0, "rows_kept": 0, "capacity_capped": 0}
     merged = {}
     for item, loc, qty, avail, mx, typ in raw:
         item, loc, typ = _text(item), _text(loc), _text(typ)
         if not item or not loc:
             continue
         stats["rows_read"] += 1
-        if avail is None and qty is not None and mx is not None:
-            avail = mx - qty
+        capped = False
+        if qty is not None and mx is not None:
+            if avail is None:
+                avail = mx - qty
+            elif avail > mx - qty:              # never more room than max - current
+                avail = mx - qty
+                capped = True
         if (qty is None or qty <= 0 or mx is None or mx <= 0
                 or (remove_no_capacity and (avail is None or avail <= 0))):
             stats["removed_zero_or_negative"] += 1
@@ -46,6 +51,8 @@ def clean(raw, max_location_qty=23, remove_no_capacity=True, exclude_types="", m
             continue
         if avail is None:
             avail = 0.0
+        if capped:
+            stats["capacity_capped"] += 1
         key = (item.upper(), loc.upper())
         r = merged.get(key)
         if r is None:
@@ -58,6 +65,8 @@ def clean(raw, max_location_qty=23, remove_no_capacity=True, exclude_types="", m
             r["avail"] = max(r["avail"], float(avail))
             r["max"] = max(r["max"], float(mx))
             r["type"] = max(r["type"], typ)
+    for r in merged.values():                   # combined duplicates: still never more room than max - current
+        r["avail"] = min(r["avail"], r["max"] - r["qty"])
     rows = sorted(merged.values(), key=lambda r: (r["item_key"], r["loc_key"]))
     stats["rows_kept"] = len(rows)
     return rows, stats
@@ -69,7 +78,7 @@ def plan(rows, same_type_only=False, allow_split=True):
     locs = {}
     for r in rows:
         l = locs.setdefault(r["loc_key"], {"open": r["avail"], "max": r["max"], "type": r["type"]})
-        l["open"] = max(l["open"], r["avail"])
+        l["open"] = min(l["open"], r["avail"])     # shared location: the smallest room wins
         l["max"] = max(l["max"], r["max"])
         l["type"] = max(l["type"], r["type"])
 
