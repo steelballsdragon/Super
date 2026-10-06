@@ -18,8 +18,6 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
-from sportsbot.settings import StateStore
-
 from . import briefs, embeds as E
 from .ai import NewsAI
 from .briefs import Post
@@ -30,6 +28,7 @@ from .hours import NEW_YORK, is_trading_day, market_open
 from .news import TARGETS, Analysis, ImpactBook, analyse
 from .record import PredictionBook
 from .setups import DEFS
+from .storage import StateStore
 from .universe import CRYPTO, FUTURES, INDICES, MACRO, STOCKS, market_of, short
 from .yahoo import Quote
 

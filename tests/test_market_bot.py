@@ -19,7 +19,7 @@ from marketbot.hours import NEW_YORK, holidays, is_trading_day, market_open  # n
 from marketbot.news import analyse  # noqa: E402
 from marketbot.record import PredictionBook  # noqa: E402
 from marketbot.universe import CRYPTO, STOCKS, market_of, normalize, short, tag  # noqa: E402
-from sportsbot.settings import StateStore  # noqa: E402
+from marketbot.storage import StateStore  # noqa: E402
 from tests.market_helpers import DAY, from_closes, quote, walk  # noqa: E402
 
 
@@ -327,3 +327,10 @@ def test_engine_reads_saved_models(tmp_path):
     eng._save_models()
     again = Engine(tmp_path)
     assert STOCKS in again.models and again.models_stale()  # crypto still missing
+
+
+def test_market_bot_stands_alone():
+    """The market bot must keep working if the sports bot's code is removed from the repository."""
+    package = Path(__file__).resolve().parent.parent / "marketbot"
+    users = [p.name for p in package.glob("*.py") if "sportsbot" in p.read_text()]
+    assert users == []

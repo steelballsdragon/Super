@@ -132,6 +132,25 @@ only by root), and runs the bot as its own `marketbot` service and user, with it
 It can run on the same server as ScoreBot. A timer checks GitHub every 5 minutes and installs new code (or use
 `/update`). Logs: `sudo journalctl -u marketbot -f`. It peaks at about 350–400 MB of memory (while training).
 
+### Replacing ScoreBot on the same server
+
+The market bot doesn't need ScoreBot's code or service. To switch over and keep the same bot in Discord:
+
+```bash
+sudo grep DISCORD_TOKEN /etc/scorebot.env        # copy the token: the market bot can reuse it
+sudo systemctl disable --now scorebot scorebot-update.timer
+sudo rm -f /etc/systemd/system/scorebot.service /etc/systemd/system/scorebot-update.service \
+           /etc/systemd/system/scorebot-update.timer /etc/sudoers.d/scorebot-update
+sudo systemctl daemon-reload
+sudo rm -rf /opt/scorebot /var/lib/scorebot /etc/scorebot.env   # also deletes ScoreBot's saved bets and record
+sudo userdel scorebot
+curl -fsSL https://raw.githubusercontent.com/steelballsdragon/Super/main/deploy/install-marketbot.sh | sudo bash
+```
+
+Paste the old token when the installer asks. The sports commands disappear from Discord when the market bot
+registers its own (it can take up to an hour to show everywhere). Give the bot's role **Manage Channels**,
+**Manage Messages** and **Attach Files** in Server Settings → Roles, then run `/setup`.
+
 ### Railway
 
 Add a second service from this repository with the start command `python -m marketbot`, the build command

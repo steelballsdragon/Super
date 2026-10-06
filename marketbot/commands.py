@@ -13,12 +13,11 @@ import discord
 import numpy as np
 from discord import app_commands
 
-from sportsbot.limits import MESSAGE, clip, fit_embed
-
 from . import briefs, charts, embeds as E, stats
 from .briefs import Post, chart_post
 from .channels import KIND_NAMES, KINDS, MAX_WATCHLIST, ChannelConfig
 from .engine import Resolved, UnknownSymbol
+from .limits import MESSAGE, clip, fit_embed
 from .news import analyse
 from .setups import fmt_price
 from .universe import (ALIASES, BENCHMARK, CRYPTO, DEFAULT_CRYPTO, DEFAULT_STOCKS, INDICES, SECTORS, STOCKS,

@@ -8,11 +8,10 @@ from datetime import datetime, timezone
 import discord
 import numpy as np
 
-from sportsbot.limits import clip, fit_embed
-
 from . import stats
 from .engine import Macro, OptionsView, Outlook, ScanHit, mood_label
 from .features import FEATURE_LABELS
+from .limits import clip, fit_embed
 from .model import Backtest, MarketModel
 from .news import Analysis, impact_text
 from .setups import DEFS, SetupStats, fmt_price

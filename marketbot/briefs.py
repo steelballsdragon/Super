@@ -11,11 +11,10 @@ from datetime import datetime
 
 import discord
 
-from sportsbot.limits import fit_embed
-
 from . import charts, embeds as E, stats
 from .engine import Outlook
 from .hours import NEW_YORK
+from .limits import fit_embed
 from .news import Analysis, impact_text
 from .setups import fmt_price
 from .universe import BOARD_LABELS, CRYPTO, FUTURES, INDICES, MACRO, SECTORS, STOCKS, short, title_of

@@ -10,7 +10,7 @@ pytest.importorskip("numpy")
 from marketbot import ai  # noqa: E402
 from marketbot.feeds import FEEDS, Feed, Headline, dedupe, from_yahoo, parse_feed, similar  # noqa: E402
 from marketbot.news import ImpactBook, analyse, impact_text  # noqa: E402
-from sportsbot.settings import StateStore  # noqa: E402
+from marketbot.storage import StateStore  # noqa: E402
 
 
 def h(title, summary="", market="stocks", tickers=(), published=None):

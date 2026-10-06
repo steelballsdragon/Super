@@ -14,13 +14,12 @@ from pathlib import Path
 
 import numpy as np
 
-from sportsbot.storage import write_json
-
 from . import forecast, indicators as ind, setups as st, stats
 from .cache import HistoryCache
 from .features import FEATURES, build
 from .model import Backtest, MarketModel, Skill, backtest, train
 from .sources import LongRun, Sources, fear_greed_label
+from .storage import write_json
 from .universe import (BENCHMARK, CRYPTO, CRYPTO_TRAINING, STOCK_TRAINING, STOCKS, display_name, looks_like_symbol,
                        market_of, normalize)
 from .yahoo import Bars, Quote, YahooClient, YahooError

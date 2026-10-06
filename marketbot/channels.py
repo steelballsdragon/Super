@@ -5,8 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
-from sportsbot.storage import read_json, write_json
-
+from .storage import read_json, write_json
 from .universe import CRYPTO, DEFAULT_CRYPTO, DEFAULT_STOCKS, STOCKS
 
 KINDS = ("stocks", "crypto", "news", "research")
