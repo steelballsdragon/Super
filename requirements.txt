@@ -1,2 +1,6 @@
 discord.py>=2.3,<3
 aiohttp>=3.9
+numpy>=1.26
+matplotlib>=3.8
+# Optional: lets Claude read the important headlines when ANTHROPIC_API_KEY is set.
+anthropic>=1.11
