@@ -221,3 +221,6 @@ __marimo__/
 
 # Bot runtime data
 subscriptions.json
+
+# Market bot data (price history, models, state)
+market-data/

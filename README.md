@@ -1,5 +1,8 @@
 # Live Scores Discord Bot
 
+> **Also in this repository: a stocks & crypto market bot** with live boards, alerts, a breakout radar,
+> forecasts built on a century of prices, automated research and a news-impact desk. See [MARKETBOT.md](MARKETBOT.md).
+
 A Discord bot that posts live **NFL, NBA, MLB, NHL, soccer and cricket** updates to your channels, using ESPN's free public data (you don't need an API key).
 
 ## Features
