@@ -11,7 +11,7 @@ pytest.importorskip("matplotlib")
 
 from marketbot import bot as botmod, embeds as E  # noqa: E402
 from marketbot.ai import NewsAI  # noqa: E402
-from marketbot.bot import MarketBot, crossed, live_seconds, move_steps  # noqa: E402
+from marketbot.bot import MarketBot, crossed, data_folder, live_seconds, move_steps  # noqa: E402
 from marketbot.channels import ChannelStore  # noqa: E402
 from marketbot.engine import Engine, compute_outlook, options_view, scan_all, with_live  # noqa: E402
 from marketbot.feeds import Headline  # noqa: E402
@@ -329,8 +329,9 @@ def test_engine_reads_saved_models(tmp_path):
     assert STOCKS in again.models and again.models_stale()  # crypto still missing
 
 
-def test_market_bot_stands_alone():
-    """The market bot must keep working if the sports bot's code is removed from the repository."""
-    package = Path(__file__).resolve().parent.parent / "marketbot"
-    users = [p.name for p in package.glob("*.py") if "sportsbot" in p.read_text()]
-    assert users == []
+def test_data_folder_setting():
+    assert data_folder({}) == "market-data"
+    assert data_folder({"MARKET_DATA_DIR": "/data/m"}) == "/data/m"
+    # A server first set up for ScoreBot keeps using its writable data folder.
+    assert data_folder({"DATA_FILE": "/var/lib/scorebot/subscriptions.json"}) == "/var/lib/scorebot"
+    assert data_folder({"DATA_FILE": "/x/s.json", "MARKET_DATA_DIR": "/y"}) == "/y"

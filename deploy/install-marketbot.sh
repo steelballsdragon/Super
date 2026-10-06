@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Installs (or updates) the stocks & crypto market bot as an always-on systemd service on Ubuntu.
-# It runs next to ScoreBot (if you have it) as its own service, user and Discord bot.
 #
 #   curl -fsSL https://raw.githubusercontent.com/steelballsdragon/Super/main/deploy/install-marketbot.sh | sudo bash
 #
@@ -47,7 +46,7 @@ fi
 say "Installing Python packages (numpy and matplotlib take a minute)"
 python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/pip" install -q --upgrade pip
-"$APP_DIR/.venv/bin/pip" install -q -r "$APP_DIR/requirements-marketbot.txt"
+"$APP_DIR/.venv/bin/pip" install -q -r "$APP_DIR/requirements.txt"
 # The bot only reads its code (its data lives in /var/lib/marketbot), and root runs the update scripts in
 # here, so the bot's user must not be able to change it.
 chown -R root:root "$APP_DIR"
@@ -58,7 +57,7 @@ ai_key="${ANTHROPIC_API_KEY:-}"
 if [ -z "$token" ] && { [ ! -s "$ENV_FILE" ] || ! grep -q '^MARKET_DISCORD_TOKEN=.\+' "$ENV_FILE"; }; then
   say "Discord bot token"
   echo "Paste the market bot's token (Discord Developer Portal → your application → Bot → Reset Token)."
-  echo "Use a different application from ScoreBot. It won't be shown as you paste. Press Enter when done."
+  echo "It won't be shown as you paste. Press Enter when done."
   while [ -z "$token" ]; do
     read -rs -p "Token: " token </dev/tty
     echo

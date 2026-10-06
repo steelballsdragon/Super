@@ -649,12 +649,22 @@ def live_seconds(setting: str | None) -> float:
     return max(float(setting), MIN_LIVE_SECONDS) if setting else DEFAULT_LIVE_SECONDS
 
 
+def data_folder(env) -> str:
+    """MARKET_DATA_DIR, else the folder of an older DATA_FILE setting (a server or Railway volume set up for
+    ScoreBot, the sports bot this repository used to hold: that folder is the writable one), else market-data."""
+    if env.get("MARKET_DATA_DIR"):
+        return env["MARKET_DATA_DIR"]
+    if env.get("DATA_FILE"):
+        return str(Path(env["DATA_FILE"]).parent)
+    return "market-data"
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     token = os.environ.get("MARKET_DISCORD_TOKEN") or os.environ.get("DISCORD_TOKEN")
     if not token:
         raise SystemExit("Set MARKET_DISCORD_TOKEN (or DISCORD_TOKEN) to your bot's token (see .env.example).")
-    data_dir = os.environ.get("MARKET_DATA_DIR") or "market-data"
+    data_dir = data_folder(os.environ)
     dev_guild = os.environ.get("DEV_GUILD_ID")
     bot = MarketBot(data_dir, int(dev_guild) if dev_guild else None, live_seconds(os.environ.get("LIVE_INTERVAL")))
     bot.run(token, log_handler=None)

@@ -23,5 +23,5 @@ fi
 
 echo "Updating the market bot to $(git_ rev-parse --short "origin/$branch")"
 git_ reset -q --hard "origin/$branch"
-"$APP_DIR/.venv/bin/pip" install -q -r "$APP_DIR/requirements-marketbot.txt"
+"$APP_DIR/.venv/bin/pip" install -q -r "$APP_DIR/requirements.txt"
 systemctl restart marketbot

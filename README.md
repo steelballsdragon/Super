@@ -1,377 +1,193 @@
-# Live Scores Discord Bot
+# Market Bot (stocks & crypto) for Discord
 
-> **Also in this repository: a stocks & crypto market bot** with live boards, alerts, a breakout radar,
-> forecasts built on a century of prices, automated research and a news-impact desk. See [MARKETBOT.md](MARKETBOT.md).
+A Discord bot for live **stock and crypto** updates, alerts, a breakout radar, forecasts built on **a century of price history**, automated research reports, and a news desk that
+estimates **which markets each headline should move, which way, and by roughly how much**.
 
-A Discord bot that posts live **NFL, NBA, MLB, NHL, soccer and cricket** updates to your channels, using ESPN's free public data (you don't need an API key).
+It uses free public data, so you don't need any API keys: Yahoo Finance (prices, fundamentals, options, news),
+Robert Shiller's S&P 500 data back to 1871, CoinGecko, the Crypto Fear & Greed index, and RSS feeds from
+MarketWatch, WSJ, Nasdaq, Investing.com, Seeking Alpha, the Federal Reserve, the SEC, CoinDesk, Cointelegraph,
+The Block, Decrypt and Google News. An Anthropic API key is optional: with one, Claude also reads the headlines.
 
-## Features
+## Channels
 
-In a channel that follows a league, `/scores`, `/research` and `/unfollow` don't need the league: they use the
-channel's. If it follows several, a team you type picks the league (e.g. `/research team:Chiefs` in a channel following
-NFL and MLB), and `/scores` on its own shows every followed league.
+Run **`/setup`** once and the bot creates a **📊 Markets** category with four channels:
 
-- `/scores [league] [team]`: shows the current scoreboard (live, upcoming and finished games).
-- `/follow <league> [team]`: posts live updates in this channel for a whole league or for one team.
-- `/unfollow [league] [team]`: stops those updates.
-- `/following`: lists what this channel follows.
-- `/status`: shows when the bot last checked each followed league, how many games are live, and any errors.
-- `/update`: (admins) checks GitHub for a new version right away, instead of waiting up to 5 minutes.
-- `/scoreboard`: posts a live scoreboard in this channel and pins it. It keeps editing itself with every game the
-  channel follows (live first, then upcoming, then recent results). `/scoreboard enabled:False` removes it.
-- `/schedule`: today's games for everything this channel follows.
-- `/daily enabled:True hour:9 timezone:America/Toronto`: posts today's games every morning at that hour (skipped on
-  days with nothing on). Start times show in each reader's own time zone.
-- `/reminders enabled:True`: posts a heads-up 15 minutes before each followed game.
-- `/odds enabled:False`: hides betting lines in this channel (on by default). Game starts show the DraftKings line
-  (spread, over/under, moneyline; draw for soccer), and finals show how it settled, e.g.
-  *Spread: Indianapolis Colts -4.5 ✅ covered · Total: Under 47.5 ✅ (47) · Moneyline: Indianapolis Colts -205 ✅*. The pre-game line is saved, so
-  bets are graded against the closing line. Soccer bets settle on the 90-minute score, as sportsbooks do.
-- `/threads enabled:True`: puts each game's updates in its own thread. The start and result post in the channel;
-  goals, plays, wickets and ball-by-ball go in the game's thread.
-
-The team option suggests teams as you type, e.g. typing `ind` offers *India* and *West Indies*.
-
-Each sport posts the moments that matter for it:
-
-| Sport | Live updates |
+| Channel | What it gets |
 |---|---|
-| ⚽ **Soccer** | Kick-off, every goal (scorer, minute and assist, marked as a penalty or own goal), half-time, full-time, and VAR score corrections |
-| 🏈 **NFL** | Game start, every scoring play with the players, yards and extra point or two-point try (e.g. *Roman Wilson 12 Yd pass from Aaron Rodgers (Chris Boswell Kick)*), the score at the end of each quarter, half-time, and the final with passing, rushing and receiving leaders |
-| ⚾ **MLB** | First pitch, every run with the play (e.g. *Albies homered to right center (419 feet), Riley scored.*), and the final with each team's top performer |
-| 🏒 **NHL** | Puck drop, every goal with the scorer, shot type and assists (on their own line; marked as power-play, shorthanded or empty-net), the score at the end of each period, and the final with each team's top scorer |
-| 🏀 **NBA** | Tip-off, the score at the end of each quarter, half-time and the final with each team's top performer. It doesn't post every basket. |
-| 🏏 **Cricket** | Match start with the toss, every wicket, the score every 5 overs (T20) or 10 overs (ODI and Test) with the chase equation, the innings break, and the result (e.g. *RCB won by 5 wkts (12b rem)*). Optional **ball-by-ball** mode posts every delivery (see below). |
+| **📈-stocks** | A **live board** (pinned, edited every minute): S&P 500, Nasdaq, Dow, Russell 2000, VIX, futures outside market hours, the 10-year yield, dollar, gold, oil, and the watchlist with pre-market and after-hours moves. **Alerts** for big moves (indices ±1/2/3%…, stocks ±3/5/7.5/10%…), VIX spikes, new 52-week highs and lows, and fresh **breakout setups** during market hours. A **pre-market brief** at 9:00 ET and a **closing recap** at 4:10 ET on trading days (NYSE holidays are skipped). |
+| **🪙-crypto** | A **live board**, 24/7: total market cap, BTC dominance, Fear & Greed, and the watchlist with 1-hour, 24-hour and 7-day changes. Alerts for big daily moves (±5/10/15%… since midnight UTC), **fast moves** (BTC ±2%, ETH ±3%, others ±4% within an hour) and breakout setups. A **daily crypto brief** (8:00 by default; `/settings brief_hour: timezone:`). |
+| **📰-market-news** | Market-moving headlines, each with its **expected impact**: e.g. *🔴 ▼ S&P 500 −0.5–1.4% · 🟢 ▲ 10-yr yield +4–12 bp · 🔴 ▼ Gold −0.3–1.1%*. A morning headline digest at 7:30 ET. The biggest stories (importance 80+) are also posted in the stocks or crypto channel. |
+| **🔬-research** | A **research digest** after every US close (the strongest setups across both watchlists and the sector ETFs, with deep dives and charts on the top two) and a **week-ahead outlook** every Sunday at 6 PM ET (macro dashboard, valuation, seasonality, presidential cycle, outlooks for the S&P 500, Nasdaq, Bitcoin and Ether). |
 
-Supported leagues: NFL, NBA, MLB, NHL, Premier League, La Liga, Serie A, Bundesliga, Ligue 1, MLS, Champions League,
-Europa League, FIFA World Cup, IPL, and international cricket (every current Test, ODI and T20I, men's and women's).
-To add more, edit `sportsbot/leagues.py` with any ESPN path, for example `soccer/ned.1`.
+Already have channels? Run `/channel kind:` in each instead. `/settings` turns alerts or briefs off, sets how
+picky the news channel is (`major` 75+, `important` 55+ by default, `all` 35+), and the crypto brief's hour and
+time zone. `/watchlist` changes a stocks or crypto channel's list (up to 30; names work too, e.g. `add: tesla, AMD`).
 
-Results are reported correctly in tricky cases too: penalty shootouts (*Paraguay win 4-3 on penalties*),
-extra time, NHL shootouts, and postponed, suspended or cancelled games (posted as **Postponed** etc., never as a result).
-When a game ends on a score, such as a walk-off home run, the winning play is posted before the final result.
-
-### Player stats
-
-`/stats` shows the standout players of a live or finished game from ESPN's box score, and every half-time and
-final post has a **📊 Player stats** button (only the person who taps it sees the stats).
+## Commands
 
 | Command | What you get |
-| --- | --- |
-| `/stats team:Islanders` | That team's game today |
-| `/stats game:` | Pick from today's started games (live score shown in the suggestions) |
-| `/stats` | The game in progress, when the channel's league has just one |
-
-- **NBA:** points, rebounds, assists, made threes and minutes for each team's top scorers.
-- **NHL:** goals, assists and shots on goal, and each goalie's saves.
-- **NFL:** the quarterback, top rushers and receivers, sacks and interceptions.
-- **MLB:** hitters with hits, home runs, RBIs and runs; the pitchers' innings, hits, earned runs and strikeouts.
-- **Soccer:** goals, assists, shots (on target) and cards for each player, keeper saves, and team possession,
-  shots and corners.
-
-### Betting research
-
-Everything is one command, `/research [league] [team] [parlay]` (the league can be left out in a channel that follows one):
-
-| You type | You get |
 |---|---|
-| `/research league:NFL` | The league's strongest leans, most likely results, and a **Safe** parlay |
-| `/research league:NFL team:Chiefs` | Everything on that team's next game: market, model, form, injuries, leans and player trends |
-| `/research league:NFL parlay:Safe` | A parlay built to about **+100** |
-| `/research league:NFL parlay:Big payout` | A parlay built to between **+1000 and +10000** |
-| `/research league:NFL parlay:Lotto` | A 4–10 leg parlay built to between **+3000 and +20000** |
-| `/research league:NFL team:Chiefs parlay:Safe` | A same-game parlay from the Chiefs' next game |
-| `/research game:Bournemouth @ Chelsea parlay:Lotto` | A same-game Lotto from the game you pick (suggestions list the week's games) |
-| `/research bets:Assists round robin` | 3 long-shot assist picks (full-backs, set-piece takers) from different games, as a round robin of 2's (`parlay:Lotto` for +450 to +1500 picks, `picks:4` for more) |
-| `/research league:NBA bets:3-pointers round robin` | 3 role-player 3+ / 4+ made threes picks as a round robin of 2's |
-| `/research league:MLS bets:Goalscorer slate lotto` | Each team's likeliest goalscorer across the next big slate (a Saturday MLS card), 10 legs by default (`picks:` up to 15), grouped game by game like a book's SGPs |
-| `/research league:NFL bets:Anytime TD scorers` | The likeliest touchdown scorer from each team on the next NFL slate (Sunday), 6 legs by default (`picks:` up to 15) |
-| `/research bets:Goalscorers & assists` | A goalscorer/assist slip: anytime goalscorers and assisters, taking turns (soccer, NHL); a Lotto unless you pick another payout |
+| `/price symbol:` | Live price, day and 52-week range, volume vs normal, returns, and an intraday chart |
+| `/chart symbol: period:` | Candles with 20/50/200-day averages, Bollinger Bands, support/resistance, volume, RSI and the forecast cone (1D to MAX; long periods switch to a log-scale line) |
+| `/forecast symbol:` | The outlook: breakout odds, chance of being higher in a week / month / 3 months, Monte Carlo price ranges, historical look-alikes, active setups with their track record, key levels and what's driving the model |
+| `/research symbol:` | Everything in `/forecast`, plus performance and risk since listing, valuation, analyst targets and ratings, earnings dates and beat rate, **options positioning** (expected move, implied vs realized volatility, put/call ratios, call and put walls, max pain), this month's seasonality, the halving cycle for Bitcoin, and the latest news scored for sentiment |
+| `/breakouts market:` | Scans 60–80 symbols (watchlist, mega caps, sector ETFs and today's most active stocks; or the top 40 coins) for fresh breakouts, coils, flags and squeezes, ranked by breakout pressure, with a chart of the top one |
+| `/news [symbol] [market]` | The last day's most important stories with impact estimates, or one symbol's news |
+| `/history symbol:` | The long view: growth since the first price, decades, the biggest crashes and recoveries, best and worst years, the average month, the US presidential cycle. The S&P 500 goes back to **1871** (Shiller's monthly data joined to daily data from 1927) |
+| `/macro` | VIX (and its percentile since 1990), yields and the yield curve, the dollar, gold, oil, copper, crypto Fear & Greed with what Bitcoin did after similar readings, a stock-market fear & greed gauge, and the S&P 500's **Shiller CAPE** with the 10-year return history implies at today's valuation |
+| `/movers market:` | Today's biggest US gainers and losers, or the top-100 coins' |
+| `/compare first: second:` | Returns side by side, volatility, worst falls, correlation and beta, and a growth chart |
+| `/backtest symbol:` | Would following the model have beaten buy-and-hold? A walk-forward test (each year predicted by a model trained only on earlier years) with an equity curve |
+| `/alert symbol: price:` · `/alerts [remove]` | Pings you in the channel when a price is crossed |
+| `/record` | How the bot's own calls have done: forecasts, breakout calls and news calls, graded automatically |
+| `/brief kind:` | Posts any of the scheduled briefs here now |
+| `/status` · `/update` · `/help` | Health of every job and data source, models and news reader; update from GitHub; overview |
 
-`/record` shows how the leans and parlays have done. `/bankroll` shows your own money: see below.
+Symbols autocomplete as you type, and names work: `nvidia`, `btc`, `s&p`, `gold`, `10y`, `dollar`.
 
-A team's report labels every number by source:
+## How the predictions work (and how good they are)
 
-- **Market (DraftKings via ESPN):** spread, total and moneyline, the implied chance of each result with the
-  bookmaker's margin removed, and how the line has moved since it opened.
-- **ESPN Matchup Predictor** (where ESPN publishes one, e.g. NFL and MLB) next to the market's number.
-- **Last 5 games** with points scored and allowed, records against the spread, and **injuries** (QBs first).
-- **Leans**, only when the data disagrees with the line: ESPN's model at least 5 points above the market's no-vig
-  chance, or a projected total (from recent scoring) clearly off the over/under. Each lean lists the numbers behind
-  it, a Low/Medium/High label, and ⚠️ cautions when the data may be misleading: a starting QB out, a big line move
-  against the lean since the open, or a gap so large it usually means the model is missing news. Leans with
-  cautions are always Low; totals from recent form top out at Medium.
+Nobody can predict markets reliably, and this bot doesn't pretend to: every number comes with the base rate
+it's competing against, and the bot grades itself in public with `/record`.
 
-Every pre-game lean is saved and graded at the final (win/loss/push, units at the recorded price), and `/record`
-breaks the results down by market and by confidence. Break-even at standard -110 prices is about 52.4%, so judge the
-leans by this record, not by how convincing they sound. It's research, not advice, and it can't guarantee winners.
+- **Prediction models.** Logistic regressions on 29 features (momentum over 6 horizons, distance from moving
+  averages and 52-week highs/lows, RSI, MACD, Bollinger width, volatility regime, volume, range tightness, ADX…),
+  trained on pooled daily history: ~120,000 days from 27 stock and index histories going back to **1929**, and
+  14 coins back to 2015. They're retrained every 3 days in the background.
+- **Tested on years they never saw.** Walk-forward over the last 12 years (train on everything before each
+  2-year block, predict the block):
+  - **Breakouts** (*will it close above its 20-day high within 10 sessions?*): AUC **0.82** for stocks and
+    crypto, well calibrated (when it said 70% or more, it happened 75–78% of the time). This is the strong suit.
+  - **Direction** (*higher in 1 week / 1 month / 3 months?*): AUC **0.48–0.51**, i.e. no better than a coin
+    flip, as you'd expect from markets. So the bot shrinks these numbers toward history's base rates (the S&P 500
+    has been higher after a month 58% of the time) in proportion to the model's tested skill, and blends in the
+    look-alikes. It says so on every forecast.
+- **Historical look-alikes.** The 30 days in all of history (e.g. S&P 500 since 1928) whose setup looked most
+  like today's (momentum, trend, volatility and the last 30 days' path), and what happened 5, 20 and 60 days
+  later.
+- **Price ranges.** Monte Carlo (filtered historical simulation): 2,000 paths replaying history's own shocks
+  with volatility that clusters and drifts back to normal like a GARCH model. Gives the 90% range for 1 month,
+  3 months and 1 year, and the odds of touching ±10%.
+- **Setups.** 28 patterns (20-day and 52-week breakouts, record highs, squeezes, coils under resistance, bull and
+  bear flags, golden/death crosses, 200-day reclaims, RSI divergences, volume surges, gaps…) found across each
+  symbol's whole history, so each one shows how often it worked **on that chart** before (and on the S&P 500).
+- **The score.** A −100…+100 *technical* score (trend, momentum, direction odds, breakout balance, setups). It's
+  a summary of the picture, not a prediction on its own.
+- **Backtests.** `/backtest ^GSPC` (at the time of writing): timing the S&P 500 with the model since 2017 made
+  9.6%/yr against 13.5%/yr for holding, with half the worst drawdown (−17% vs −34%). Market timing rarely beats holding; the bot shows
+  that rather than hiding it.
 
-### Goalscorers and assists (soccer)
+### News impact
 
-Pick `bets:Goalscorers & assists` for a slip like a typical FanDuel goal/assist bet: **Anytime Goalscorer** and **To
-Record an Assist** legs (named as FanDuel lists them), taking turns so it's a mix of scorers and assisters, e.g.
+Each headline is classified into one of 29 event types (Fed/rates, inflation, jobs, growth, tariffs,
+geopolitics, oil, banking stress, bond yields, the dollar, AI/chips, earnings, M&A, analyst ratings, legal,
+FDA, bankruptcy, buybacks, index changes, layoffs, crypto ETFs, crypto regulation, hacks, exchange failures,
+stablecoins, adoption, network upgrades…). Then:
 
-```
-Morgan Rogers Anytime Goalscorer
-John McGinn To Record an Assist
-João Pedro Anytime Goalscorer
-Keane Lewis-Potter To Record an Assist
-```
+1. **Which way:** event-specific wording decides whether it's good or bad news for risk assets (a "hot" CPI is
+   bad for stocks even though prices "rise"; "cuts the odds of a hike" is good news even though it says "hike").
+2. **Which markets and how much:** each event type moves a set of markets by a typical amount from event studies
+   (a CPI surprise ≈ 0.9% on the S&P 500, 8 bp on the 10-year yield, 2.5% on Bitcoin), scaled by how strong the
+   wording is, whether it's speculation ("could", "reportedly"), and how volatile each market is right now.
+3. **Ranking:** opinion pieces, listicles, recaps of moves that already happened, and other countries' data rank
+   low; stories carried by several outlets rank higher.
+4. **Learning:** every call on a posted story is checked against what the market did over the next day. The
+   hit rate shows in `/record`, and each event type's sizes are re-scaled toward what markets actually did.
 
-It's a Lotto (+3000 to +20000) unless you pick another payout, and works for one game too (`game:`). Lottos also use
-these legs automatically.
-
-**Who's most likely to score depends on the matchup too.** Each player's record (last 10, this season, last season) is
-scaled by how many goals his team is expected to score in this game compared with what it usually scores. The
-expectation comes from the betting line (the over/under split by the win chances, e.g. Arsenal -260 with the total at 2.5
-means about 1.9 goals for Arsenal) or, without a line, from the team's scoring against what the opponent concedes. A
-striker facing a leaky defence moves up and one facing a tight one moves down, and each leg says why, e.g.
-*~55% Bryan Mbeumo Anytime Goalscorer · L10 2/5 · Manchester United expected 2.3 goals (betting line), 1.8 a game lately*.
-Recent scoring is blended with a typical team's so a short hot or cold run doesn't swing it too far. These are long shots by nature (a top striker scores in about 40–50% of games),
-so they're held to their own bar: about a 22% chance and at least 2 of the last 10 games. A game's report
-(`/research game:` or `team:`) lists every key player's goal and assist chances with estimated odds.
-
-**Assists follow FanDuel's rules** (Opta data), both in live goal posts and when assist legs are graded. Besides the final
-pass, the assist goes to the player who:
-
-- won a penalty or free kick that was scored directly (unless they took it),
-- had a shot saved, blocked or hit the woodwork, with a team-mate scoring the rebound,
-- forced an own goal with a shot or pass.
-
-Goal posts show these as e.g. *⚽ 61' Bruno Fernandes (pen) · 🅰️ FanDuel assist: Matheus Cunha (won the penalty)*. Hit
-rates use official assists, so assist legs hit a little more often than shown.
-
-### Round robins: long-shot assists and 3-pointers
-
-`bets:Assists round robin` (soccer) and `bets:3-pointers round robin` (NBA) build the kind of round robin that pays big
-on long shots:
-
-- **Deeper player pool.** Assists look at each team's top 8 assisters and best passers (full-backs, wing-backs and
-  set-piece takers, not just the stars); 3-pointers at each team's top 6 shooters by threes per game.
-- **Long-shot lines.** Each player at the longest line inside the price band: by default about +200 to +700, Big payout
-  +300 to +900, Lotto +450 to +1500 (pick it with `parlay:`), Safe +100 to +300. A pick must have happened at least once
-  in the player's last 10 games, and assists are adjusted for the matchup.
-- **Spread out.** One pick per game (two for the NBA), one per player, and never two assists from the same team.
-- **Fair prices, every pair and the chances.** Each pick shows its fair price from its record: back it only if your
-  book pays more. The post lists every 2-leg combination with its price and the chance at least one pair cashes.
-- **Graded as a round robin.** After the games the result shows how many picks hit and how many of the bets cashed.
-
-### Confirmed lineups
-
-Picks are only as good as the lineup. ESPN publishes soccer starting XIs about an hour before kickoff and MLB batting
-orders a few hours before the first pitch; the NBA, NHL and NFL have no lineups before the game, only the injury
-report.
-
-- **Only starters once the lineup is out.** From the moment a team's lineup is on ESPN, every pick for that team
-  (parlays, goalscorers and assists, round robins) comes from its starters: substitutes and players left out of the
-  squad are skipped. Before that, and in other sports, players ruled out on the injury report (Out, Doubtful, injured
-  reserve, suspended) are skipped.
-- **Every slip says where it stands:** "✅ Picked from the confirmed lineups", or "⏳ Lineups aren't out yet" with
-  the check to come. For the best soccer slips, run `/research` once the lineups are out (about 50 minutes before
-  kickoff).
-- **Open slips are checked before kickoff.** In the last 75 minutes before a game, the bot watches each open slip's
-  players. When a team's lineup comes out it posts which of your picks start, are on the bench or aren't in the
-  squad, so you can swap a leg before kickoff. In any sport it posts if a pick is ruled out on the injury report.
-  Anyone who logged a bet on the slip with **I placed it** is tagged.
-
-### Your bets and bankroll
-
-The bot doesn't place bets: sportsbooks have no betting API, and automating their site breaks their terms (and puts
-your account at risk). Instead, every slip has a **💵 I placed it** button:
-
-1. Bet the slip at your book, then tap **I placed it** and enter your stake and the price you got (`+1250`, `-110` or
-   `13.5`). For a round robin enter the stake per bet and each pick's price in order (`+250, +310, +400`). The form is
-   filled in with the plan's stake. Tap it again to change the bet, or enter a stake of 0 to remove it.
-2. The reply (only you see it) shows what it pays, your **edge at that price** by the bot's numbers (a price worse
-   than fair gets a warning to shop around or skip), and how the stake fits your plan.
-3. When the slip is graded, your bet settles with it: the result post shows what you won or lost, and your balance
-   updates. Void legs come off like at the book (a parlay is repriced without them; a round-robin pair with a void
-   pick becomes a single).
-
-| Command | What you get (only you see it) |
-| --- | --- |
-| `/bankroll start:500` | Starts your bankroll at $500: the money set aside for betting. Results count from now |
-| `/bankroll style:Careful` | Unit size: Careful 1%, Standard 2% (default) or Aggressive 3% of your balance |
-| `/bankroll add:100` | Adds money (a negative amount takes some out) |
-| `/bankroll` | Balance, unit, suggested stakes, money at risk, today's total, results and ROI by bet type, recent bets |
-
-The staking plan:
-
-- **Units from your balance.** A unit is 1-3% of your *current* balance, so stakes shrink after losses and grow
-  after wins, and a cold run can't wipe you out.
-- **Smaller stakes on longer shots.** 1 unit on a bet with a 30%+ chance (Safe), half a unit at 5-30% (Big payout,
-  most round robins), a quarter unit below 5% (Lotto). A round robin's stake is split across its pairs. Every slip
-  says its stake in units.
-- **Guard rails.** A warning for more than 3 units on one bet, a stop sign once you've staked 10% of your bankroll in
-  a day, and a note when you're 25% below your peak.
-- **Price check.** `/bankroll` counts how often you got a price better than fair: over time that's what makes money.
-
-### Player trends and parlays (Linemate-style)
-
-A team's report also shows each key player's **most likely line** for every stat in the team's next
-game, with how often it hit: last 10 games, this season, last season and against this opponent, from ESPN's game
-logs, e.g. *~92% Josh Downs Over 1.5 Receptions · L10 10/10 · 2026 3/3 · 2025 15/16*. Key players come from ESPN's
-team leaders; players listed Out, Doubtful or on IR are skipped.
-
-- NFL: passing yards and TDs, rushing yards, receptions, receiving yards, anytime TD
-- NBA: points, rebounds, assists, 3-pointers, points + rebounds + assists
-- NHL: shots on goal, points, goals, assists
-- MLB (batters): hits, total bases, runs, RBIs, home runs
-- Soccer: shots, shots on target, anytime goal, to assist, goal or assist, fouls committed
-- Cricket: runs, fours, sixes (batters); wickets (bowlers)
-
-Cricket has no player game logs on ESPN, so its history is rebuilt from full scorecards (taken from the
-ball-by-ball commentary, since ESPN's match summary only carries the latest innings): every IPL match of the current
-season, and for internationals, earlier matches in the current series plus every match the bot records as it finishes.
-International history therefore grows over time; players need 3+ matches before trends appear.
-
-The **~%** is the hit rate adjusted for sample size (10/10 becomes about 92%, so nothing is ever "certain"),
-weighted toward the last 10 games. A line needs about 75% (and 7 of the last 10) to be shown. MLB hitting is far less
-consistent, so its bar is about 60%; its estimates are shown either way.
-
-**Parlays are built to a payout, not a number of legs.** Legs are added, most likely first, until the estimated
-odds land in range:
-
-- **Safe (around +100):** the most likely lines until the parlay is close to even money (+100 means about a 50%
-  chance), usually 2–4 legs.
-- **Big payout (+1000 to +10000):** the higher, better-paying lines (each stat's near-certain line is skipped), usually
-  6–12 legs.
-- **Lotto (4–10 legs, +3000 to +20000):** the longest shots that still have a track record: high lines, plus
-  underdog moneylines the market gives at least a 25% chance (not soccer, where draws are possible).
-
-Legs are spread out (at most two per game, one per player; legs in the same game move together) unless you pick a
-team, which builds a same-game parlay. Clear moneyline favorites can be legs too. Each leg shows its evidence, and
-the parlay shows its **estimated odds** from those hit rates, with a plain slip to copy or screenshot for an odds bot.
-The estimate is optimistic (it treats legs as independent) and your book's real price will differ, so check it.
-Parlays look up to a week ahead until there are enough games to build from (soccer often has one midweek game
-before a full weekend). If the range still can't be reached it says how close it got, and if there aren't enough
-legs for the option at all (a Lotto needs 4) it says so rather than posting something smaller.
-
-**Every parlay is graded.** It's saved with the channel it was built in; after the games, each leg is checked against
-the player's actual stats (game log, or the cricket scorecard) or the final score, players who didn't play are voided as
-books do, and the result is posted back, e.g. *✅ Aaron Rodgers Over 199.5 Passing Yards · 299 · predicted ~79%*.
-`/record` adds parlay and leg results per sport with **hit rate vs predicted**, the honest test of whether the
-estimates can be trusted.
-
-These are historical frequencies, not odds, and books price these trends in; check prices before betting.
-
-### Cricket ball by ball
-
-`/follow` → a cricket league → `ball_by_ball: True` posts every delivery from ESPNcricinfo's commentary, e.g.
-
-```
-🏏 India v West Indies
-`2.3` Seales to Shubman Gill, 🔴 OUT! · India 3/1
-> Shubman Gill c †Hope b Seales 1 (6b 0x4 0x6)
-`2.4` Seales to Kohli, 4️⃣ FOUR! · India 7/1
-`2.6` Seales to Kohli, 1 run · India 8/1
-End of over 3: 6 runs
-```
-
-Balls bowled between two checks are combined into one message. That's still a message every ball or two, so a
-dedicated channel works best. Following mid-match starts from the current ball. A restart (e.g. an update) carries on
-from the last ball posted, with no repeats or gaps; after a long outage it skips ahead to the latest ball rather than
-posting overs of backlog. Ball-by-ball channels still get the match start, innings break and result, but not the
-separate wicket and every-5/10-overs posts.
-
-Ball by ball is for senior teams: Under-19 matches aren't posted ball by ball when a channel follows all matches or a
-country (following "India" doesn't bring in India Under-19s). To get one, follow the youth team by name, e.g.
-`team:India Under-19s`.
+**Optional: Claude reads the news too.** Set `ANTHROPIC_API_KEY` and the important headlines (importance 40+)
+are sent to Claude in batches of 10; its read (event, one-line takeaway, which markets, direction, size,
+confidence) replaces the keyword model's for those stories. It uses `claude-opus-5-5` by default
+(`NEWS_AI_MODEL` changes it) and is capped at 150 calls a day (`NEWS_AI_DAILY_CALLS`); a busy news day is
+typically 50–100 calls, roughly a few dollars a day at Opus pricing. The news footer says which reader scored
+each story.
 
 ## Setup
 
 1. Create an application at https://discord.com/developers/applications, add a **Bot**, and copy its token.
-2. Invite the bot. Under **OAuth2 → URL Generator**, select the `bot` and `applications.commands` scopes and these
-   permissions, then open the URL it generates:
-   - `Send Messages`, `Embed Links`: required
-   - `Create Public Threads`, `Send Messages in Threads`: for `/threads`
-   - `Manage Messages`: to pin the `/scoreboard` message
-
-   If the bot is already in your server, add the extra permissions to its role in **Server Settings → Roles**
-   instead. Without them, `/threads` falls back to posting in the channel and the scoreboard just isn't pinned.
+2. Invite it: **OAuth2 → URL Generator**, scopes `bot` and `applications.commands`, permissions
+   `Send Messages`, `Embed Links`, `Attach Files`, `Manage Messages` (to pin the live boards) and `Manage Channels`
+   (for `/setup`).
 3. Install and run:
 
    ```bash
    python -m venv .venv && source .venv/bin/activate
    pip install -r requirements.txt
-   export DISCORD_TOKEN=your-token-here
-   python -m sportsbot
+   export MARKET_DISCORD_TOKEN=your-token-here
+   python -m marketbot
    ```
 
-You don't need privileged gateway intents.
+4. In Discord, run `/setup`. Boards appear within a minute; the models train in the background on first start
+   (about a minute; forecasts work meanwhile from look-alikes and history).
 
-### Free 24/7 hosting (Oracle Cloud Always Free)
-
-On any Ubuntu 22.04+ server, including Oracle Cloud's free VM, one command installs the bot as a service
-that restarts automatically after crashes and reboots:
+### 24/7 on a server (Oracle Cloud Always Free, any Ubuntu 22.04+)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/steelballsdragon/Super/main/deploy/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/steelballsdragon/Super/main/deploy/install-marketbot.sh | sudo bash
 ```
 
-It asks for your bot token once and stores it in `/etc/scorebot.env`, readable only by root. The bot runs as its own
-`scorebot` user, which can read but not change the code in `/opt/scorebot` (root runs the update scripts there), and
-keeps its data in `/var/lib/scorebot`.
-The server checks GitHub every 5 minutes and installs new code automatically. To update right away, run `/update` in
-Discord (server admins only) or run the install command again.
-View the logs with `sudo journalctl -u scorebot -f`.
+It asks for the token (and an optional Anthropic API key) once, stores them in `/etc/marketbot.env` (readable
+only by root), and runs the bot as its own `marketbot` service and user, with its data in `/var/lib/marketbot`.
+A timer checks GitHub every 5 minutes and installs new code (or use `/update`). Logs: `sudo journalctl -u marketbot -f`. It peaks at about 350–400 MB of memory (while training).
 
-**No terminal? (e.g. setting up from a phone)** When creating the server, paste this as its startup script
-(on Oracle: *Create instance → Show advanced options → Management → Initialization script → Paste cloud-init script*).
-It installs the bot on first boot, with no typing in a terminal:
+### Switching a server over from ScoreBot
+
+This repository used to hold ScoreBot, a sports bot; it has been removed. A server that ran it picks up this
+change by itself and starts the market bot under its old `scorebot` service and token, but that service no
+longer updates. Move the bot to its own service (and keep the same bot in Discord):
 
 ```bash
-#!/bin/bash
-export DISCORD_TOKEN='paste-your-token-here'
-curl -fsSL https://raw.githubusercontent.com/steelballsdragon/Super/main/deploy/install.sh | bash
+sudo grep DISCORD_TOKEN /etc/scorebot.env        # copy the token: the market bot can reuse it
+sudo systemctl disable --now scorebot scorebot-update.timer
+sudo rm -f /etc/systemd/system/scorebot.service /etc/systemd/system/scorebot-update.service \
+           /etc/systemd/system/scorebot-update.timer /etc/sudoers.d/scorebot-update
+sudo systemctl daemon-reload
+sudo rm -rf /opt/scorebot /var/lib/scorebot /etc/scorebot.env   # also deletes ScoreBot's saved data
+sudo userdel scorebot
+curl -fsSL https://raw.githubusercontent.com/steelballsdragon/Super/main/deploy/install-marketbot.sh | sudo bash
 ```
 
-Note: the startup script, including the token, is saved in your server's settings. Anyone who can open
-those settings in your Oracle account can read the token.
+Paste the old token when the installer asks. The sports commands disappear from Discord once the market bot
+registers its own (it can take up to an hour to show everywhere). Give the bot's role **Manage Channels**,
+**Manage Messages** and **Attach Files** in Server Settings → Roles, then run `/setup`.
 
-### Hosting 24/7 on Railway
+### Railway
 
-The bot has to stay running, so for round-the-clock updates host it in the cloud.
-For example, on [Railway](https://railway.app), which you can set up from a phone browser:
+Deploy this repository; the included `Procfile` starts the bot (`python main.py`). Add the `MARKET_DISCORD_TOKEN`
+variable, attach a volume and set `MARKET_DATA_DIR` to a path on it so the saved history, channels and track
+record survive redeploys. (A service set up for ScoreBot keeps working: its `DISCORD_TOKEN` is used, and the
+folder of its `DATA_FILE` becomes the data folder.)
 
-1. **New Project → Deploy from GitHub repo**, then pick this repository and branch.
-2. In the service's **Variables** tab, add `DISCORD_TOKEN`.
-3. The included `Procfile` starts the bot with `python -m sportsbot`.
-
-Subscriptions are saved in `subscriptions.json`. On hosts where the disk is wiped on every redeploy,
-attach a volume and set `DATA_FILE` to a path on it (e.g. `/data/subscriptions.json`). Otherwise, run `/follow` again after a redeploy.
-
-### Configuration (environment variables)
+### Configuration
 
 | Variable | Default | Description |
 |---|---|---|
-| `DISCORD_TOKEN` | (required) | Bot token |
-| `POLL_INTERVAL` | `10` | Seconds between score checks (minimum 5). ESPN refreshes about every 5–8 seconds. |
-| `DATA_FILE` | `subscriptions.json` | Where channel subscriptions are saved. Channel settings (`settings.json`), bot state (`state.json`), the betting record for `/record` (`record.json`), ball-by-ball positions (`balls.json`) and recorded cricket scorecards (`cricket.json`) are kept next to it. |
-| `DEV_GUILD_ID` | (none) | Sync slash commands to one server instantly. Global sync can take up to an hour to appear. |
+| `MARKET_DISCORD_TOKEN` | (required) | Bot token (`DISCORD_TOKEN` also works) |
+| `MARKET_DATA_DIR` | `market-data` (or the folder of an older `DATA_FILE` setting) | Where price history, models, channel settings (`channels.json`), state and the track record (`record.json`) are kept |
+| `LIVE_INTERVAL` | `60` | Seconds between live board and alert updates (minimum 30) |
+| `ANTHROPIC_API_KEY` | (none) | Turns on Claude as a second news reader |
+| `NEWS_AI_MODEL` | `claude-opus-5-5` | Claude model for the news reader |
+| `NEWS_AI_DAILY_CALLS` | `150` | Cap on news-reader calls per day |
+| `DEV_GUILD_ID` | (none) | Sync slash commands to one server instantly while developing |
 
-By default, only members with **Manage Channels** can use `/follow` and `/unfollow`. Server admins can change this under Server Settings → Integrations.
+## Built to run unattended
 
-## How it works
+- Every job (boards, alerts, news, scans, briefs, grading, training) runs on its own schedule and is isolated:
+  a failure is logged, shown in `/status`, and retried next time. Yahoo and CoinGecko rate limits are retried
+  with backoff; a stale answer beats none when a source is down.
+- Price history is saved on disk (each symbol's century downloaded once, then only the latest days; fully
+  re-downloaded weekly so dividend adjustments stay right). Saved files are written atomically.
+- Alerts never repeat: each move line, setup, 52-week high, news story and brief is remembered (and pruned).
+  A restart doesn't repost anything, and the first news run on a new install posts only the top 3 stories.
+- Every post fits Discord's limits.
 
-Every `POLL_INTERVAL` seconds, the bot fetches the scoreboard for each league that some channel follows. It compares that scoreboard with the previous one and posts whatever changed. It only polls leagues that are followed. The first fetch after startup is recorded without posting anything, so restarting the bot doesn't repost old results. When ESPN is still showing an earlier day (it can lag well into a game day), today's games are fetched too, so no game's start is missed.
-
-It's built to keep running unattended:
-
-- **One failure never stops the updates.** Each league and each step (scoreboards, grading, reminders, daily
-  schedules) is isolated: an error is logged and that piece is retried on the next check, and the update loop restarts
-  itself if it ever stops. ESPN rate limits and server errors are retried with backoff.
-- **Every post fits Discord's limits.** Long embeds are trimmed at a line break (marked "…") instead of being
-  rejected, and any command that fails still replies instead of leaving "The application did not respond".
-- **Bets always settle.** Leans and parlay legs are graded even if the bot was offline at the final; postponed,
-  cancelled or abandoned games are voided, and anything still unsettled after a week is voided.
-- **Small and steady on a 1 GB server.** Research caches only the stats it uses (about 150 MB of memory in a full
-  test with all 15 leagues followed), old entries in the saved state are pruned hourly, and saved files are written
-  atomically and flushed to disk. A damaged file is set aside (`*.damaged-<time>`) so the bot still starts.
+Prices from free sources can be delayed (stocks up to 15 minutes on some exchanges). This is research and
+entertainment, not financial advice.
 
 ## Tests
 
 ```bash
-pip install pytest
+pip install -r requirements.txt pytest
 python -m pytest
 ```
+
+The tests use synthetic prices and fake Discord and data clients, so they run offline.
