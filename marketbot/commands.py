@@ -682,7 +682,12 @@ def register_commands(bot) -> None:
     @app_commands.default_permissions(administrator=True)
     @app_commands.guild_only()
     async def update(interaction: discord.Interaction):
-        from .bot import trigger_update
+        from .bot import on_railway, trigger_update
+        if on_railway():
+            await interaction.response.send_message(
+                f"Running {bot.version} on Railway, which redeploys the bot by itself whenever the code on GitHub "
+                "changes. Nothing to do here.", ephemeral=True)
+            return
         ok, detail = await trigger_update()
         msg = (f"🔄 Checking GitHub now (running {bot.version}); I'll restart in about a minute if there's a new version."
                if ok else f"I can't start an update from here (`{detail}`). The server checks every 5 minutes anyway.")

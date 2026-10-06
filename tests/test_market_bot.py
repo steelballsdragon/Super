@@ -11,7 +11,7 @@ pytest.importorskip("matplotlib")
 
 from marketbot import bot as botmod, embeds as E  # noqa: E402
 from marketbot.ai import NewsAI  # noqa: E402
-from marketbot.bot import MarketBot, crossed, data_folder, live_seconds, move_steps  # noqa: E402
+from marketbot.bot import MarketBot, code_version, crossed, data_folder, live_seconds, move_steps, on_railway  # noqa: E402
 from marketbot.channels import ChannelStore  # noqa: E402
 from marketbot.engine import Engine, compute_outlook, options_view, scan_all, with_live  # noqa: E402
 from marketbot.feeds import Headline  # noqa: E402
@@ -335,3 +335,36 @@ def test_data_folder_setting():
     # A server first set up for ScoreBot keeps using its writable data folder.
     assert data_folder({"DATA_FILE": "/var/lib/scorebot/subscriptions.json"}) == "/var/lib/scorebot"
     assert data_folder({"DATA_FILE": "/x/s.json", "MARKET_DATA_DIR": "/y"}) == "/y"
+    # On Railway, an attached volume is found without any setting.
+    assert data_folder({"RAILWAY_VOLUME_MOUNT_PATH": "/data"}) == "/data"
+    assert data_folder({"RAILWAY_VOLUME_MOUNT_PATH": "/data", "MARKET_DATA_DIR": "/y"}) == "/y"
+
+
+def test_railway_detection_and_version(monkeypatch):
+    assert on_railway({"RAILWAY_PROJECT_ID": "p"}) and not on_railway({})
+    monkeypatch.setattr(botmod.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=""))
+    monkeypatch.setenv("RAILWAY_GIT_COMMIT_SHA", "0123456789abcdef")
+    assert code_version() == "0123456"
+
+
+def test_sigterm_closes_the_bot(tmp_path):
+    import os
+    import signal
+    bot = make_bot(tmp_path)
+    closed = []
+
+    async def close():
+        closed.append(True)
+
+    bot.close = close
+
+    async def run():
+        bot.stop_on_sigterm()
+        os.kill(os.getpid(), signal.SIGTERM)
+        for _ in range(50):
+            if closed:
+                break
+            await asyncio.sleep(0.01)
+        asyncio.get_running_loop().remove_signal_handler(signal.SIGTERM)
+    asyncio.run(run())
+    assert closed == [True]
