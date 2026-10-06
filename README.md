@@ -6,11 +6,16 @@ estimates **which markets each headline should move, which way, and by roughly h
 It uses free public data, so you don't need any API keys: Yahoo Finance (prices, fundamentals, options, news),
 Robert Shiller's S&P 500 data back to 1871, CoinGecko, the Crypto Fear & Greed index, and RSS feeds from
 MarketWatch, WSJ, Nasdaq, Investing.com, Seeking Alpha, the Federal Reserve, the SEC, CoinDesk, Cointelegraph,
-The Block, Decrypt and Google News. An Anthropic API key is optional: with one, Claude also reads the headlines.
+The Block, Decrypt and Google News. When Yahoo doesn't answer, Nasdaq (US stocks and ETFs), Coinbase and CoinGecko
+(crypto) stand in. It knows **every US-listed stock and ETF and the top 1,000 coins** by ticker and name.
+
+Two keys are optional: with an Anthropic key, Claude also reads the headlines; with a
+[Massive](https://massive.com) (formerly Polygon.io) key, the NVIDIA channel adds Massive's data, using it for
+NVIDIA only and never more than 5 calls a minute (the free plan's limit).
 
 ## Channels
 
-Run **`/setup`** once and the bot creates a **📊 Markets** category with four channels:
+Run **`/setup`** once and the bot creates a **📊 Markets** category with six channels:
 
 | Channel | What it gets |
 |---|---|
@@ -18,6 +23,8 @@ Run **`/setup`** once and the bot creates a **📊 Markets** category with four 
 | **🪙-crypto** | A **live board**, 24/7: total market cap, BTC dominance, Fear & Greed, and the watchlist with 1-hour, 24-hour and 7-day changes. Alerts for big daily moves (±5/10/15%… since midnight UTC), **fast moves** (BTC ±2%, ETH ±3%, others ±4% within an hour) and breakout setups. A **daily crypto brief** (8:00 by default; `/settings brief_hour: timezone:`). |
 | **📰-market-news** | Market-moving headlines, each with its **expected impact**: e.g. *🔴 ▼ S&P 500 −0.5–1.4% · 🟢 ▲ 10-yr yield +4–12 bp · 🔴 ▼ Gold −0.3–1.1%*. A morning headline digest at 7:30 ET. The biggest stories (importance 80+) are also posted in the stocks or crypto channel. |
 | **🔬-research** | A **research digest** after every US close (the strongest setups across both watchlists and the sector ETFs, with deep dives and charts on the top two) and a **week-ahead outlook** every Sunday at 6 PM ET (macro dashboard, valuation, seasonality, presidential cycle, outlooks for the S&P 500, Nasdaq, Bitcoin and Ether). |
+| **🔥-trends** | A **live trends board** (pinned, every 5 minutes while the market is open): today's top gainers, losers and most traded US stocks worth $2B+, S&P 500 and Nasdaq-100 breadth, the sectors, the week's leaders and the top crypto movers. A **daily recap** at 4:20 ET, a **weekly recap** on the week's last trading day, a **monthly recap** on the month's last trading day (with year-to-date leaders), and a **crypto recap** just after midnight UTC. Week, month, quarter, year-to-date and 1-year moves cover the S&P 500, the Nasdaq-100, the sectors and 30 major ETFs; crypto covers the top 250 coins (no stablecoins or wrapped coins). |
+| **🟩-nvidia** | Everything on **NVIDIA**: a live board (price from Yahoo, plus Massive's last-session bar and VWAP, 50/200-day averages, 20-day EMA, RSI, MACD, 52-week range, market cap, dividends and news sentiment), alerts at ±2/3/4/5/7.5/10%, Massive's NVIDIA news with its sentiment as it comes, a **pre-market brief** at 9:05 ET with the forecast and chart, and a **closing recap** at 4:15 ET. |
 
 Already have channels? Run `/channel kind:` in each instead. `/settings` turns alerts or briefs off, sets how
 picky the news channel is (`major` 75+, `important` 55+ by default, `all` 35+), and the crypto brief's hour and
@@ -36,6 +43,8 @@ time zone. `/watchlist` changes a stocks or crypto channel's list (up to 30; nam
 | `/history symbol:` | The long view: growth since the first price, decades, the biggest crashes and recoveries, best and worst years, the average month, the US presidential cycle. The S&P 500 goes back to **1871** (Shiller's monthly data joined to daily data from 1927) |
 | `/macro` | VIX (and its percentile since 1990), yields and the yield curve, the dollar, gold, oil, copper, crypto Fear & Greed with what Bitcoin did after similar readings, a stock-market fear & greed gauge, and the S&P 500's **Shiller CAPE** with the 10-year return history implies at today's valuation |
 | `/movers market:` | Today's biggest US gainers and losers, or the top-100 coins' |
+| `/trends period: market:` | Biggest gainers and losers today, this week, this month, over 3 months, year to date or a year, for stocks, sectors & ETFs, or crypto |
+| `/nvidia` | NVIDIA's board (live price and Massive's data) with the forecast and chart |
 | `/compare first: second:` | Returns side by side, volatility, worst falls, correlation and beta, and a growth chart |
 | `/backtest symbol:` | Would following the model have beaten buy-and-hold? A walk-forward test (each year predicted by a model trained only on earlier years) with an equity curve |
 | `/alert symbol: price:` · `/alerts [remove]` | Pings you in the channel when a price is crossed |
@@ -43,7 +52,8 @@ time zone. `/watchlist` changes a stocks or crypto channel's list (up to 30; nam
 | `/brief kind:` | Posts any of the scheduled briefs here now |
 | `/status` · `/update` · `/help` | Health of every job and data source, models and news reader; update from GitHub; overview |
 
-Symbols autocomplete as you type, and names work: `nvidia`, `btc`, `s&p`, `gold`, `10y`, `dollar`.
+Symbols autocomplete as you type from the full list (every US stock and ETF, the top 1,000 coins, indices and
+futures), and names work: `nvidia`, `brk.b`, `hyperliquid`, `btc`, `s&p`, `gold`, `10y`, `dollar`.
 
 ## How the predictions work (and how good they are)
 
@@ -154,8 +164,8 @@ registers its own (it can take up to an hour to show everywhere). Give the bot's
 
 1. **New Project → Deploy from GitHub repo →** this repository. Railway detects Python, installs
    `requirements.txt` and runs `python main.py` by itself; no start command or config file is needed.
-2. In the service's **Variables** tab, add `MARKET_DISCORD_TOKEN` (and optionally `ANTHROPIC_API_KEY`), then
-   apply the changes.
+2. In the service's **Variables** tab, add `MARKET_DISCORD_TOKEN` (and optionally `ANTHROPIC_API_KEY` and
+   `MASSIVE_API_KEY`), then apply the changes.
 3. **Attach a volume** to the service (right-click it on the canvas, or ⌘K → *Add volume*) with mount path
    `/data`. The bot finds it on its own (Railway sets `RAILWAY_VOLUME_MOUNT_PATH`), and keeps its price history,
    channels, alerts and track record there across redeploys. With a volume, Railway also never runs two copies at
@@ -173,6 +183,10 @@ $5 covers. Notes:
 - **Backups:** Hobby has no automatic volume backups. If the volume were ever lost, price history re-downloads
   and `/setup` reuses the existing channels; watchlists, price alerts and the track record would start over.
 - **Updates:** Railway redeploys on every change pushed to GitHub, so `/update` isn't needed there.
+- **Yahoo on cloud hosts:** Yahoo turns away requests that don't look like a browser's, so the bot connects the
+  way Chrome does (curl_cffi). `/status` shows each data source's state and the exact error if one fails. If
+  Yahoo still refuses Railway's shared IP address, the backups keep boards, prices, forecasts and today's movers
+  going, and `YAHOO_PROXY` can send just the Yahoo requests through a proxy.
 
 A service first set up for ScoreBot keeps working: its `DISCORD_TOKEN` is used, and the folder of its
 `DATA_FILE` becomes the data folder.
@@ -185,6 +199,8 @@ A service first set up for ScoreBot keeps working: its `DISCORD_TOKEN` is used, 
 | `MARKET_DATA_DIR` | the Railway volume if one is attached, else `market-data` | Where price history, models, channel settings (`channels.json`), state and the track record (`record.json`) are kept |
 | `LIVE_INTERVAL` | `60` | Seconds between live board and alert updates (minimum 30) |
 | `ANTHROPIC_API_KEY` | (none) | Turns on Claude as a second news reader |
+| `MASSIVE_API_KEY` | (none) | Massive (Polygon.io) key for the NVIDIA channel; at most 5 calls a minute, NVIDIA only (`POLYGON_API_KEY` also works) |
+| `YAHOO_PROXY` | (none) | Proxy URL for Yahoo Finance requests only, if Yahoo blocks the host's IP address |
 | `NEWS_AI_MODEL` | `claude-opus-5-5` | Claude model for the news reader |
 | `NEWS_AI_DAILY_CALLS` | `150` | Cap on news-reader calls per day |
 | `DEV_GUILD_ID` | (none) | Sync slash commands to one server instantly while developing |
@@ -192,10 +208,17 @@ A service first set up for ScoreBot keeps working: its `DISCORD_TOKEN` is used, 
 ## Built to run unattended
 
 - Every job (boards, alerts, news, scans, briefs, grading, training) runs on its own schedule and is isolated:
-  a failure is logged, shown in `/status`, and retried next time. Yahoo and CoinGecko rate limits are retried
-  with backoff; a stale answer beats none when a source is down.
+  a failure is logged, shown in `/status`, and retried next time. A source that fails three times in a row is
+  rested for 30 seconds to 5 minutes while the backups answer; a stale answer beats none when a source is down.
+  When nothing can answer, commands say the data sources are down instead of claiming a symbol doesn't exist.
+- Massive calls go through one sliding-window limiter: never more than 5 in any 61 seconds, whatever asks
+  (refreshes, commands, retries), and a 429 pauses them for a minute. The free plan has end-of-day data only, so
+  NVIDIA's live price comes from Yahoo; with a paid key, Massive's delayed snapshot is used automatically.
 - Price history is saved on disk (each symbol's century downloaded once, then only the latest days; fully
-  re-downloaded weekly so dividend adjustments stay right). Saved files are written atomically.
+  re-downloaded weekly so dividend adjustments stay right). A backup's shorter history is joined onto the saved
+  one rather than replacing it. Saved files are written atomically.
+- The symbol list ships with the bot and refreshes itself weekly (Nasdaq's stock and ETF lists, Yahoo's crypto
+  list, the S&P 500 and Nasdaq-100 members).
 - Alerts never repeat: each move line, setup, 52-week high, news story and brief is remembered (and pruned).
   A restart doesn't repost anything, and the first news run on a new install posts only the top 3 stories.
 - Every post fits Discord's limits.

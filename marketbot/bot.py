@@ -26,10 +26,12 @@ from .channels import NEWS_LEVELS, ChannelStore
 from .engine import Engine, Macro, ScanHit
 from .feeds import NewsFetcher
 from .hours import NEW_YORK, is_trading_day, market_open
+from .massive import Massive, Spotlight, find_key
 from .news import TARGETS, Analysis, ImpactBook, analyse
 from .record import PredictionBook
 from .setups import DEFS
 from .storage import StateStore
+from .trends import TrendsDesk, last_trading_day_of_month, last_trading_day_of_week
 from .universe import CRYPTO, FUTURES, INDICES, MACRO, STOCKS, market_of, short
 from .yahoo import Quote
 
@@ -55,6 +57,11 @@ VIX_STEPS = (15.0, 25.0, 40.0)
 NO_MOVE_ALERTS = {"^TNX", "^IRX", "DX-Y.NYB", "ES=F", "NQ=F", "YM=F"}
 FAST_MOVE = {"BTC-USD": 2.0, "ETH-USD": 3.0}  # crypto: % in an hour (others: 4%)
 FAST_DEFAULT = 4.0
+NVIDIA = "NVDA"
+NVIDIA_STEPS = (2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0)  # the NVIDIA channel watches one stock closely
+NVIDIA_NEWS_PER_STEP = 4
+TRENDS_OPEN_SECONDS = 300  # the trends board's refresh while the market is open
+TRENDS_CLOSED_SECONDS = 1800
 
 
 @dataclass
@@ -101,7 +108,7 @@ def crossed(change: float, steps: tuple[float, ...]) -> float:
 
 class MarketBot(discord.Client):
     def __init__(self, data_dir: str | Path, dev_guild: int | None = None, live_seconds: float = DEFAULT_LIVE_SECONDS,
-                 engine: Engine | None = None, ai: NewsAI | None = None):
+                 engine: Engine | None = None, ai: NewsAI | None = None, massive_key: str | None = None):
         super().__init__(intents=discord.Intents.default())
         self.tree = app_commands.CommandTree(self)
         self.data_dir = Path(data_dir)
@@ -110,10 +117,15 @@ class MarketBot(discord.Client):
         self.state = StateStore(self.data_dir / "state.json")
         self.records = StateStore(self.data_dir / "record.json")
         self.engine = engine or Engine(self.data_dir)
-        self.news = NewsFetcher(self.engine.yahoo)
+        self.news = NewsFetcher(self.engine.data)
         self.ai = ai or NewsAI()
         self.impacts = ImpactBook(self.records)
         self.predictions = PredictionBook(self.records)
+        data = self.engine.data
+        self.trends = TrendsDesk(data, getattr(self.engine, "sources", None), getattr(self.engine, "directory", None),
+                                 self.data_dir)
+        self.massive = Massive(massive_key, data.http) if massive_key and hasattr(data, "http") else None
+        self.spotlight = Spotlight(self.massive, self.data_dir / "nvidia.json")
         self.quotes: dict[str, Quote] = {}
         self.quotes_at = 0.0
         self.recent_news: list[Analysis] = []
@@ -191,6 +203,9 @@ class MarketBot(discord.Client):
             ("volatility", 3600, self.job_volatility),
             ("grade", 3600, self.job_grade),
             ("prune", 3600, self.job_prune),
+            ("trends", 60, self.job_trends),
+            ("nvidia", TICK_SECONDS, self.job_nvidia),
+            ("directory", 6 * 3600, self.job_directory),
         ]
 
     @tasks.loop(seconds=TICK_SECONDS)
@@ -256,6 +271,8 @@ class MarketBot(discord.Client):
             syms += [a.symbol for a in INDICES + FUTURES + MACRO] + cfg.symbols()
         for _, cfg in self.channels.of_kind(CRYPTO):
             syms += cfg.symbols()
+        if self.channels.of_kind("nvidia"):
+            syms.append(NVIDIA)
         syms += [a["symbol"] for _, a in self.state.items("price_alerts")]
         return list(dict.fromkeys(syms))
 
@@ -263,7 +280,7 @@ class MarketBot(discord.Client):
         symbols = self.live_symbols()
         if not symbols:
             return
-        quotes = await self.engine.yahoo.quotes(symbols)
+        quotes = await self.engine.data.quotes(symbols)
         now = time.time()
         self.quotes.update(quotes)
         self.quotes_at = now
@@ -284,9 +301,14 @@ class MarketBot(discord.Client):
             elif cfg.kind == CRYPTO:
                 embed = E.crypto_board(self.quotes, cfg.symbols(), self.crypto_global, self.fng, self.coins,
                                        self.quotes_at)
+            elif cfg.kind == "nvidia":
+                embed = E.nvidia_board(self.quotes.get(NVIDIA), self.spotlight, (self.massive_used(), 5))
             else:
-                continue
+                continue  # the trends board has its own schedule (job_trends)
             await self.show_board(cid, embed)
+
+    def massive_used(self) -> int:
+        return self.massive.limiter.used() if self.massive else 0
 
     async def show_board(self, channel_id: int, embed: discord.Embed) -> None:
         cfg = self.channels.get(channel_id)
@@ -334,7 +356,12 @@ class MarketBot(discord.Client):
 
     async def check_moves(self) -> None:
         for cid, cfg in self.channels.all():
-            if cfg.kind not in (STOCKS, CRYPTO) or not cfg.alerts:
+            if cfg.kind not in (STOCKS, CRYPTO, "nvidia") or not cfg.alerts:
+                continue
+            if cfg.kind == "nvidia":
+                q = self.quotes.get(NVIDIA)
+                if q and q.change_pct is not None and q.market_state in ("REGULAR", "POST", "POSTPOST", ""):
+                    await self._daily_move(cid, STOCKS, NVIDIA, q, NVIDIA_STEPS)
                 continue
             symbols = cfg.symbols() + ([a.symbol for a in INDICES] if cfg.kind == STOCKS else [])
             for sym in dict.fromkeys(symbols):
@@ -347,8 +374,8 @@ class MarketBot(discord.Client):
                 if cfg.kind == CRYPTO:
                     await self._fast_move(cid, sym, q)
 
-    async def _daily_move(self, cid: int, market: str, sym: str, q: Quote) -> None:
-        steps = move_steps(sym, market)
+    async def _daily_move(self, cid: int, market: str, sym: str, q: Quote, steps: tuple[float, ...] | None = None) -> None:
+        steps = steps or move_steps(sym, market)
         line = crossed(q.change_pct, steps)
         if sym == "^VIX" and q.change_pct < 0:
             return  # only fear spikes
@@ -411,7 +438,8 @@ class MarketBot(discord.Client):
             return
         try:
             self.crypto_global = await self.engine.sources.crypto_global()
-            self.coins = {c.symbol: c for c in await self.engine.sources.top_coins(100)}
+            coins = await self.engine.sources.top_coins(250)
+            self.coins = {c.symbol: c for c in reversed(coins)}  # biggest first wins when tickers repeat
         except Exception:
             log.warning("CoinGecko unavailable", exc_info=True)
         try:
@@ -439,6 +467,49 @@ class MarketBot(discord.Client):
 
     async def job_train(self) -> None:
         self.engine.start_training()
+
+    # ----- trends and NVIDIA -----
+
+    async def job_trends(self) -> None:
+        channels = self.channels.of_kind("trends")
+        if not channels:
+            return
+        every = TRENDS_OPEN_SECONDS if market_open() else TRENDS_CLOSED_SECONDS
+        if self.trends.last and time.time() - self.trends.last.at < every - 5:
+            return
+        snap = await self.trends.refresh()
+        lead = self.quotes.get("^GSPC")
+        embed = E.trends_board(snap, self.trends.index_members("sp500"), self.trends.index_members("ndx100"),
+                               E.state_label(lead) if lead else "")
+        for cid, _ in channels:
+            await self.show_board(cid, embed)
+
+    async def job_nvidia(self) -> None:
+        channels = self.channels.of_kind("nvidia")
+        if not channels or not self.spotlight.enabled:
+            return
+        await self.spotlight.step(market_open())
+        fresh = self.spotlight.take_fresh_news()
+        if not fresh:
+            return
+        for cid, cfg in channels:
+            if not cfg.alerts:
+                continue
+            for item in fresh[-NVIDIA_NEWS_PER_STEP:]:
+                mood, why = self.spotlight.sentiment(item)
+                await self.send(cid, Post([E.nvidia_news(item, mood, why)]))
+
+    async def job_directory(self) -> None:
+        """Refreshes the list of every stock, ETF and coin once a week."""
+        from .directory import refresh
+        data = self.engine.data
+        if not hasattr(data, "directory") or not hasattr(data, "nasdaq"):
+            return
+        fresh = await refresh(data.directory, self.data_dir, data.http, data.nasdaq, data.yahoo)
+        if fresh is not data.directory:
+            data.directory = self.engine.directory = self.trends.directory = fresh
+            self.engine.forget_lookups()
+            log.info("Symbol list refreshed: %d listings", len(fresh))
 
     # ----- news desk -----
 
@@ -487,7 +558,7 @@ class MarketBot(discord.Client):
         posted = [a for a in postable if a.importance >= 55 and a.impacts]
         if posted:
             symbols = list({i.symbol for a in posted for i in a.impacts})
-            prices = {s: q.price for s, q in (await self.engine.yahoo.quotes(symbols)).items()}
+            prices = {s: q.price for s, q in (await self.engine.data.quotes(symbols)).items()}
             with self.records.batch():
                 for a in posted:
                     self.impacts.record(a, prices)
@@ -513,7 +584,7 @@ class MarketBot(discord.Client):
             symbols += ["^GSPC", "^IXIC", "^RUT"]
         quotes = {s: q for s, q in self.quotes.items() if s in symbols}
         if len(quotes) < len(symbols) // 2:
-            quotes = await self.engine.yahoo.quotes(symbols)
+            quotes = await self.engine.data.quotes(symbols)
         hits = await self.engine.scan(symbols, quotes, lookback=1)
         self.last_scan[market] = hits
         now = time.time()
@@ -603,8 +674,29 @@ class MarketBot(discord.Client):
                         await self.send_all(cid, await briefs.research_digest(self, stocks, coins))
                 elif cfg.kind == "news" and trading and self._due(cid, "morning", ny, 7, 30, 90):
                     await self.send_all(cid, await briefs.morning_news(self))
+                elif cfg.kind == "trends":
+                    await self._trend_recaps(cid, ny, trading)
+                elif cfg.kind == "nvidia" and trading:
+                    if self._due(cid, "nvda-premarket", ny, 9, 5, 70):
+                        await self.send_all(cid, await briefs.nvidia_brief(self, "premarket"))
+                    elif self._due(cid, "nvda-close", ny, 16, 15, 105):
+                        await self.send_all(cid, await briefs.nvidia_brief(self, "close"))
             except Exception:
                 log.exception("Brief for channel %s failed", cid)
+
+    async def _trend_recaps(self, cid: int, ny: datetime, trading: bool) -> None:
+        """Daily recap after the close, weekly on the week's last trading day, monthly on the month's, and a crypto
+        recap just after midnight UTC."""
+        if trading:
+            day = ny.date()
+            if self._due(cid, "trends-day", ny, 16, 20, 100):
+                await self.send_all(cid, await briefs.trends_recap(self, "1D"))
+            elif last_trading_day_of_week(day, is_trading_day) and self._due(cid, "trends-week", ny, 16, 35, 100):
+                await self.send_all(cid, await briefs.trends_recap(self, "1W"))
+            elif last_trading_day_of_month(day, is_trading_day) and self._due(cid, "trends-month", ny, 16, 50, 100):
+                await self.send_all(cid, await briefs.trends_recap(self, "1M"))
+        if self._due(cid, "trends-crypto", datetime.now(timezone.utc), 0, 5, 120):
+            await self.send_all(cid, await briefs.crypto_trends(self))
 
     def _watchlist(self, market: str) -> list[str]:
         from .channels import ChannelConfig
@@ -617,7 +709,7 @@ class MarketBot(discord.Client):
     async def job_grade(self) -> None:
         due = self.impacts.symbols_due()
         if due:
-            quotes = await self.engine.yahoo.quotes(list(due))
+            quotes = await self.engine.data.quotes(list(due))
             self.impacts.grade({s: q.price for s, q in quotes.items()})
         pending = self.predictions.pending_symbols()
         if pending:
@@ -691,5 +783,9 @@ def main() -> None:
         raise SystemExit("Set MARKET_DISCORD_TOKEN (or DISCORD_TOKEN) to your bot's token (see .env.example).")
     data_dir = data_folder(os.environ)
     dev_guild = os.environ.get("DEV_GUILD_ID")
-    bot = MarketBot(data_dir, int(dev_guild) if dev_guild else None, live_seconds(os.environ.get("LIVE_INTERVAL")))
+    key, key_name = find_key(os.environ)
+    if key:
+        log.info("Massive key found in %s: the NVIDIA channel uses it (at most 5 calls a minute)", key_name)
+    bot = MarketBot(data_dir, int(dev_guild) if dev_guild else None, live_seconds(os.environ.get("LIVE_INTERVAL")),
+                    massive_key=key)
     bot.run(token, log_handler=None)

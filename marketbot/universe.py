@@ -68,6 +68,9 @@ ALIASES = {
     "toncoin": "TON11419-USD", "uni": "UNI7083-USD", "uniswap": "UNI7083-USD", "pepe": "PEPE24478-USD",
     "brk.b": "BRK-B", "brkb": "BRK-B", "brk.a": "BRK-A", "google": "GOOGL", "alphabet": "GOOGL",
     "facebook": "META", "tesla": "TSLA", "apple": "AAPL", "microsoft": "MSFT", "nvidia": "NVDA", "amazon": "AMZN",
+    "hype": "HYPE32196-USD", "hyperliquid": "HYPE32196-USD", "tron": "TRX-USD", "avalanche": "AVAX-USD",
+    "chainlink": "LINK-USD", "polkadot": "DOT-USD", "litecoin": "LTC-USD", "binance coin": "BNB-USD",
+    "jpmorgan": "JPM", "jp morgan": "JPM", "berkshire": "BRK-B", "netflix": "NFLX", "palantir": "PLTR",
 }
 # Coins people write without "-USD".
 COINS = {"BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "ADA", "AVAX", "LINK", "TRX", "LTC", "DOT", "BCH", "XLM",

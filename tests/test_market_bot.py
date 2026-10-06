@@ -133,7 +133,7 @@ class FakeYahoo:
 
 class FakeEngine:
     def __init__(self, quotes):
-        self.yahoo = FakeYahoo(quotes)
+        self.data = FakeYahoo(quotes)
         self.models = {}
 
     async def close(self):

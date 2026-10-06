@@ -44,6 +44,8 @@ class Coin:
     change_7d: float | None
     ath_change: float | None
     volume: float
+    change_30d: float | None = None
+    change_1y: float | None = None
 
 
 @dataclass
@@ -152,18 +154,22 @@ class Sources:
                                 pct.get("eth", 0.0), stables)
         return await self._cached("global", 300, fetch)
 
-    async def top_coins(self, count: int = 100) -> list[Coin]:
+    async def top_coins(self, count: int = 250) -> list[Coin]:
+        """The biggest coins by market cap (one call for up to 250), with their 1-hour to 1-year changes."""
+        count = min(max(count, 1), 250)
+
         async def fetch():
             data = await self._get(f"{COINGECKO}/coins/markets", {
-                "vs_currency": "usd", "order": "market_cap_desc", "per_page": str(count), "page": "1",
-                "price_change_percentage": "1h,24h,7d"})
+                "vs_currency": "usd", "order": "market_cap_desc", "per_page": "250", "page": "1",
+                "price_change_percentage": "1h,24h,7d,30d,1y"})
             return [Coin(c["symbol"].upper(), c["name"], c.get("current_price") or 0.0, c.get("market_cap") or 0.0,
                          c.get("market_cap_rank") or 0, c.get("price_change_percentage_1h_in_currency"),
                          c.get("price_change_percentage_24h_in_currency"),
                          c.get("price_change_percentage_7d_in_currency"), c.get("ath_change_percentage"),
-                         c.get("total_volume") or 0.0)
+                         c.get("total_volume") or 0.0, c.get("price_change_percentage_30d_in_currency"),
+                         c.get("price_change_percentage_1y_in_currency"))
                     for c in data if c.get("current_price")]
-        return await self._cached(f"coins{count}", 300, fetch)
+        return (await self._cached("coins", 300, fetch))[:count]
 
     async def fear_greed(self) -> tuple[np.ndarray, np.ndarray]:
         """(day timestamps, values 0-100), oldest first, back to February 2018."""
