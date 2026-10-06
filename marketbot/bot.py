@@ -6,6 +6,7 @@ import asyncio
 import io
 import logging
 import os
+import signal
 import subprocess
 import time
 from collections import deque
@@ -69,9 +70,12 @@ def code_version() -> str:
     try:
         out = subprocess.run(["git", "-c", f"safe.directory={repo}", "-C", repo, "log", "-1", "--format=%h (%cd)",
                               "--date=short"], capture_output=True, text=True, timeout=5)
-        return out.stdout.strip() or "unknown"
+        if out.stdout.strip():
+            return out.stdout.strip()
     except Exception:
-        return "unknown"
+        pass
+    # Railway builds without the .git folder but says which commit it deployed.
+    return (os.environ.get("RAILWAY_GIT_COMMIT_SHA") or "")[:7] or "unknown"
 
 
 def session_day(q: Quote | None) -> str:
@@ -134,6 +138,7 @@ class MarketBot(discord.Client):
     async def setup_hook(self) -> None:
         from .commands import register_commands
         register_commands(self)
+        self.stop_on_sigterm()
         self.tick.start()
         try:
             if self.dev_guild:
@@ -144,6 +149,18 @@ class MarketBot(discord.Client):
                 await self.tree.sync()
         except discord.HTTPException:
             log.exception("Couldn't register the slash commands with Discord")
+
+    def stop_on_sigterm(self) -> None:
+        """Hosts (Railway, systemd) stop the bot with SIGTERM: close the Discord connection cleanly then, so
+        the next copy takes over without the old one lingering."""
+        try:
+            asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, self._sigterm)
+        except (NotImplementedError, RuntimeError, ValueError):
+            pass  # not supported here (e.g. Windows, or not the main thread)
+
+    def _sigterm(self) -> None:
+        log.info("Asked to stop (SIGTERM); closing")
+        self._closing = asyncio.get_running_loop().create_task(self.close())
 
     async def close(self) -> None:
         self.tick.cancel()
@@ -649,11 +666,19 @@ def live_seconds(setting: str | None) -> float:
     return max(float(setting), MIN_LIVE_SECONDS) if setting else DEFAULT_LIVE_SECONDS
 
 
+def on_railway(env=os.environ) -> bool:
+    return any(k in env for k in ("RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID", "RAILWAY_ENVIRONMENT_NAME"))
+
+
 def data_folder(env) -> str:
-    """MARKET_DATA_DIR, else the folder of an older DATA_FILE setting (a server or Railway volume set up for
-    ScoreBot, the sports bot this repository used to hold: that folder is the writable one), else market-data."""
+    """Where the bot keeps its data: MARKET_DATA_DIR; else the Railway volume (Railway sets
+    RAILWAY_VOLUME_MOUNT_PATH when one is attached); else the folder of an older DATA_FILE setting (a server
+    or Railway service set up for ScoreBot, the sports bot this repository used to hold: that folder is the
+    writable one); else market-data."""
     if env.get("MARKET_DATA_DIR"):
         return env["MARKET_DATA_DIR"]
+    if env.get("RAILWAY_VOLUME_MOUNT_PATH"):
+        return env["RAILWAY_VOLUME_MOUNT_PATH"]
     if env.get("DATA_FILE"):
         return str(Path(env["DATA_FILE"]).parent)
     return "market-data"

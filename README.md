@@ -150,19 +150,39 @@ Paste the old token when the installer asks. The sports commands disappear from 
 registers its own (it can take up to an hour to show everywhere). Give the bot's role **Manage Channels**,
 **Manage Messages** and **Attach Files** in Server Settings → Roles, then run `/setup`.
 
-### Railway
+### Railway (about $5/month, no server to manage)
 
-Deploy this repository; the included `Procfile` starts the bot (`python main.py`). Add the `MARKET_DISCORD_TOKEN`
-variable, attach a volume and set `MARKET_DATA_DIR` to a path on it so the saved history, channels and track
-record survive redeploys. (A service set up for ScoreBot keeps working: its `DISCORD_TOKEN` is used, and the
-folder of its `DATA_FILE` becomes the data folder.)
+1. **New Project → Deploy from GitHub repo →** this repository. Railway detects Python, installs
+   `requirements.txt` and runs `python main.py` by itself; no start command or config file is needed.
+2. In the service's **Variables** tab, add `MARKET_DISCORD_TOKEN` (and optionally `ANTHROPIC_API_KEY`), then
+   apply the changes.
+3. **Attach a volume** to the service (right-click it on the canvas, or ⌘K → *Add volume*) with mount path
+   `/data`. The bot finds it on its own (Railway sets `RAILWAY_VOLUME_MOUNT_PATH`), and keeps its price history,
+   channels, alerts and track record there across redeploys. With a volume, Railway also never runs two copies at
+   once during a redeploy, so nothing gets posted twice.
+4. On the Hobby plan, set **Settings → Deploy → Restart policy** to *Always*, and set a spending cap under
+   **Workspace → Usage → Set Usage Limits** (e.g. an email alert at $5 and a hard limit at $10).
+
+It uses about 0.3–0.4 GB of memory and very little CPU: roughly $4–5 of usage a month, which the Hobby plan's
+$5 covers. Notes:
+
+- **Trial:** a verified trial runs the bot fine. An unverified ("Limited") trial blocks most outbound network
+  access, so the bot can't reach Discord.
+- **After the trial:** the Free plan ($1 of credit and 0.5 GB of memory a month) can't keep it running 24/7.
+  Switch to Hobby; the volume and its data carry over. A lapsed trial's volume is deleted after 30 days.
+- **Backups:** Hobby has no automatic volume backups. If the volume were ever lost, price history re-downloads
+  and `/setup` reuses the existing channels; watchlists, price alerts and the track record would start over.
+- **Updates:** Railway redeploys on every change pushed to GitHub, so `/update` isn't needed there.
+
+A service first set up for ScoreBot keeps working: its `DISCORD_TOKEN` is used, and the folder of its
+`DATA_FILE` becomes the data folder.
 
 ### Configuration
 
 | Variable | Default | Description |
 |---|---|---|
 | `MARKET_DISCORD_TOKEN` | (required) | Bot token (`DISCORD_TOKEN` also works) |
-| `MARKET_DATA_DIR` | `market-data` (or the folder of an older `DATA_FILE` setting) | Where price history, models, channel settings (`channels.json`), state and the track record (`record.json`) are kept |
+| `MARKET_DATA_DIR` | the Railway volume if one is attached, else `market-data` | Where price history, models, channel settings (`channels.json`), state and the track record (`record.json`) are kept |
 | `LIVE_INTERVAL` | `60` | Seconds between live board and alert updates (minimum 30) |
 | `ANTHROPIC_API_KEY` | (none) | Turns on Claude as a second news reader |
 | `NEWS_AI_MODEL` | `claude-opus-5-5` | Claude model for the news reader |
