@@ -182,7 +182,10 @@ $5 covers. Notes:
   Switch to Hobby; the volume and its data carry over. A lapsed trial's volume is deleted after 30 days.
 - **Backups:** Hobby has no automatic volume backups. If the volume were ever lost, price history re-downloads
   and `/setup` reuses the existing channels; watchlists, price alerts and the track record would start over.
-- **Updates:** Railway redeploys on every change pushed to GitHub, so `/update` isn't needed there.
+- **Updates:** Railway redeploys on every change pushed to GitHub, so `/update` isn't needed there. `/status`
+  shows the running version: if it's still the old one a few minutes after an update, start the deploy by hand
+  (⌘K → *Deploy Latest Commit* on a computer), or reconnect the repository under the service's **Settings →
+  Source**, which also restores automatic deploys when Railway has stopped reacting to new commits.
 - **Yahoo on cloud hosts:** Yahoo turns away requests that don't look like a browser's, so the bot connects the
   way Chrome does (curl_cffi). `/status` shows each data source's state and the exact error if one fails. If
   Yahoo still refuses Railway's shared IP address, the backups keep boards, prices, forecasts and today's movers
