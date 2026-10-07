@@ -16,7 +16,7 @@ from email.utils import parsedate_to_datetime
 
 import aiohttp
 
-from .yahoo import HEADERS, YahooClient
+from .yahoo import HEADERS
 
 log = logging.getLogger(__name__)
 
@@ -156,8 +156,8 @@ def from_yahoo(items: list[dict], market: str) -> list[Headline]:
 
 
 class NewsFetcher:
-    def __init__(self, yahoo: YahooClient, session: aiohttp.ClientSession | None = None, feeds=FEEDS):
-        self.yahoo = yahoo
+    def __init__(self, data, session: aiohttp.ClientSession | None = None, feeds=FEEDS):
+        self.data = data  # has search(query, news=, quotes=): Yahoo's per-ticker news
         self.feeds = list(feeds)
         self._session = session
         self.failures: dict[str, str] = {}
@@ -193,7 +193,7 @@ class NewsFetcher:
 
     async def for_symbol(self, symbol: str, market: str, count: int = 12) -> list[Headline]:
         try:
-            _, news = await self.yahoo.search(symbol, news=count, quotes=0)
+            _, news = await self.data.search(symbol, news=count, quotes=0)
         except Exception:
             log.warning("Yahoo news for %s failed", symbol, exc_info=True)
             return []

@@ -16,12 +16,14 @@ from discord import app_commands
 from . import briefs, charts, embeds as E, stats
 from .briefs import Post, chart_post
 from .channels import KIND_NAMES, KINDS, MAX_WATCHLIST, ChannelConfig
-from .engine import Resolved, UnknownSymbol
+from .engine import Resolved, SourcesDown, UnknownSymbol
+from .http import HttpError
 from .limits import MESSAGE, clip, fit_embed
 from .news import analyse
 from .setups import fmt_price
 from .universe import (ALIASES, BENCHMARK, CRYPTO, DEFAULT_CRYPTO, DEFAULT_STOCKS, INDICES, SECTORS, STOCKS,
                        display_name, normalize, short, tag, title_of)
+from .yahoo import YahooError
 
 log = logging.getLogger("marketbot")
 
@@ -32,7 +34,9 @@ PERIODS = {"1D": None, "5D": None, "1M": 22, "3M": 66, "6M": 126, "1Y": 252, "5Y
 SETUP_CHANNELS = (("stocks", "📈-stocks", "Live US market board, big-move alerts, breakout setups, pre-market and closing briefs."),
                   ("crypto", "🪙-crypto", "Live crypto board (24/7), fast-move alerts, breakout setups and a daily brief."),
                   ("news", "📰-market-news", "Market-moving headlines with the expected impact on each market."),
-                  ("research", "🔬-research", "Daily research digest, weekly outlook, and room for /research deep dives."))
+                  ("research", "🔬-research", "Daily research digest, weekly outlook, and room for /research deep dives."),
+                  ("trends", "🔥-trends", "Top gainers, losers and most traded: today, this week, this month, sectors and crypto."),
+                  ("nvidia", "🟩-nvidia", "NVIDIA all day: live price, Massive data, technicals, news with sentiment, briefs."))
 INTROS = {
     "stocks": "This channel gets a **live stock board** (pinned, updated every minute), alerts for big moves, new "
               "52-week highs and breakout setups on the watchlist, a **pre-market brief** at 9:00 ET and a "
@@ -43,6 +47,14 @@ INTROS = {
             "way and roughly how much**, plus a morning headline digest. `/settings news_level:` sets how picky it is.",
     "research": "This channel gets a **research digest** after every US close (the strongest setups, with deep "
                 "dives) and a **week-ahead outlook** every Sunday evening. Run `/research` here any time.",
+    "trends": "This channel gets a **live trends board** (pinned, every 5 minutes while the market is open): today's "
+              "top gainers, losers and most traded US stocks, sectors, the week's leaders and crypto. Plus a **daily "
+              "recap** after the close, a **weekly recap** on the week's last trading day, a **monthly recap** on "
+              "the month's, and a **crypto recap** after midnight UTC. `/trends` shows any period.",
+    "nvidia": "This channel follows **NVIDIA (NVDA)**: a live board (price from Yahoo, plus Massive's last-session "
+              "data, technicals, company facts and news sentiment), alerts at ±2%, 3%, 4%, 5%…, Massive's NVIDIA "
+              "news as it comes, a **pre-market brief** at 9:05 ET and a **closing recap** at 4:15 ET. Massive is "
+              "used for NVIDIA only, at most 5 calls a minute.",
 }
 
 
@@ -59,19 +71,29 @@ async def _within(seconds: float, job):
     return None
 
 
+def sources_down_message(reason: str) -> str:
+    return (f"⚠️ The market data sources aren't answering right now ({clip(reason, 160)}), so I can't get that. "
+            "I keep retrying by myself: try again in a minute, and `/status` shows each source's state.")
+
+
 def register_commands(bot) -> None:
     tree = bot.tree
+
+    async def reply(interaction: discord.Interaction, msg: str) -> None:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
 
     async def resolve(interaction: discord.Interaction, text: str) -> Resolved | None:
         try:
             return await bot.engine.resolve(text)
         except UnknownSymbol:
-            msg = f"I couldn't find **{clip(text, 40)}**. Try a ticker like `AAPL`, `BTC`, `^GSPC` or a name like `nvidia`."
-            if interaction.response.is_done():
-                await interaction.followup.send(msg, ephemeral=True)
-            else:
-                await interaction.response.send_message(msg, ephemeral=True)
-            return None
+            await reply(interaction, f"I couldn't find **{clip(text, 40)}**. Try a ticker like `AAPL`, `BTC`, `^GSPC` "
+                                     "or a name like `nvidia`.")
+        except SourcesDown as exc:
+            await reply(interaction, sources_down_message(str(exc)))
+        return None
 
     async def symbol_suggestions(interaction: discord.Interaction, current: str):
         q = current.strip()
@@ -103,7 +125,7 @@ def register_commands(bot) -> None:
 
     # ----- channel setup -----
 
-    @tree.command(name="setup", description="Create the market channels: stocks, crypto, news and research")
+    @tree.command(name="setup", description="Create the market channels: stocks, crypto, news, research, trends, NVIDIA")
     @app_commands.describe(category="Name of the category to put them in")
     @app_commands.default_permissions(manage_channels=True)
     @app_commands.guild_only()
@@ -122,18 +144,21 @@ def register_commands(bot) -> None:
             channel = discord.utils.get(cat.text_channels, name=name)
             if channel is None:
                 channel = await guild.create_text_channel(name, category=cat, topic=topic)
-            bot.channels.set(channel.id, kind, guild.id)
             made.append(channel)
+            existing = bot.channels.get(channel.id)
+            if existing and existing.kind == kind:
+                continue  # already set up (running /setup again adds new channels without touching these)
+            bot.channels.set(channel.id, kind, guild.id)
             await bot.send(channel.id, Post([discord.Embed(title=f"{KIND_NAMES[kind]} channel", description=INTROS[kind],
                                                            color=E.BLUE)]))
-        bot._last.pop("live", None)
-        bot._last.pop("crypto_data", None)
-        bot._last.pop("mood", None)
+        for job in ("live", "crypto_data", "mood", "trends", "nvidia"):
+            bot._last.pop(job, None)
+        bot._trends_board_at = 0.0  # a new trends channel gets its board within a minute
         await interaction.followup.send("Done: " + " ".join(c.mention for c in made) +
                                         "\nBoards appear within a minute. Pin permission (Manage Messages) keeps the "
                                         "boards pinned.", ephemeral=True)
 
-    @tree.command(name="channel", description="Make this channel a stocks, crypto, news or research channel")
+    @tree.command(name="channel", description="Make this channel a stocks, crypto, news, research, trends or NVIDIA channel")
     @app_commands.describe(kind="What this channel is for", enabled="Off: stop all posts here")
     @app_commands.choices(kind=KIND_CHOICES)
     @app_commands.default_permissions(manage_channels=True)
@@ -145,7 +170,9 @@ def register_commands(bot) -> None:
                                                     "This channel wasn't set up for anything.", ephemeral=True)
             return
         bot.channels.set(interaction.channel_id, kind.value, interaction.guild_id or 0)
-        bot._last.pop("live", None)
+        for job in ("live", "trends", "nvidia"):
+            bot._last.pop(job, None)
+        bot._trends_board_at = 0.0
         await interaction.response.send_message(embed=discord.Embed(
             title=f"{KIND_NAMES[kind.value]} channel", description=INTROS[kind.value], color=E.BLUE))
 
@@ -218,7 +245,7 @@ def register_commands(bot) -> None:
                 try:
                     r = await bot.engine.resolve(text)
                     found.append(r)
-                except UnknownSymbol:
+                except (UnknownSymbol, SourcesDown):
                     missing.append(text.strip())
             wrong = [r for r in found if r.market != cfg.market]
             found = [r for r in found if r.market == cfg.market]
@@ -264,7 +291,7 @@ def register_commands(bot) -> None:
             pass
         embed = E.quote_embed(q, extra)
         try:
-            intraday = await bot.engine.yahoo.intraday(r.symbol, "1d", "5m")
+            intraday = await bot.engine.data.intraday(r.symbol, "1d", "5m")
             if len(intraday) > 5:
                 png = await bot.engine.run(charts.intraday_chart, intraday, f"{title_of(r.symbol, r.name)} · today", q.prev_close)
                 embed.set_image(url="attachment://intraday.png")
@@ -285,7 +312,7 @@ def register_commands(bot) -> None:
             return
         p = period.value if period else "6M"
         if PERIODS[p] is None:
-            bars = await bot.engine.yahoo.intraday(r.symbol, "1d" if p == "1D" else "5d", "5m" if p == "1D" else "15m")
+            bars = await bot.engine.data.intraday(r.symbol, "1d" if p == "1D" else "5d", "5m" if p == "1D" else "15m")
             q = await bot.engine.quote(r.symbol)
             png = await bot.engine.run(charts.intraday_chart, bars, f"{title_of(r.symbol, r.name)} · {p}",
                                        q.prev_close if q and p == "1D" else (float(bars.close[0]) if len(bars) else None))
@@ -376,7 +403,7 @@ def register_commands(bot) -> None:
         if mk == STOCKS:
             symbols = own + DEFAULT_STOCKS + list(SECTORS) + [a.symbol for a in INDICES if a.symbol != "^VIX"]
             try:
-                symbols += [q["symbol"] for q in await bot.engine.yahoo.screener("most_actives", 25) if q.get("symbol")]
+                symbols += [q["symbol"] for q in await bot.engine.data.screener("most_actives", 25) if q.get("symbol")]
             except Exception:
                 pass
         else:
@@ -388,7 +415,10 @@ def register_commands(bot) -> None:
             except Exception:
                 pass
         symbols = list(dict.fromkeys(symbols))[:80]
-        quotes = await bot.engine.yahoo.quotes(symbols)
+        quotes = await bot.engine.data.quotes(symbols)
+        if not quotes:
+            await interaction.followup.send(sources_down_message(bot.engine.data.outage() or "no prices came back"))
+            return
         hits = await bot.engine.scan([s for s in symbols if s in quotes], quotes, lookback=3)
         hits = [h for h in hits if h.pressure > 0]
         embed = E.scan_embed(hits, mk)
@@ -486,14 +516,48 @@ def register_commands(bot) -> None:
             cape = stats.cape_view(lr, m.quotes["^GSPC"].price, now.year + (now.timetuple().tm_yday - 1) / 365.25)
         await interaction.followup.send(embed=E.macro_embed(m, cape))
 
+    @tree.command(name="trends", description="Biggest gainers and losers: today, this week or month, 3 months, YTD, a year")
+    @app_commands.describe(period="Over what time", market="Stocks, sectors & ETFs, or crypto")
+    @app_commands.choices(period=[app_commands.Choice(name=n, value=v) for v, n in (
+        ("1D", "Today"), ("WTD", "This week (since last Friday's close)"), ("MTD", "This month"),
+        ("1W", "Past 5 sessions"), ("1M", "Past 21 sessions"), ("3M", "3 months"), ("YTD", "Year to date"),
+        ("1Y", "1 year"))],
+        market=[app_commands.Choice(name=n, value=v) for v, n in (
+            ("stocks", "Stocks"), ("sectors", "Sectors & ETFs"), ("crypto", "Crypto"))])
+    async def trends(interaction: discord.Interaction, period: app_commands.Choice[str] | None = None,
+                     market: app_commands.Choice[str] | None = None):
+        await interaction.response.defer(thinking=True)
+        p = period.value if period else "1D"
+        mk = market.value if market else ("crypto" if channel_market(interaction) == CRYPTO else "stocks")
+        snap = await bot.trends.refresh(max_age=180)
+        if not snap.changes and not snap.day_gainers and not snap.coins:
+            await interaction.followup.send(sources_down_message(bot.engine.data.outage() or "no data came back"))
+            return
+        embed = E.trends_embed(snap, p, mk, bot.trends.index_members("sp500"), bot.trends.index_members("ndx100"))
+        await interaction.followup.send(embed=embed)
+
+    @tree.command(name="nvidia", description="NVIDIA right now: live price, Massive's data, technicals, news and outlook")
+    async def nvidia(interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True)
+        q = await bot.engine.quote("NVDA")
+        board = E.nvidia_board(q, bot.spotlight, (bot.massive_used(), 5))
+        try:
+            o = await bot.engine.outlook("NVDA", STOCKS, quote=q, name="NVIDIA Corporation")
+        except (UnknownSymbol, YahooError, HttpError) as exc:
+            log.warning("NVIDIA outlook failed: %s", exc)
+            await interaction.followup.send(embed=board)
+            return
+        post = await bot.engine.run(chart_post, o, E.outlook_embed(o), o.hi20)
+        await interaction.followup.send(embeds=[board] + post.embeds, files=[_png_file(n, d) for n, d in post.files])
+
     @tree.command(name="movers", description="Today's biggest gainers and losers")
     @app_commands.choices(market=MARKET_CHOICES)
     async def movers(interaction: discord.Interaction, market: app_commands.Choice[str] | None = None):
         await interaction.response.defer(thinking=True)
         mk = market.value if market else channel_market(interaction) or STOCKS
         if mk == STOCKS:
-            g = await bot.engine.yahoo.screener("day_gainers", 10)
-            l = await bot.engine.yahoo.screener("day_losers", 10)
+            g = await bot.engine.data.screener("day_gainers", 10)
+            l = await bot.engine.data.screener("day_losers", 10)
             conv = lambda rows: [(q["symbol"], q.get("shortName", ""), q.get("regularMarketPrice") or 0,
                                   q.get("regularMarketChangePercent") or 0) for q in rows if q.get("symbol")]
             embed = E.movers_embed("🏁 US stock movers", conv(g), conv(l), "US stocks over $2B market cap · Yahoo Finance")
@@ -629,7 +693,9 @@ def register_commands(bot) -> None:
     @tree.command(name="brief", description="Post a brief here now")
     @app_commands.choices(kind=[app_commands.Choice(name=n, value=v) for n, v in (
         ("Pre-market brief", "premarket"), ("Closing recap", "close"), ("Crypto daily", "crypto"),
-        ("Research digest", "research"), ("Week ahead", "weekly"), ("Morning headlines", "morning"))])
+        ("Research digest", "research"), ("Week ahead", "weekly"), ("Morning headlines", "morning"),
+        ("Trends: today", "trends-1D"), ("Trends: this week", "trends-1W"), ("Trends: this month", "trends-1M"),
+        ("Trends: crypto", "trends-crypto"), ("NVIDIA brief", "nvidia"))])
     @app_commands.default_permissions(manage_channels=True)
     @app_commands.guild_only()
     async def brief(interaction: discord.Interaction, kind: app_commands.Choice[str]):
@@ -640,7 +706,10 @@ def register_commands(bot) -> None:
         build = {"premarket": lambda: briefs.premarket(bot, stocks), "close": lambda: briefs.close_recap(bot, stocks),
                  "crypto": lambda: briefs.crypto_daily(bot, coins),
                  "research": lambda: briefs.research_digest(bot, stocks, coins), "weekly": lambda: briefs.weekly(bot),
-                 "morning": lambda: briefs.morning_news(bot)}[kind.value]
+                 "morning": lambda: briefs.morning_news(bot),
+                 "trends-1D": lambda: briefs.trends_recap(bot, "1D"), "trends-1W": lambda: briefs.trends_recap(bot, "1W"),
+                 "trends-1M": lambda: briefs.trends_recap(bot, "1M"), "trends-crypto": lambda: briefs.crypto_trends(bot),
+                 "nvidia": lambda: briefs.nvidia_brief(bot, "premarket")}[kind.value]
         posts = await build()
         if not posts:
             await interaction.followup.send("Nothing to post yet (the news desk fills up after a few minutes).")
@@ -661,6 +730,29 @@ def register_commands(bot) -> None:
             err = f" · ⚠️ {h.last_error} {E.ts(h.error_at)}" if h.last_error and (h.error_at or 0) > (h.last_ok or 0) else ""
             lines.append(f"`{name}` {ok}{err}")
         e.add_field(name="Jobs", value="\n".join(lines) or "Starting…", inline=False)
+        data = bot.engine.data
+        src = [f"Connection: {data.http.transport}"]
+        for name, h in sorted(data.health.items()):
+            src.append(f"**{name}** {h.line()}")
+        d = bot.engine.directory
+        src.append(f"Symbol list: {d.count(STOCKS):,} US stocks & ETFs, {d.count(CRYPTO):,} coins"
+                   + (f" · updated {E.ts(d.updated)}" if d.updated else ""))
+        e.add_field(name="Data sources", value=clip("\n".join(src), 1024), inline=False)
+        spot = bot.spotlight
+        if bot.massive:
+            lines = [f"{spot.plan()} · {bot.massive_used()}/5 calls in the last minute · {bot.massive.limiter.total:,} "
+                     "calls since start"]
+            if bot.massive.last_error:
+                lines.append(f"⚠️ {bot.massive.last_error}")
+            blocked = sorted(spot.not_in_plan)
+            if blocked:
+                lines.append("Not in the plan: " + ", ".join(blocked))
+            lines += [f"⚠️ {k}: {v}" for k, v in list(spot.errors.items())[:4]]
+            if not bot.channels.of_kind("nvidia"):
+                lines.append("Idle until an NVIDIA channel exists (`/setup` or `/channel`)")
+            e.add_field(name="Massive (NVIDIA)", value=clip("\n".join(lines), 1024), inline=False)
+        else:
+            e.add_field(name="Massive (NVIDIA)", value="No key found: set MASSIVE_API_KEY", inline=False)
         models = []
         for market, m in bot.engine.models.items():
             models.append(f"{market}: trained {E.ts(m.trained_at)} on {m.rows:,} days ({len(m.symbols)} histories since {m.first_year})")
@@ -698,11 +790,14 @@ def register_commands(bot) -> None:
         e = discord.Embed(title="📊 Market bot", color=E.BLUE, description=(
             "Live stocks and crypto, alerts, breakout radar, forecasts built on a century of prices, and a news desk "
             "that estimates each story's market impact. Start with `/setup`."))
-        e.add_field(name="Channels", value="`/setup` makes 📈 stocks, 🪙 crypto, 📰 news and 🔬 research channels · "
-                                           "`/channel` sets up an existing one · `/settings` · `/watchlist`", inline=False)
+        e.add_field(name="Channels", value="`/setup` makes 📈 stocks, 🪙 crypto, 📰 news, 🔬 research, 🔥 trends and "
+                                           "🟩 NVIDIA channels · `/channel` sets up an existing one · `/settings` · "
+                                           "`/watchlist`", inline=False)
         e.add_field(name="Look things up", value="`/price` · `/chart` · `/forecast` · `/research` · `/breakouts` · "
-                                                 "`/news` · `/history` · `/macro` · `/movers` · `/compare` · `/backtest`",
-                    inline=False)
+                                                 "`/trends` · `/nvidia` · `/news` · `/history` · `/macro` · `/movers` · "
+                                                 "`/compare` · `/backtest`", inline=False)
+        e.add_field(name="Any symbol", value="Every US stock and ETF and the top 1,000 coins, by ticker or name "
+                                             "(`nvidia`, `brk.b`, `hyperliquid`)", inline=False)
         e.add_field(name="Alerts & accountability", value="`/alert` · `/alerts` · `/record` · `/brief` · `/status`",
                     inline=False)
         e.add_field(name="About the predictions", value=(
@@ -715,8 +810,14 @@ def register_commands(bot) -> None:
     @tree.error
     async def on_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
         name = interaction.command.qualified_name if interaction.command else "?"
-        log.error("/%s failed", name, exc_info=error)
-        msg = "Something went wrong running that command (a data source may be down). Please try again in a moment."
+        cause = getattr(error, "original", error)
+        if isinstance(cause, (YahooError, HttpError, SourcesDown)):
+            log.warning("/%s: data unavailable: %s", name, cause)
+            msg = (f"⚠️ I couldn't get the data for that right now ({clip(str(cause), 160)}). I keep retrying by "
+                   "myself: try again in a minute, and `/status` shows each source's state.")
+        else:
+            log.error("/%s failed", name, exc_info=error)
+            msg = "Something went wrong running that command. Please try again in a moment."
         try:
             if interaction.response.is_done():
                 await interaction.followup.send(msg, ephemeral=True)

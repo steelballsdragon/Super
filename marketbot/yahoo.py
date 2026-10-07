@@ -1,7 +1,8 @@
 """Yahoo Finance's public endpoints: daily history back to the 1920s, live quotes, fundamentals, options and news.
 
 No API key is needed. Quotes, fundamentals and options need a session "crumb", which is fetched the same
-way a browser gets it and refreshed when Yahoo rejects it.
+way a browser gets it and refreshed when Yahoo rejects it. Requests go through http.Http, which looks like Chrome to
+Yahoo (it refuses plain Python clients on cloud hosts).
 """
 
 from __future__ import annotations
@@ -11,22 +12,23 @@ import logging
 import time
 from dataclasses import dataclass, field
 
-import aiohttp
 import numpy as np
+
+from .http import BROWSER_UA, Http, HttpError, Response
 
 log = logging.getLogger(__name__)
 
 BASE = "https://query1.finance.yahoo.com"
-HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
-                         "Chrome/124.0 Safari/537.36", "Accept": "application/json,text/plain,*/*"}
+HEADERS = {"User-Agent": BROWSER_UA, "Accept": "application/json,text/plain,*/*"}  # for the other aiohttp clients
 EARLIEST = -2208988800  # 1900-01-01: Yahoo returns from the first bar it has
-RETRIES = 3
 CRUMB_TTL = 6 * 3600
 QUOTE_BATCH = 40
 
 
 class YahooError(Exception):
-    pass
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass
@@ -95,6 +97,7 @@ class Quote:
     ext_price: float | None = None  # pre-market or after-hours price
     ext_change_pct: float | None = None
     extra: dict = field(default_factory=dict)  # market cap, P/E, earnings date, analyst rating...
+    source: str = "Yahoo"
 
     @property
     def change(self) -> float | None:
@@ -196,62 +199,68 @@ def quote_from_v7(d: dict) -> Quote | None:
 
 
 class YahooClient:
-    def __init__(self, session: aiohttp.ClientSession | None = None, concurrency: int = 6):
-        self._session = session
-        self._limit = asyncio.Semaphore(concurrency)
+    SOURCE = "Yahoo"
+
+    def __init__(self, http: Http | None = None, concurrency: int = 6):
+        self.http = http or Http(limits={self.SOURCE: concurrency})
+        self._own_http = http is None
         self._crumb: str | None = None
         self._crumb_at = 0.0
         self._crumb_lock = asyncio.Lock()
 
-    async def session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(headers=HEADERS, cookie_jar=aiohttp.CookieJar(),
-                                                  timeout=aiohttp.ClientTimeout(total=45))
-        return self._session
-
     async def close(self) -> None:
-        if self._session and not self._session.closed:
-            await self._session.close()
+        if self._own_http:
+            await self.http.close()
+
+    @property
+    def resting(self) -> bool:
+        return self.http.resting(self.SOURCE)
+
+    async def _get(self, url: str, params: dict | None = None, answered: tuple[int, ...] = ()) -> Response:
+        try:
+            return await self.http.get(url, params=params, source=self.SOURCE, answered=answered)
+        except HttpError as exc:
+            raise YahooError(f"Yahoo: {exc}", exc.status) from exc
 
     async def get_json(self, url: str, params: dict | None = None, crumb: bool = False):
-        """GET with retries on rate limits and server errors; with crumb=True a stale crumb is refreshed once."""
-        refreshed = False
-        for attempt in range(RETRIES):
+        """GET (the transport retries rate limits and server errors); with crumb=True a stale crumb is refreshed
+        once."""
+        for refreshed in (False, True):
             p = dict(params or {})
+            used = None
             if crumb:
-                p["crumb"] = await self.crumb()
+                used = p["crumb"] = await self.crumb()
+            # An expired crumb is routine: its first rejection isn't counted against Yahoo's health (several
+            # requests rejected at once would otherwise rest Yahoo before the crumb could be renewed).
+            resp = await self._get(url, p, answered=(401, 403) if crumb and not refreshed else ())
+            if resp.status in (401, 403) and crumb and not refreshed:
+                if self._crumb == used:
+                    self._crumb = None  # another request may have renewed it already
+                continue
+            if resp.status == 404:
+                raise YahooError(f"not found: {url}", 404)
+            if resp.status >= 400:
+                raise YahooError(f"Yahoo: HTTP {resp.status}", resp.status)
             try:
-                async with self._limit:
-                    session = await self.session()
-                    async with session.get(url, params=p) as resp:
-                        if resp.status == 401 and crumb and not refreshed:
-                            refreshed = True
-                            self._crumb = None
-                            continue
-                        if resp.status == 404:
-                            raise YahooError(f"not found: {url}")
-                        if resp.status == 429 or resp.status >= 500:
-                            raise aiohttp.ClientResponseError(resp.request_info, (), status=resp.status)
-                        resp.raise_for_status()
-                        return await resp.json(content_type=None)
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                if attempt == RETRIES - 1:
-                    raise YahooError(f"{url}: {exc!r}") from exc
-                await asyncio.sleep(1.5 * 2 ** attempt)
-        raise YahooError(f"{url}: gave up")
+                return resp.json()
+            except HttpError as exc:
+                raise YahooError(f"Yahoo: {exc}", resp.status) from exc
+        raise YahooError("Yahoo rejected the crumb twice", 401)
 
     async def crumb(self) -> str:
         async with self._crumb_lock:
             if self._crumb and time.monotonic() - self._crumb_at < CRUMB_TTL:
                 return self._crumb
-            session = await self.session()
-            # Visiting fc.yahoo.com sets the session cookie (the page itself is a 404).
-            async with session.get("https://fc.yahoo.com", allow_redirects=True) as resp:
-                await resp.read()
-            async with session.get(f"{BASE}/v1/test/getcrumb") as resp:
-                text = (await resp.text()).strip()
-                if resp.status != 200 or not text or "<" in text or " " in text:
-                    raise YahooError(f"couldn't get a Yahoo crumb ({resp.status})")
+            # Visiting fc.yahoo.com sets the session cookie (the page itself is a 404). It's optional, so it's
+            # counted as its own source: its 404 mustn't make Yahoo look healthy, nor its failure rest Yahoo.
+            try:
+                await self.http.get("https://fc.yahoo.com", source=f"{self.SOURCE} cookie", retries=0, timeout=10)
+            except HttpError:
+                log.debug("fc.yahoo.com didn't answer; asking for a crumb anyway")
+            resp = await self._get(f"{BASE}/v1/test/getcrumb")
+            text = resp.text.strip()
+            if resp.status != 200 or not text or "<" in text or " " in text or len(text) > 40:
+                raise YahooError(f"couldn't get a Yahoo crumb (HTTP {resp.status})", resp.status)
             self._crumb, self._crumb_at = text, time.monotonic()
             return text
 
@@ -275,6 +284,7 @@ class YahooClient:
     async def daily(self, symbol: str, start: int | None = None) -> Bars:
         bars = parse_chart(await self.chart(symbol, start=start))
         bars.symbol = bars.symbol or symbol
+        bars.meta = {**bars.meta, "source": self.SOURCE}
         return bars
 
     async def intraday(self, symbol: str, range_: str = "1d", interval: str = "5m", prepost: bool = True) -> Bars:
@@ -316,6 +326,22 @@ class YahooClient:
                     q = quote_from_meta(resp.get("meta") or {})
                     if q:
                         out[q.symbol] = q
+        return out
+
+    async def spark_bars(self, symbols: list[str], range_: str = "1y", interval: str = "1d") -> dict[str, Bars]:
+        """Closes only (open/high/low equal the close) for up to 20 symbols in one call. Symbols Yahoo doesn't
+        know are left out."""
+        if len(symbols) > 20:
+            raise ValueError("spark takes at most 20 symbols")
+        data = await self.get_json(f"{BASE}/v7/finance/spark",
+                                   {"symbols": ",".join(symbols), "range": range_, "interval": interval})
+        out: dict[str, Bars] = {}
+        for r in ((data or {}).get("spark") or {}).get("result") or []:
+            for resp in r.get("response") or []:
+                bars = parse_chart(resp, adjust=False)
+                bars.symbol = r.get("symbol") or bars.symbol
+                if bars.symbol and len(bars):
+                    out[bars.symbol] = bars
         return out
 
     # ----- research -----

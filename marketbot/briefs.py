@@ -75,7 +75,7 @@ async def _outlooks(bot, symbols: list[tuple[str, str]], record: bool = True) ->
 
 async def premarket(bot, watchlist: list[str]) -> list[Post]:
     now = datetime.now(NEW_YORK)
-    quotes = await bot.engine.yahoo.quotes([a.symbol for a in FUTURES + MACRO] + ["BTC-USD", "^VIX"] + watchlist)
+    quotes = await bot.engine.data.quotes([a.symbol for a in FUTURES + MACRO] + ["BTC-USD", "^VIX"] + watchlist)
     bot.quotes.update(quotes)
     e = discord.Embed(title=f"🌅 Pre-market brief · {now:%A, %B %-d}", color=E.BLUE)
     e.add_field(name="Futures", value=E.ansi_rows([(BOARD_LABELS.get(a.symbol, a.name)[:10], getattr(quotes.get(a.symbol), "price", None),
@@ -118,7 +118,7 @@ async def premarket(bot, watchlist: list[str]) -> list[Post]:
 async def close_recap(bot, watchlist: list[str]) -> list[Post]:
     now = datetime.now(NEW_YORK)
     syms = [a.symbol for a in INDICES] + list(SECTORS) + watchlist + ["^TNX", "DX-Y.NYB", "GC=F", "CL=F"]
-    quotes = await bot.engine.yahoo.quotes(syms)
+    quotes = await bot.engine.data.quotes(syms)
     bot.quotes.update(quotes)
     sp = quotes.get("^GSPC")
     e = discord.Embed(title=f"🔔 Closing recap · {now:%A, %B %-d}",
@@ -139,8 +139,8 @@ async def close_recap(bot, watchlist: list[str]) -> list[Post]:
         e.add_field(name=f"Watchlist ({up}/{len(wl)} up)", value="\n".join(x for x in (best, worst) if x) or "Flat",
                     inline=False)
     try:
-        gainers = await bot.engine.yahoo.screener("day_gainers", 6)
-        losers = await bot.engine.yahoo.screener("day_losers", 6)
+        gainers = await bot.engine.data.screener("day_gainers", 6)
+        losers = await bot.engine.data.screener("day_losers", 6)
 
         def row(q):
             return f"**{q.get('symbol')}** {q.get('regularMarketChangePercent', 0):+.1f}%"
@@ -166,7 +166,7 @@ async def close_recap(bot, watchlist: list[str]) -> list[Post]:
 
 
 async def crypto_daily(bot, watchlist: list[str]) -> list[Post]:
-    quotes = await bot.engine.yahoo.quotes(watchlist + ["BTC-USD", "ETH-USD"])
+    quotes = await bot.engine.data.quotes(watchlist + ["BTC-USD", "ETH-USD"])
     bot.quotes.update(quotes)
     e = discord.Embed(title=f"🪙 Crypto daily · {datetime.now(NEW_YORK):%A, %B %-d}", color=E.BLUE)
     try:
@@ -212,7 +212,7 @@ async def crypto_daily(bot, watchlist: list[str]) -> list[Post]:
 
 
 async def research_digest(bot, stock_list: list[str], crypto_list: list[str]) -> list[Post]:
-    quotes = await bot.engine.yahoo.quotes(stock_list + crypto_list + list(SECTORS))
+    quotes = await bot.engine.data.quotes(stock_list + crypto_list + list(SECTORS))
     bot.quotes.update(quotes)
     hits = await bot.engine.scan(stock_list + list(SECTORS) + crypto_list, quotes, lookback=3)
     e = E.scan_embed(hits, "all", f"🔬 Research digest · {datetime.now(NEW_YORK):%A, %B %-d}")
@@ -272,3 +272,66 @@ async def morning_news(bot) -> list[Post]:
     if not items:
         return []
     return [Post([E.news_digest(items, f"🗞️ Morning headlines · {datetime.now(NEW_YORK):%A, %B %-d}")])]
+
+
+# ----- the trends channel -----
+
+def _members(bot) -> tuple[list[str], list[str]]:
+    return bot.trends.index_members("sp500"), bot.trends.index_members("ndx100")
+
+
+async def trends_recap(bot, period: str) -> list[Post]:
+    """The day's (1D), week's (1W) or month's (1M) movers: stocks, sectors and crypto. The monthly recap adds the
+    year-to-date leaders."""
+    snap = await bot.trends.refresh(max_age=120)
+    sp500, ndx = _members(bot)
+    when = datetime.now(NEW_YORK)
+    title = {"1D": f"📅 Daily trends · {when:%a %b %d}", "1W": f"🗓️ Weekly trends · week of {when:%b %d}",
+             "1M": f"📆 Monthly trends · {when:%B %Y}"}.get(period, "Trends")
+    calendar = {"1W": "WTD", "1M": "MTD"}.get(period, period)  # the recaps cover the calendar week and month
+    embeds = [E.trends_embed(snap, calendar, "stocks", sp500, ndx),
+              E.trends_embed(snap, calendar, "sectors", sp500, ndx)]
+    embeds[0].title = f"{title} · {embeds[0].title}"
+    if period in ("1W", "1M"):
+        embeds.append(E.trends_embed(snap, period, "crypto", sp500, ndx))
+    if period == "1M":
+        embeds.append(E.trends_embed(snap, "YTD", "stocks", sp500, ndx, count=5))
+    return [Post(_fit_total(embeds))]
+
+
+async def crypto_trends(bot) -> list[Post]:
+    snap = await bot.trends.refresh(max_age=120)
+    sp500, ndx = _members(bot)
+    e = E.trends_embed(snap, "1D", "crypto", sp500, ndx)
+    e.title = f"🪙 Crypto daily trends · {datetime.now(NEW_YORK):%a %b %d} · last 24 hours"
+    return [Post([e])]
+
+
+def _fit_total(embeds: list[discord.Embed], limit: int = 5800) -> list[discord.Embed]:
+    """Discord allows 6,000 characters across a message's embeds: drop trailing ones that don't fit."""
+    out, total = [], 0
+    for e in embeds:
+        if total + len(e) > limit and out:
+            break
+        out.append(e)
+        total += len(e)
+    return out
+
+
+# ----- the NVIDIA channel -----
+
+async def nvidia_brief(bot, kind: str) -> list[Post]:
+    """Before the open: the outlook and the latest from Massive. After the close: how the day went."""
+    q = (await bot.engine.data.quotes(["NVDA"])).get("NVDA") or bot.quotes.get("NVDA")
+    board = E.nvidia_board(q, bot.spotlight, (bot.massive_used(), 5))
+    board.title = ("🌅 NVIDIA before the open" if kind == "premarket" else "🔔 NVIDIA at the close")
+    posts = [Post([board])]
+    try:
+        o = await bot.engine.outlook("NVDA", STOCKS, quote=q, name="NVIDIA Corporation")
+    except Exception:
+        log.warning("NVIDIA outlook failed", exc_info=True)
+        return posts
+    bot.predictions.add_forecast(o.symbol, o.market, o.price, o.up,
+                                 {5: o.base.get("up_5d", 0.5), 20: o.base.get("up_20d", 0.5)}, o.label)
+    posts.append(await bot.engine.run(chart_post, o, E.outlook_embed(o), o.hi20))
+    return posts

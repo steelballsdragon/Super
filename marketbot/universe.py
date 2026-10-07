@@ -68,6 +68,9 @@ ALIASES = {
     "toncoin": "TON11419-USD", "uni": "UNI7083-USD", "uniswap": "UNI7083-USD", "pepe": "PEPE24478-USD",
     "brk.b": "BRK-B", "brkb": "BRK-B", "brk.a": "BRK-A", "google": "GOOGL", "alphabet": "GOOGL",
     "facebook": "META", "tesla": "TSLA", "apple": "AAPL", "microsoft": "MSFT", "nvidia": "NVDA", "amazon": "AMZN",
+    "hype": "HYPE32196-USD", "hyperliquid": "HYPE32196-USD", "tron": "TRX-USD", "avalanche": "AVAX-USD",
+    "chainlink": "LINK-USD", "polkadot": "DOT-USD", "litecoin": "LTC-USD", "binance coin": "BNB-USD",
+    "jpmorgan": "JPM", "jp morgan": "JPM", "berkshire": "BRK-B", "netflix": "NFLX", "palantir": "PLTR",
 }
 # Coins people write without "-USD".
 COINS = {"BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "ADA", "AVAX", "LINK", "TRX", "LTC", "DOT", "BCH", "XLM",
@@ -133,8 +136,18 @@ def title_of(symbol: str, name: str | None = None) -> str:
     return f"{short(symbol)} · {name}"
 
 
+_CMC_ID = re.compile(r"(?<=[A-Za-z])\d{4,}$")
+
+
+def coin_base(symbol: str) -> str:
+    """A coin's ticker from its Yahoo symbol: SUI20947-USD -> SUI (Yahoo adds a 4+ digit CoinMarketCap id when
+    tickers clash), while digits that belong to the ticker stay: API3-USD -> API3, C98-USD -> C98."""
+    base = symbol[:-4] if symbol.endswith("-USD") else symbol
+    return _CMC_ID.sub("", base)
+
+
 def short(symbol: str) -> str:
-    """Symbol as shown in tight tables: BTC-USD -> BTC, SUI20947-USD -> SUI."""
+    """Symbol as shown in tight tables: BTC-USD -> BTC, SUI20947-USD -> SUI, API3-USD -> API3."""
     if symbol.endswith("-USD"):
-        return re.sub(r"\d+$", "", symbol[:-4])
+        return coin_base(symbol)
     return symbol

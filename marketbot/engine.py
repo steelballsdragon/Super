@@ -16,22 +16,29 @@ import numpy as np
 
 from . import forecast, indicators as ind, setups as st, stats
 from .cache import HistoryCache
+from .data import MarketData
+from .directory import Directory
 from .features import FEATURES, build
 from .model import Backtest, MarketModel, Skill, backtest, train
 from .sources import LongRun, Sources, fear_greed_label
 from .storage import write_json
 from .universe import (BENCHMARK, CRYPTO, CRYPTO_TRAINING, STOCK_TRAINING, STOCKS, display_name, looks_like_symbol,
-                       market_of, normalize)
-from .yahoo import Bars, Quote, YahooClient, YahooError
+                       market_of, normalize, short)
+from .yahoo import Bars, Quote, YahooError
 
 log = logging.getLogger(__name__)
 
 MODEL_MAX_AGE = 3 * 86400
+KIND_LABELS = {"stock": "stock", "etf": "ETF", "index": "index", "future": "futures", "crypto": "crypto"}
 DIRECTION_TARGETS = {5: "up_5d", 20: "up_20d", 60: "up_60d"}
 
 
 class UnknownSymbol(Exception):
     pass
+
+
+class SourcesDown(Exception):
+    """A lookup failed because the data sources aren't answering (not because the symbol doesn't exist)."""
 
 
 @dataclass
@@ -131,11 +138,13 @@ class Macro:
 
 
 class Engine:
-    def __init__(self, data_dir: str | Path, yahoo: YahooClient | None = None, sources: Sources | None = None):
+    def __init__(self, data_dir: str | Path, data: MarketData | None = None, sources: Sources | None = None):
         self.data_dir = Path(data_dir)
-        self.yahoo = yahoo or YahooClient()
         self.sources = sources or Sources()
-        self.cache = HistoryCache(self.yahoo, self.data_dir / "history")
+        self.data = data or MarketData(directory=Directory.load(self.data_dir),
+                                       coins=lambda: self.sources.top_coins(250))
+        self.directory = self.data.directory
+        self.cache = HistoryCache(self.data, self.data_dir / "history")
         self.models: dict[str, MarketModel] = {}
         self.model_file = self.data_dir / "models.json"
         self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="analysis")
@@ -147,7 +156,7 @@ class Engine:
 
     async def close(self) -> None:
         self._pool.shutdown(wait=False, cancel_futures=True)
-        await self.yahoo.close()
+        await self.data.close()
         await self.sources.close()
 
     async def run(self, fn, *args):
@@ -156,23 +165,30 @@ class Engine:
     # ----- symbols -----
 
     async def resolve(self, text: str) -> Resolved:
-        """A Yahoo symbol from a ticker, alias or company/coin name ("apple", "btc", "s&p")."""
+        """A symbol from a ticker, alias or company/coin name ("apple", "btc", "s&p", "brk.b", "hyperliquid").
+        The symbol directory answers most lookups without asking any source. Raises UnknownSymbol, or SourcesDown
+        when it can't tell because the data sources aren't answering."""
         key = text.strip().lower()
         if key in self._resolved:
             return self._resolved[key]
-        guess = normalize(text)
         found = None
-        if looks_like_symbol(guess):
-            try:
-                quotes = await self.yahoo.quotes([guess])
-                q = quotes.get(guess)
-                if q:
-                    found = Resolved(guess, display_name(guess, q.name), market_of(guess, q.quote_type))
-            except YahooError:
-                pass
+        listing = self.directory.lookup(text)
+        if listing:
+            found = Resolved(listing.symbol, display_name(listing.symbol, listing.name), listing.market)
+        guess = normalize(text)
+        if found is None and looks_like_symbol(guess):
+            quotes = await self.data.quotes([guess])
+            q = quotes.get(guess)
+            if q:
+                found = Resolved(guess, display_name(guess, q.name), market_of(guess, q.quote_type))
         if found is None:
+            matches = self.directory.search(text, 1)
+            if matches and _names_match(text, matches[0].name, matches[0].symbol):
+                m = matches[0]
+                found = Resolved(m.symbol, display_name(m.symbol, m.name), m.market)
+        if found is None and self.data.yahoo_ok:
             try:
-                results, _ = await self.yahoo.search(text, quotes=6)
+                results, _ = await self.data.yahoo.search(text, quotes=6)
             except YahooError:
                 results = []
             for r in results:
@@ -182,31 +198,41 @@ class Engine:
                                      market_of(sym, r.get("quoteType")))
                     break
         if found is None:
+            outage = self.data.outage()
+            if outage:
+                raise SourcesDown(outage)
             raise UnknownSymbol(text)
         if len(self._resolved) > 2000:
             self._resolved.clear()
         self._resolved[key] = found
         return found
 
+    def forget_lookups(self) -> None:
+        self._resolved.clear()
+        self._suggested.clear()
+
     async def suggest(self, text: str) -> list[tuple[str, str]]:
-        """(label, symbol) suggestions while typing."""
+        """(label, symbol) suggestions while typing: the symbol directory, plus Yahoo's search for anything it
+        doesn't know."""
         key = text.strip().lower()
         if not key:
             return []
         hit = self._suggested.get(key)
         if hit and time.monotonic() - hit[0] < 600:
             return hit[1]
-        try:
-            results, _ = await self.yahoo.search(text, quotes=10)
-        except YahooError:
-            return []
-        out = []
-        for r in results:
-            sym = r.get("symbol")
-            if not sym or r.get("quoteType") not in ("EQUITY", "ETF", "INDEX", "CRYPTOCURRENCY", "FUTURE"):
-                continue
-            name = r.get("shortname") or r.get("longname") or sym
-            out.append((f"{sym} · {name} ({r.get('exchDisp') or r.get('typeDisp') or ''})"[:100], sym))
+        out = [(f"{short(i.symbol)} · {i.name} ({KIND_LABELS.get(i.kind, i.kind)})"[:100], i.symbol)
+               for i in self.directory.search(text, 12)]
+        if len(out) < 5 and self.data.yahoo_ok:
+            try:
+                results, _ = await self.data.yahoo.search(text, quotes=10)
+            except YahooError:
+                results = []
+            for r in results:
+                sym = r.get("symbol")
+                if not sym or r.get("quoteType") not in ("EQUITY", "ETF", "INDEX", "CRYPTOCURRENCY", "FUTURE"):
+                    continue
+                name = r.get("shortname") or r.get("longname") or sym
+                out.append((f"{sym} · {name} ({r.get('exchDisp') or r.get('typeDisp') or ''})"[:100], sym))
         if len(self._suggested) > 500:
             self._suggested.clear()
         self._suggested[key] = (time.monotonic(), out)
@@ -272,7 +298,7 @@ class Engine:
 
     async def quote(self, symbol: str) -> Quote | None:
         try:
-            return (await self.yahoo.quotes([symbol])).get(symbol)
+            return (await self.data.quotes([symbol])).get(symbol)
         except YahooError:
             return None
 
@@ -309,7 +335,7 @@ class Engine:
 
     async def options(self, symbol: str, bars: Bars | None = None) -> OptionsView | None:
         try:
-            first = await self.yahoo.options(symbol)
+            first = await self.data.options(symbol)
         except YahooError:
             return None
         dates = first.get("expirationDates") or []
@@ -317,7 +343,7 @@ class Engine:
             return None
         now = time.time()
         expiry = next((d for d in dates if d - now > 6 * 86400), dates[0])
-        chain = first if expiry == dates[0] else await self.yahoo.options(symbol, expiry)
+        chain = first if expiry == dates[0] else await self.data.options(symbol, expiry)
         opts = (chain.get("options") or [{}])[0]
         spot = (chain.get("quote") or {}).get("regularMarketPrice")
         if not spot:
@@ -329,7 +355,7 @@ class Engine:
 
     async def fundamentals(self, symbol: str) -> dict:
         try:
-            return await self.yahoo.summary(symbol, ("financialData", "defaultKeyStatistics", "calendarEvents",
+            return await self.data.summary(symbol, ("financialData", "defaultKeyStatistics", "calendarEvents",
                                                      "recommendationTrend", "summaryProfile", "earningsHistory"))
         except YahooError:
             return {}
@@ -344,7 +370,7 @@ class Engine:
 
     async def macro(self) -> Macro:
         syms = ["^GSPC", "^VIX", "^TNX", "^IRX", "DX-Y.NYB", "GC=F", "CL=F", "HG=F", "BTC-USD", "ETH-USD", "^MOVE"]
-        quotes_task = asyncio.ensure_future(self.yahoo.quotes(syms))
+        quotes_task = asyncio.ensure_future(self.data.quotes(syms))
         hist = await asyncio.gather(*(self.cache.daily(s) for s in ("^GSPC", "^VIX", "HYG", "IEF", "BTC-USD")),
                                     return_exceptions=True)
         fng = cg = None
@@ -369,6 +395,15 @@ class Engine:
         except Exception:
             log.warning("Shiller data unavailable", exc_info=True)
             return None
+
+
+def _names_match(text: str, name: str, symbol: str) -> bool:
+    """Whether a search hit plausibly is what was typed: every word typed starts a word of the name or ticker."""
+    from .directory import words
+    typed = words(text)
+    have = words(name) + words(symbol)
+    compact = "".join(have)
+    return bool(typed) and (all(any(w.startswith(t) for w in have) for t in typed) or compact.startswith("".join(typed)))
 
 
 def release_memory() -> None:
