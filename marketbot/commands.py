@@ -76,6 +76,48 @@ def sources_down_message(reason: str) -> str:
             "I keep retrying by myself: try again in a minute, and `/status` shows each source's state.")
 
 
+HELP_GUIDE = (
+    ("⚙️ Setup", (("setup", "makes all the market channels"), ("channel", "turns this channel into a market channel"),
+                  ("settings", "this channel's alerts, news and brief time"),
+                  ("watchlist", "adds or removes symbols: `AAPL, tesla, BTC`"))),
+    ("💹 Prices & charts", (("price", "live price of anything: `nvidia`, `BTC`, `gold`"),
+                           ("chart", "chart with averages, bands, levels and RSI"),
+                           ("compare", "two symbols side by side: returns, risk, correlation"))),
+    ("🔬 Analysis", (("forecast", "breakout odds, likely ranges and look-alikes"),
+                    ("research", "full report on a stock, ETF, index or coin"),
+                    ("breakouts", "breakouts and setups about to break"),
+                    ("history", "decades, crashes and seasonality since the 1800s"),
+                    ("backtest", "would following the model have beaten buy-and-hold?"))),
+    ("🌐 Markets", (("movers", "today's biggest gainers and losers"),
+                   ("trends", "top movers: today, this week or month, 3 months, YTD, 1 year"),
+                   ("feargreed", "Fear & Greed for stocks (CNN) and crypto, with a year's chart"),
+                   ("macro", "rates, dollar, VIX, Fear & Greed and S&P valuation"),
+                   ("nvidia", "NVIDIA: live price, Massive's data, news and outlook"),
+                   ("news", "market-moving news, or news for one symbol"))),
+    ("🔔 Alerts & tracking", (("alert", "pings you when a price is reached"), ("alerts", "lists or removes price alerts"),
+                             ("record", "how the bot's calls have done"), ("brief", "posts a brief here now"))),
+    ("🤖 Bot", (("status", "data sources, jobs, models and the news reader"), ("help", "this guide"))),
+)
+
+
+async def command_ids(bot) -> dict[str, int]:
+    """The commands' Discord IDs (for tappable mentions), fetched once; empty if Discord doesn't answer."""
+    ids = getattr(bot, "command_ids", None) or {}
+    if not ids:
+        try:
+            ids = {c.name: c.id for c in await bot.tree.fetch_commands()}
+        except Exception:
+            log.warning("Couldn't fetch the command IDs", exc_info=True)
+            return {}
+        bot.command_ids = ids
+    return ids
+
+
+def mention(ids: dict[str, int], name: str) -> str:
+    """A command as Discord shows it (blue and tappable) when its ID is known, else as /name."""
+    return f"</{name}:{ids[name]}>" if name in ids else f"`/{name}`"
+
+
 def register_commands(bot) -> None:
     tree = bot.tree
 
@@ -808,27 +850,23 @@ def register_commands(bot) -> None:
                if ok else f"I can't start an update from here (`{detail}`). The server checks every 5 minutes anyway.")
         await interaction.response.send_message(msg, ephemeral=True)
 
-    @tree.command(name="help", description="What the market bot does and its commands")
-    async def help_cmd(interaction: discord.Interaction):
-        e = discord.Embed(title="📊 Market bot", color=E.BLUE, description=(
+    @tree.command(name="help", description="Every command, tap one to use it (post: true shares it in the channel)")
+    @app_commands.describe(post="Post the guide for everyone here (to pin it) instead of just for you")
+    async def help_cmd(interaction: discord.Interaction, post: bool = False):
+        ids = await command_ids(bot)
+        e = discord.Embed(title="📊 MarketBot · commands", color=E.BLUE, description=(
             "Live stocks and crypto, alerts, breakout radar, forecasts built on a century of prices, and a news desk "
-            "that estimates each story's market impact. Start with `/setup`."))
-        e.add_field(name="Channels", value="`/setup` makes 📈 stocks, 🪙 crypto, 📰 news, 🔬 research, 🔥 trends and "
-                                           "🟩 NVIDIA channels · `/channel` sets up an existing one · `/settings` · "
-                                           "`/watchlist`", inline=False)
-        e.add_field(name="Look things up", value="`/price` · `/chart` · `/forecast` · `/research` · `/breakouts` · "
-                                                 "`/trends` · `/feargreed` · `/nvidia` · `/news` · `/history` · `/macro` · `/movers` · "
-                                                 "`/compare` · `/backtest`", inline=False)
-        e.add_field(name="Any symbol", value="Every US stock and ETF and the top 1,000 coins, by ticker or name "
-                                             "(`nvidia`, `brk.b`, `hyperliquid`)", inline=False)
-        e.add_field(name="Alerts & accountability", value="`/alert` · `/alerts` · `/record` · `/brief` · `/status`",
-                    inline=False)
+            "that estimates each story's market impact. Tap a command to use it. Any symbol works by ticker or "
+            "name: `nvidia`, `brk.b`, `BTC`, `gold`, `s&p`."))
+        for title, rows in HELP_GUIDE:
+            e.add_field(name=title, value="\n".join(f"{mention(ids, name)} {what}" for name, what in rows),
+                        inline=False)
         e.add_field(name="About the predictions", value=(
             "Breakout odds and price ranges are the strong suit: tested on years the model never saw, breakout calls "
-            "score an AUC around 0.8. Plain up/down direction is close to a coin flip for every method (markets are "
-            "hard), so those numbers stay near history's base rates. Everything is graded in `/record`."), inline=False)
+            f"score an AUC around 0.8. Plain up/down direction is close to a coin flip for every method, so those "
+            f"numbers stay near history's base rates. Everything is graded in {mention(ids, 'record')}."), inline=False)
         e.set_footer(text=E.DISCLAIMER)
-        await interaction.response.send_message(embed=e, ephemeral=True)
+        await interaction.response.send_message(embed=fit_embed(e), ephemeral=not post)
 
     @tree.error
     async def on_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
