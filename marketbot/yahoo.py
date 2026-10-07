@@ -247,10 +247,11 @@ class YahooClient:
         async with self._crumb_lock:
             if self._crumb and time.monotonic() - self._crumb_at < CRUMB_TTL:
                 return self._crumb
-            # Visiting fc.yahoo.com sets the session cookie (the page itself is a 404).
+            # Visiting fc.yahoo.com sets the session cookie (the page itself is a 404). It's optional, so it's
+            # counted as its own source: its 404 mustn't make Yahoo look healthy, nor its failure rest Yahoo.
             try:
-                await self._get("https://fc.yahoo.com")
-            except YahooError:
+                await self.http.get("https://fc.yahoo.com", source=f"{self.SOURCE} cookie", retries=0, timeout=10)
+            except HttpError:
                 log.debug("fc.yahoo.com didn't answer; asking for a crumb anyway")
             resp = await self._get(f"{BASE}/v1/test/getcrumb")
             text = resp.text.strip()

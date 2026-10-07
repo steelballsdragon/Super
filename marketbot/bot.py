@@ -60,6 +60,7 @@ FAST_DEFAULT = 4.0
 NVIDIA = "NVDA"
 NVIDIA_STEPS = (2.0, 3.0, 4.0, 5.0, 7.5, 10.0, 15.0, 20.0)  # the NVIDIA channel watches one stock closely
 NVIDIA_NEWS_PER_STEP = 4
+STALE_QUOTE = 900  # a quote no source has refreshed for this long leaves the boards (not shown as live)
 TRENDS_OPEN_SECONDS = 300  # the trends board's refresh while the market is open
 TRENDS_CLOSED_SECONDS = 1800
 
@@ -127,6 +128,7 @@ class MarketBot(discord.Client):
         self.massive = Massive(massive_key, data.http) if massive_key and hasattr(data, "http") else None
         self.spotlight = Spotlight(self.massive, self.data_dir / "nvidia.json")
         self.quotes: dict[str, Quote] = {}
+        self.quote_seen: dict[str, float] = {}  # symbol -> when a source last sent its quote
         self.quotes_at = 0.0
         self.recent_news: list[Analysis] = []
         self.vol_ratio: dict[str, float] = {}
@@ -283,6 +285,10 @@ class MarketBot(discord.Client):
         quotes = await self.engine.data.quotes(symbols)
         now = time.time()
         self.quotes.update(quotes)
+        for sym in quotes:
+            self.quote_seen[sym] = now
+        for sym in [s for s in self.quotes if now - self.quote_seen.get(s, now) > STALE_QUOTE]:
+            del self.quotes[sym]  # e.g. indices only Yahoo has, while Yahoo is down
         self.quotes_at = now
         for sym, q in quotes.items():
             if market_of(sym, q.quote_type) == CRYPTO:
@@ -295,17 +301,23 @@ class MarketBot(discord.Client):
 
     async def refresh_boards(self) -> None:
         for cid, cfg in self.channels.all():
-            if cfg.kind == STOCKS:
-                embed = E.stocks_board(self.quotes, INDICES, FUTURES, MACRO, cfg.symbols(),
-                                       self.macro_cache.mood if self.macro_cache else None, self.quotes_at)
-            elif cfg.kind == CRYPTO:
-                embed = E.crypto_board(self.quotes, cfg.symbols(), self.crypto_global, self.fng, self.coins,
-                                       self.quotes_at)
-            elif cfg.kind == "nvidia":
-                embed = E.nvidia_board(self.quotes.get(NVIDIA), self.spotlight, (self.massive_used(), 5))
-            else:
-                continue  # the trends board has its own schedule (job_trends)
-            await self.show_board(cid, embed)
+            try:
+                await self._refresh_board(cid, cfg)
+            except Exception:  # one board failing mustn't stop the others, or the alerts after them
+                log.exception("Board for channel %s failed", cid)
+
+    async def _refresh_board(self, cid: int, cfg) -> None:
+        if cfg.kind == STOCKS:
+            embed = E.stocks_board(self.quotes, INDICES, FUTURES, MACRO, cfg.symbols(),
+                                   self.macro_cache.mood if self.macro_cache else None, self.quotes_at)
+        elif cfg.kind == CRYPTO:
+            embed = E.crypto_board(self.quotes, cfg.symbols(), self.crypto_global, self.fng, self.coins,
+                                   self.quotes_at)
+        elif cfg.kind == "nvidia":
+            embed = E.nvidia_board(self.quotes.get(NVIDIA), self.spotlight, (self.massive_used(), 5))
+        else:
+            return  # the trends board has its own schedule (job_trends)
+        await self.show_board(cid, embed)
 
     def massive_used(self) -> int:
         return self.massive.limiter.used() if self.massive else 0
@@ -386,7 +398,8 @@ class MarketBot(discord.Client):
         signed = line if q.change_pct > 0 else -line
         if line and (abs(signed) > abs(before) or (signed > 0) != (before > 0)):
             self.state.set("moves", key, signed)
-            window = "today" if market == STOCKS else "since midnight UTC"
+            window = ("today" if market == STOCKS else
+                      "in 24 hours" if q.extra.get("change_window") == "24h" else "since midnight UTC")
             await self.send(cid, Post([E.move_alert(q, line, window, q.change_pct, market)]))
 
     async def _fast_move(self, cid: int, sym: str, q: Quote) -> None:

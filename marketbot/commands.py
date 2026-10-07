@@ -511,11 +511,12 @@ def register_commands(bot) -> None:
             cape = stats.cape_view(lr, m.quotes["^GSPC"].price, now.year + (now.timetuple().tm_yday - 1) / 365.25)
         await interaction.followup.send(embed=E.macro_embed(m, cape))
 
-    @tree.command(name="trends", description="Biggest gainers and losers: today, this week, month, quarter, YTD or year")
+    @tree.command(name="trends", description="Biggest gainers and losers: today, this week or month, 3 months, YTD, a year")
     @app_commands.describe(period="Over what time", market="Stocks, sectors & ETFs, or crypto")
     @app_commands.choices(period=[app_commands.Choice(name=n, value=v) for v, n in (
-        ("1D", "Today"), ("1W", "This week (5 sessions)"), ("1M", "This month (21 sessions)"),
-        ("3M", "3 months"), ("YTD", "Year to date"), ("1Y", "1 year"))],
+        ("1D", "Today"), ("WTD", "This week (since last Friday's close)"), ("MTD", "This month"),
+        ("1W", "Past 5 sessions"), ("1M", "Past 21 sessions"), ("3M", "3 months"), ("YTD", "Year to date"),
+        ("1Y", "1 year"))],
         market=[app_commands.Choice(name=n, value=v) for v, n in (
             ("stocks", "Stocks"), ("sectors", "Sectors & ETFs"), ("crypto", "Crypto"))])
     async def trends(interaction: discord.Interaction, period: app_commands.Choice[str] | None = None,

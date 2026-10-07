@@ -7,13 +7,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import time
 
 from .backup import Coinbase, Nasdaq
 from .directory import Directory
 from .http import Http, HttpError
-from .universe import CRYPTO, market_of
+from .universe import CRYPTO, coin_base, market_of
 from .yahoo import Bars, Quote, YahooClient, YahooError
 
 log = logging.getLogger(__name__)
@@ -38,8 +37,6 @@ class DataUnavailable(YahooError):
         return bool(self.errors) and all(getattr(e, "status", None) == 404 for e in self.errors)
 
 
-def coin_ticker(symbol: str) -> str:
-    return re.sub(r"\d+$", "", symbol[:-4]) if symbol.endswith("-USD") else symbol
 
 
 class MarketData:
@@ -75,6 +72,13 @@ class MarketData:
             return None
         return f"Yahoo Finance: {yahoo.last_error}"
 
+    def _canonical_coin(self, symbol: str) -> bool:
+        """Whether the backups' ticker for this coin means this coin. They know a coin only by its ticker (Coinbase's
+        SUI-USD, CoinGecko's "sui"), so a smaller coin sharing a ticker (Yahoo's HYPE-USD vs Hyperliquid's
+        HYPE32196-USD) must not borrow the bigger one's prices."""
+        biggest = self.directory.coin(coin_base(symbol))
+        return biggest is None or biggest.symbol == symbol
+
     def _is_crypto(self, symbol: str) -> bool:
         listing = self.directory.get(symbol)
         return (listing.market == CRYPTO) if listing else market_of(symbol) == CRYPTO
@@ -97,8 +101,9 @@ class MarketData:
 
     async def _backup_quotes(self, symbols: list[str]) -> dict[str, Quote]:
         out: dict[str, Quote] = {}
-        coins = [s for s in symbols if self._is_crypto(s)]
-        stocks = [s for s in symbols if s not in coins and self.nasdaq.supports(s)]
+        crypto = [s for s in symbols if self._is_crypto(s)]
+        coins = [s for s in crypto if self._canonical_coin(s)]
+        stocks = [s for s in symbols if s not in crypto and self.nasdaq.supports(s)]
         jobs = []
         if stocks:
             jobs.append(self.nasdaq.quotes(stocks))
@@ -120,13 +125,13 @@ class MarketData:
             for c in top:  # largest first, so a ticker means the biggest coin using it
                 by_ticker.setdefault(c.symbol.upper(), c)
             for s in left:
-                c = by_ticker.get(coin_ticker(s))
+                c = by_ticker.get(coin_base(s))
                 if c and c.price:
                     pct = c.change_24h
                     out[s] = Quote(symbol=s, name=c.name, price=c.price,
                                    prev_close=c.price / (1 + pct / 100) if pct not in (None, -100) else None,
-                                   change_pct=pct, volume=c.volume, time=time.time(), quote_type="CRYPTOCURRENCY",
-                                   source="CoinGecko", extra={"change_window": "24h"})
+                                   change_pct=pct, time=time.time(), quote_type="CRYPTOCURRENCY", source="CoinGecko",
+                                   extra={"change_window": "24h", "volume24h": c.volume})
         for s, q in out.items():
             listing = self.directory.get(s)
             if listing:
@@ -137,7 +142,7 @@ class MarketData:
 
     def _backups(self, symbol: str):
         if self._is_crypto(symbol):
-            return [self.coinbase] if self.coinbase.supports(symbol) else []
+            return [self.coinbase] if self.coinbase.supports(symbol) and self._canonical_coin(symbol) else []
         return [self.nasdaq] if self.nasdaq.supports(symbol) else []
 
     async def daily(self, symbol: str, start: int | None = None) -> Bars:
@@ -165,9 +170,11 @@ class MarketData:
                 return await self.yahoo.intraday(symbol, range_, interval, prepost)
             except YahooError as exc:
                 errors.append(exc)
+        else:
+            errors.append(YahooError("Yahoo is resting after repeated failures"))
         days = INTRADAY_DAYS.get(range_, 1)
         try:
-            if self._is_crypto(symbol) and self.coinbase.supports(symbol):
+            if self._is_crypto(symbol) and self.coinbase.supports(symbol) and self._canonical_coin(symbol):
                 return await self.coinbase.intraday(symbol, days, 300 if days <= 1 else 900)
             if self.nasdaq.supports(symbol):
                 bars, _ = await self.nasdaq.intraday(symbol)  # today only

@@ -14,7 +14,7 @@ import numpy as np
 
 from .hours import NEW_YORK
 from .http import Http, HttpError
-from .universe import CRYPTO, market_of
+from .universe import CRYPTO, coin_base, market_of
 from .yahoo import Bars, Quote
 
 log = logging.getLogger(__name__)
@@ -58,9 +58,9 @@ def nasdaq_symbol(symbol: str) -> str | None:
 
 
 def from_nasdaq_symbol(symbol: str) -> str:
-    inverse = {v: k for k, v in NASDAQ_INDICES.items()}
-    s = symbol.strip().upper()
-    return inverse.get(s) or s.replace(".", "-").replace("/", "-")
+    """Nasdaq's stock or ETF symbol -> Yahoo's (BRK.B or BRK/B -> BRK-B). Not for indices: the stock COMP is not the
+    Nasdaq Composite."""
+    return symbol.strip().upper().replace(".", "-").replace("/", "-")
 
 
 def _ny_time(text: str | None) -> float:
@@ -85,11 +85,16 @@ def _day_t(text: str) -> int | None:
     return int(d.timestamp()) + OPEN_UTC
 
 
+_SHARE_WORDS = re.compile(r"\s+-?\s*\b(Common Stock|Common Shares|Ordinary Shares?|Class [A-Z] Ordinary Shares?|"
+                          r"American Depositary Shares?|ADS|Depositary Shares?)\b.*$", re.I)
+
+
 def clean_name(name: str) -> str:
-    """'Apple Inc. Common Stock' -> 'Apple Inc.'; 'Alphabet Inc. Class A Common Stock' -> 'Alphabet Inc. Class A'."""
-    name = re.sub(r"\s*-?\s*(Common Stock|Common Shares|Ordinary Shares?|Class [A-Z] Ordinary Shares?|"
-                  r"American Depositary Shares?|ADS|Depositary Shares?)\b.*$", "", name.strip(), flags=re.I)
-    return re.sub(r"\s+", " ", name).strip(" -,") or name
+    """'Apple Inc. Common Stock' -> 'Apple Inc.'; 'Alphabet Inc. Class A Common Stock' -> 'Alphabet Inc. Class A'.
+    Only a trailing description is cut (Teads and ADS-TEC keep their names)."""
+    original = re.sub(r"\s+", " ", (name or "").strip())
+    cleaned = _SHARE_WORDS.sub("", original).strip(" -,")
+    return cleaned or original
 
 
 def bars_from_rows(symbol: str, rows: list[tuple[int, float, float, float, float, float]], source: str,
@@ -136,29 +141,38 @@ class Nasdaq:
         wanted = [s for s in dict.fromkeys(symbols) if self.supports(s)]
         out: dict[str, Quote] = {}
         first = {s: self.asset_class(s) for s in wanted}
-        await self._quote_batches(first, out)
+        failed = await self._quote_batches(first, out)
         # Nasdaq needs the right asset class: try the other one for whatever it didn't know.
-        retry = {s: ("stocks" if c == "etf" else "etf") for s, c in first.items() if s not in out and c != "index"}
+        retry = {s: ("stocks" if c == "etf" else "etf") for s, c in first.items()
+                 if s not in out and s not in failed and c != "index"}
         if retry:
-            await self._quote_batches(retry, out)
+            failed |= await self._quote_batches(retry, out)
         now = time.monotonic()
         for s in wanted:
-            if s not in out:
+            if s not in out and s not in failed:
                 self._unknown[s] = now
         return out
 
-    async def _quote_batches(self, classes: dict[str, str], out: dict[str, Quote]) -> None:
+    async def _quote_batches(self, classes: dict[str, str], out: dict[str, Quote]) -> set[str]:
+        """Fills `out`; returns the symbols whose batch failed (nothing was learned about them)."""
         items = list(classes.items())
+        failed: set[str] = set()
         for i in range(0, len(items), NASDAQ_BATCH):
             batch = items[i:i + NASDAQ_BATCH]
             params = [("symbol", f"{nasdaq_symbol(s).lower()}|{c}") for s, c in batch]
-            data = await self._get("/quote/watchlist", params)
+            try:
+                data = await self._get("/quote/watchlist", params)
+            except HttpError as exc:
+                log.info("Nasdaq quotes failed for %d symbols: %s", len(batch), exc)
+                failed.update(s for s, _ in batch)
+                continue
             by_symbol = {nasdaq_symbol(s): s for s, _ in batch}
             for row in data.get("data") or []:
                 sym = by_symbol.get(str(row.get("symbol", "")).upper())
                 q = self.quote_from_row(row, sym) if sym else None
                 if q:
                     out[sym] = q
+        return failed
 
     @staticmethod
     def quote_from_row(row: dict, symbol: str) -> Quote | None:
@@ -177,6 +191,17 @@ class Nasdaq:
             # Like Yahoo: before the open the price is yesterday's close and the early trades are "pre-market".
             ext_price, ext_pct = price, pct
             price, pct, at = prev, 0.0, 0.0
+        elif state == "POST":
+            # After hours Nasdaq's last sale is the after-hours trade and its change is from today's close: the
+            # regular close is the last sale minus that change. Report it like Yahoo (close + after-hours price).
+            change = number(row.get("netChange"))
+            close = price - change if change is not None else None
+            if close and close > 0:
+                ext_price, ext_pct = price, (price / close - 1) * 100
+                price = close
+                pct = (close / prev - 1) * 100 if prev and prev > 0 else None
+                session = datetime.fromtimestamp(at or time.time(), NEW_YORK)
+                at = session.replace(hour=16, minute=0, second=0, microsecond=0).timestamp()
         return Quote(symbol=symbol, name=clean_name(str(row.get("companyName") or symbol)), price=price,
                      prev_close=prev, change_pct=pct, volume=number(row.get("volume")), time=at, market_state=state,
                      quote_type={"ETF": "ETF", "INDEX": "INDEX"}.get(kind, "EQUITY"), ext_price=ext_price,
@@ -236,8 +261,8 @@ def coinbase_product(symbol: str) -> str | None:
     """Yahoo's BTC-USD or SUI20947-USD -> Coinbase's BTC-USD or SUI-USD."""
     if not symbol.endswith("-USD") or symbol.startswith("^"):
         return None
-    base = re.sub(r"\d+$", "", symbol[:-4])
-    return f"{base}-USD" if base else None
+    base = coin_base(symbol)
+    return f"{base}-USD" if base and not base.isdigit() else None  # an all-digit base is an id, not a ticker
 
 
 class Coinbase:
@@ -262,17 +287,25 @@ class Coinbase:
         return resp.json()
 
     async def quote(self, symbol: str) -> Quote | None:
+        """Today's UTC-day candle as a quote, like Yahoo's crypto quotes: the change is since midnight UTC, and the
+        day's high, low and volume are the UTC day's."""
         p = coinbase_product(symbol)
         if not p:
             return None
-        d = await self._get(f"/products/{p}/stats", product=p) or {}
-        last, open_ = number(d.get("last")), number(d.get("open"))
-        if not last:
+        now = int(time.time())
+        midnight = now - now % DAY
+        rows = await self._get(f"/products/{p}/candles", {
+            "granularity": str(DAY), "start": datetime.fromtimestamp(midnight, timezone.utc).isoformat(),
+            "end": datetime.fromtimestamp(now, timezone.utc).isoformat()}, product=p) or []
+        today = next((r for r in rows if isinstance(r, list) and len(r) >= 6 and int(r[0]) == midnight), None)
+        if today is None:
+            return None  # just after midnight, before the day's first trade
+        low, high, open_, close, volume = (number(x) for x in today[1:6])
+        if not close or close <= 0:
             return None
-        return Quote(symbol=symbol, name=coinbase_product(symbol)[:-4], price=last, prev_close=open_,
-                     change_pct=(last / open_ - 1) * 100 if open_ else None, day_high=number(d.get("high")),
-                     day_low=number(d.get("low")), volume=(number(d.get("volume")) or 0) * last, time=time.time(),
-                     quote_type="CRYPTOCURRENCY", source="Coinbase", extra={"change_window": "24h"})
+        return Quote(symbol=symbol, name=p[:-4], price=close, prev_close=open_,
+                     change_pct=(close / open_ - 1) * 100 if open_ else None, day_high=high, day_low=low,
+                     volume=(volume or 0) * close, time=float(now), quote_type="CRYPTOCURRENCY", source="Coinbase")
 
     async def quotes(self, symbols: list[str]) -> dict[str, Quote]:
         wanted = [s for s in dict.fromkeys(symbols) if self.supports(s)]

@@ -288,7 +288,9 @@ async def trends_recap(bot, period: str) -> list[Post]:
     when = datetime.now(NEW_YORK)
     title = {"1D": f"📅 Daily trends · {when:%a %b %d}", "1W": f"🗓️ Weekly trends · week of {when:%b %d}",
              "1M": f"📆 Monthly trends · {when:%B %Y}"}.get(period, "Trends")
-    embeds = [E.trends_embed(snap, period, "stocks", sp500, ndx), E.trends_embed(snap, period, "sectors", sp500, ndx)]
+    calendar = {"1W": "WTD", "1M": "MTD"}.get(period, period)  # the recaps cover the calendar week and month
+    embeds = [E.trends_embed(snap, calendar, "stocks", sp500, ndx),
+              E.trends_embed(snap, calendar, "sectors", sp500, ndx)]
     embeds[0].title = f"{title} · {embeds[0].title}"
     if period in ("1W", "1M"):
         embeds.append(E.trends_embed(snap, period, "crypto", sp500, ndx))

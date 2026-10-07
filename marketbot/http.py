@@ -39,6 +39,10 @@ class HttpError(Exception):
         self.status = status
 
 
+class _Resting(Exception):
+    pass
+
+
 @dataclass
 class Response:
     status: int
@@ -191,7 +195,12 @@ class Http:
         for attempt in range(tries):
             try:
                 async with gate:
+                    # Re-checked here: the source may have been rested while this request queued or slept.
+                    if h.resting() and not force:
+                        raise _Resting()
                     resp = await self.backend.get(url, dict(headers or {}), timeout, proxy)
+            except _Resting:
+                raise HttpError(source, f"{source} is resting after {h.streak} failures ({h.last_error})", h.status)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # network errors, timeouts, TLS problems

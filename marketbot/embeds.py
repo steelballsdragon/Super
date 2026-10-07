@@ -715,7 +715,7 @@ def trends_board(snap, sp500: list[str], ndx: list[str], market_state: str = "")
         e.add_field(name=f"🔊 Most traded {when}", value=_mover_rows(snap.most_active, 6, volume=True), inline=False)
     if any("1D" in snap.changes.get(s, {}) for s in SECTORS):
         e.add_field(name="🏭 Sectors today", value=_sector_rows(snap, "1D"), inline=False)
-    week = snap.movers("1W", list(dict.fromkeys(sp500 + ndx)))
+    week = snap.movers("WTD", list(dict.fromkeys(sp500 + ndx)))
     if week:
         e.add_field(name="📅 This week's leaders (S&P 500 + Nasdaq-100)",
                     value=_mover_rows(week, 5) + _mover_rows(week[::-1], 5), inline=False)
@@ -735,16 +735,24 @@ TREND_MARKETS = {"stocks": "📈 Stocks", "sectors": "🏭 Sectors & ETFs", "cry
 
 
 def trends_embed(snap, period: str, market: str, sp500: list[str], ndx: list[str], count: int = 10) -> discord.Embed:
-    """Gainers and losers for one market over one period (1D, 1W, 1M, 3M, YTD, 1Y)."""
-    from .trends import MAJOR_ETFS, PERIODS
+    """Gainers and losers for one market over one period (1D, WTD, MTD, 1W, 1M, 3M, YTD, 1Y). Crypto uses
+    CoinGecko's rolling 24-hour, 7-day, 30-day and 1-year changes (this week and month map to 7 and 30 days)."""
+    from .trends import CRYPTO_ALIASES, CRYPTO_LABELS, CRYPTO_PERIODS, MAJOR_ETFS, PERIODS
     label = PERIODS.get(period, period)
+    if market == "crypto":
+        period = CRYPTO_ALIASES.get(period, period)
+        label = CRYPTO_LABELS.get(period, label)
     e = discord.Embed(title=f"{TREND_MARKETS.get(market, market)} · biggest moves {label}", color=BLUE)
     note = ""
     if market == "crypto":
         movers = snap.coin_movers(period)
         note = "Top 250 coins by market cap, without stablecoins and wrapped coins · CoinGecko"
         if not movers:
-            e.description = "CoinGecko gives 24-hour, 7-day, 30-day and 1-year changes: pick one of those."
+            e.description = ("CoinGecko has 24-hour, 7-day, 30-day and 1-year changes for coins: pick one of those."
+                             if period not in CRYPTO_PERIODS else
+                             "No crypto numbers right now: CoinGecko isn't answering. They come back by themselves.")
+            e.set_footer(text=note)
+            return fit_embed(e)
     elif market == "sectors":
         rows = [(SECTORS.get(s, s)[:12], snap.prices.get(s), snap.changes[s][period], "")
                 for s in list(SECTORS) + MAJOR_ETFS if period in snap.changes.get(s, {})]
@@ -802,8 +810,14 @@ def rsi_label(v: float) -> str:
     return "overbought" if v >= 70 else "oversold" if v <= 30 else "strong" if v >= 60 else "weak" if v <= 40 else "neutral"
 
 
+def _n(v) -> float | None:
+    """A number from saved or sent data, else None."""
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and np.isfinite(v) else None
+
+
 def nvidia_board(q: Quote | None, spot, budget: tuple[int, int] = (0, 5)) -> discord.Embed:
-    """The NVIDIA board: the live price (Yahoo) with everything Massive has on the stock."""
+    """The NVIDIA board: the live price (Yahoo) with everything Massive has on the stock. Massive's data shows only
+    while Massive is usable (a key it accepts), so nothing stale lingers after a key is removed or rejected."""
     chg = q.change_pct if q else None
     e = discord.Embed(title="🟩 NVIDIA (NVDA) · Live", color=GREEN if (chg or 0) >= 0 else RED)
     desc = []
@@ -816,67 +830,78 @@ def nvidia_board(q: Quote | None, spot, budget: tuple[int, int] = (0, 5)) -> dis
                         + (f" · volume {big(q.volume)}" if q.volume else ""))
     else:
         desc.append("Live price unavailable right now.")
-    snap = spot.snapshot or {}
-    if snap.get("lastTrade", {}).get("p"):
-        desc.append(f"Massive (15-min delayed): {money(snap['lastTrade']['p'])} "
-                    f"{pct(snap.get('todaysChangePerc'), already_pct=True)}")
+    show = spot.enabled
+    if show and spot.snapshot_fresh():
+        last = spot.snapshot.get("lastTrade")
+        price = _n(last.get("p")) if isinstance(last, dict) else None
+        if price:
+            desc.append(f"Massive (15-min delayed): {money(price)} "
+                        f"{pct(_n(spot.snapshot.get('todaysChangePerc')), already_pct=True)}")
     e.description = "\n".join(desc)
-    if spot.prev:
+    if show and spot.prev:
         b = spot.prev
         avg = spot.avg_volume()
-        vol = f"Volume {big(b.get('v'))}" + (f" ({b['v'] / avg:.1f}× its 50-day average)" if avg and b.get("v") else "")
-        vwap = f" · VWAP {fmt_price(b['vw'])}" if b.get("vw") else ""
-        when = datetime.fromtimestamp(b["t"] / 1000, timezone.utc).strftime("%a %b %d") if b.get("t") else ""
+        v = _n(b.get("v"))
+        vol = f"Volume {big(v)}" + (f" ({v / avg:.1f}× its 50-day average)" if avg and v else "")
+        vwap = f" · VWAP {fmt_price(b['vw'])}" if _n(b.get("vw")) else ""
+        when = datetime.fromtimestamp(b["t"] / 1000, timezone.utc).strftime("%a %b %d") if _n(b.get("t")) else ""
         e.add_field(name=f"Last session ({when})", value=f"{_bar_line(b)}{vwap}\n{vol}", inline=False)
     tech = []
-    price = q.price if q else (spot.prev or {}).get("c")
+    price = q.price if q else _n((spot.prev or {}).get("c"))
+    indicators = spot.indicators if show else {}
     for key, label in (("sma50", "50-day average"), ("sma200", "200-day average"), ("ema20", "20-day EMA")):
-        v = (spot.indicators.get(key) or {}).get("value")
+        v = _n((indicators.get(key) or {}).get("value"))
         if v and price:
             tech.append(f"{label} {fmt_price(v)} ({'above' if price >= v else 'below'}, {pct(price / v - 1, 1)})")
-    rsi = (spot.indicators.get("rsi14") or {}).get("value")
+    rsi = _n((indicators.get("rsi14") or {}).get("value"))
     if rsi is not None:
         tech.append(f"RSI {rsi:.0f} ({rsi_label(rsi)})")
-    macd = spot.indicators.get("macd") or {}
-    if macd.get("value") is not None and macd.get("signal") is not None:
+    macd = indicators.get("macd") or {}
+    if _n(macd.get("value")) is not None and _n(macd.get("signal")) is not None:
         side = "above" if macd["value"] >= macd["signal"] else "below"
         tech.append(f"MACD {macd['value']:.2f} {side} its signal {macd['signal']:.2f} "
                     f"({'bullish' if side == 'above' else 'bearish'})")
     if tech:
         e.add_field(name="Technicals (at the last close)", value="\n".join(tech), inline=False)
-    rng = spot.range_52w()
     info = []
+    rng = spot.range_52w() if show else None
     if rng and price:
         lo, hi = rng
         pos = (price - lo) / (hi - lo) if hi > lo else 0.5
         info.append(f"52 weeks {fmt_price(lo)} – {fmt_price(hi)} ({pos:.0%} of the way up, {pct(price / hi - 1, 1)} "
                     "from the high)")
-    d = spot.details or {}
-    if d.get("market_cap"):
-        info.append(f"Market cap ${big(d['market_cap'])}"
-                    + (f" · {d['total_employees']:,} employees" if d.get("total_employees") else ""))
-    if spot.dividends:
+    d = (spot.details or {}) if show else {}
+    cap, staff = _n(d.get("market_cap")), _n(d.get("total_employees"))
+    if cap:
+        info.append(f"Market cap ${big(cap)}" + (f" · {staff:,.0f} employees" if staff else ""))
+    if show and spot.dividends:
         dv = spot.dividends[0]
-        info.append(f"Dividend ${dv.get('cash_amount', 0):g} (ex-date {dv.get('ex_dividend_date', '?')}, paid "
-                    f"{dv.get('pay_date', '?')})")
-    if spot.splits:
+        info.append(f"Dividend ${dv['cash_amount']:g} (ex-date {dv.get('ex_dividend_date') or '?'}, paid "
+                    f"{dv.get('pay_date') or '?'})")
+    if show and spot.splits:
         sp = spot.splits[0]
-        info.append(f"Last split {sp.get('split_to')}-for-{sp.get('split_from')} on {sp.get('execution_date')}")
-    if spot.related:
+        info.append(f"Last split {sp['split_to']:g}-for-{sp['split_from']:g} on {sp.get('execution_date') or '?'}")
+    if show and spot.related:
         info.append("Related: " + ", ".join(spot.related[:8]))
     if info:
         e.add_field(name="The company", value="\n".join(info), inline=False)
-    pos_, neu, neg = spot.news_mood()
-    lines = []
-    for n in spot.news[:4]:
-        mood, _ = spot.sentiment(n)
-        icon = SENTIMENT.get(mood, ("📰", BLUE))[0]
-        lines.append(f"{icon} [{clip(n.get('title', ''), 95)}]({n.get('article_url', '')})")
-    if lines:
-        e.add_field(name=f"News · last 48h: {pos_} positive, {neu} neutral, {neg} negative", value="\n".join(lines),
-                    inline=False)
+    if show:
+        pos_, neu, neg = spot.news_mood()
+        lines = []
+        for n in spot.news[:4]:
+            mood, _ = spot.sentiment(n)
+            icon = SENTIMENT.get(mood, ("📰", BLUE))[0]
+            url = n.get("article_url") or ""
+            title = clip(n.get("title", ""), 95)
+            lines.append(f"{icon} [{title}]({url})" if url.startswith("http") else f"{icon} {title}")
+        if lines:
+            e.add_field(name=f"News · last 48h: {pos_} positive, {neu} neutral, {neg} negative",
+                        value="\n".join(lines), inline=False)
     used, limit = budget
-    if not spot.enabled:
+    massive = getattr(spot, "massive", None)
+    if massive is not None and massive.key and massive.key_rejected:
+        foot = "Live price: Yahoo Finance · Massive rejected the key (see /status)"
+    elif not show:
         foot = "Live price: Yahoo Finance · add MASSIVE_API_KEY for Massive's data"
     else:
         foot = f"Live price: Yahoo Finance · Massive ({spot.plan()}): {used}/{limit} calls in the last minute"
@@ -886,20 +911,24 @@ def nvidia_board(q: Quote | None, spot, budget: tuple[int, int] = (0, 5)) -> dis
 
 def nvidia_news(item: dict, mood: str, reasoning: str) -> discord.Embed:
     icon, color = SENTIMENT.get(mood, ("📰", BLUE))
-    e = discord.Embed(title=clip(f"{icon} {item.get('title', 'NVIDIA news')}", 256), url=item.get("article_url"),
-                      description=clip(item.get("description") or "", 600), color=color)
+    url = item.get("article_url") if isinstance(item.get("article_url"), str) else ""
+    description = item.get("description") if isinstance(item.get("description"), str) else ""
+    e = discord.Embed(title=clip(f"{icon} {item.get('title', 'NVIDIA news')}", 256),
+                      url=url if url.startswith("http") else None, description=clip(description, 600), color=color)
     if mood:
         e.add_field(name=f"For NVDA: {mood}", value=clip(reasoning or "—", 400), inline=False)
-    others = [t for t in item.get("tickers") or [] if t != "NVDA"][:8]
+    tickers = item.get("tickers") if isinstance(item.get("tickers"), list) else []
+    others = [t for t in tickers if isinstance(t, str) and t != "NVDA"][:8]
     if others:
         e.add_field(name="Also mentions", value=", ".join(others), inline=False)
-    pub = (item.get("publisher") or {}).get("name") or "Massive news"
+    publisher = item.get("publisher") if isinstance(item.get("publisher"), dict) else {}
+    pub = publisher.get("name") if isinstance(publisher.get("name"), str) else "Massive news"
     e.set_footer(text=f"{pub} · via Massive")
-    if item.get("published_utc"):
+    if isinstance(item.get("published_utc"), str) and item["published_utc"]:
         try:
             e.timestamp = datetime.fromisoformat(item["published_utc"].replace("Z", "+00:00"))
         except ValueError:
             pass
-    if item.get("image_url"):
+    if isinstance(item.get("image_url"), str) and item["image_url"].startswith("http"):
         e.set_thumbnail(url=item["image_url"])
     return fit_embed(e)

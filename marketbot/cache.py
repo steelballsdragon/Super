@@ -134,10 +134,11 @@ class HistoryCache:
                 return saved
             raise
         full_at = now
-        if have and source_of(bars) != PRIMARY:
-            # A backup's history is shorter and unadjusted: keep the long saved one in front of it, and try for a
+        if source_of(bars) != PRIMARY:
+            # A backup's history is shorter and unadjusted: keep any long saved one in front of it, and try for a
             # full Yahoo download again next time.
-            bars = splice(saved, bars)
+            if have:
+                bars = splice(saved, bars)
             full_at = info.get("full_at", 0)
         if len(bars):
             self._write(symbol, bars, {"fetched_at": now, "full_at": full_at})

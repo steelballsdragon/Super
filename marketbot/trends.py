@@ -26,10 +26,14 @@ from .universe import SECTORS
 
 log = logging.getLogger(__name__)
 
-PERIODS = {"1D": "today", "1W": "this week", "1M": "this month", "3M": "3 months", "YTD": "year to date",
-           "1Y": "1 year"}
+PERIODS = {"1D": "today", "WTD": "this week", "MTD": "this month", "1W": "over 5 sessions",
+           "1M": "over 21 sessions", "3M": "over 3 months", "YTD": "year to date", "1Y": "over a year"}
 BARS_BACK = {"1D": 1, "1W": 5, "1M": 21, "3M": 63, "1Y": 252}
+# CoinGecko has rolling 24-hour, 7-day, 30-day and 1-year changes; calendar periods use the nearest.
 CRYPTO_PERIODS = {"1D": "change_24h", "1W": "change_7d", "1M": "change_30d", "1Y": "change_1y"}
+CRYPTO_ALIASES = {"WTD": "1W", "MTD": "1M"}
+CRYPTO_LABELS = {"1D": "in 24 hours", "1W": "over 7 days", "1M": "over 30 days", "1Y": "over a year"}
+BAR_HOUR = 14 * 3600 + 30 * 60  # a day number's bar time (UTC): the New York morning, so the date is right
 MAJOR_ETFS = ["SPY", "QQQ", "DIA", "IWM", "VTI", "TLT", "IEF", "HYG", "LQD", "GLD", "SLV", "USO", "UNG", "EEM",
               "EFA", "FXI", "EWJ", "ARKK", "SOXX", "XBI", "KRE", "IBB", "ITB", "XHB", "IBIT", "ETHA", "BITO", "VNQ",
               "TAN", "URA", "JETS"]
@@ -40,7 +44,7 @@ KEEP_DAYS = 300
 DAY = 86400
 STABLES = {"USDT", "USDC", "DAI", "USDE", "FDUSD", "PYUSD", "USDS", "TUSD", "USD1", "USDD", "BUIDL", "USDTB", "RLUSD",
            "USD0", "USDF", "GHO", "FRAX", "LUSD", "CRVUSD", "SUSDE", "USDX", "USDG", "EURC", "XAUT", "PAXG"}
-DERIVED = re.compile(r"tokeni[sz]ed|xstock|bstock|wrapped|bridged|staked|\bondo\b|restaked|liquid staking", re.I)
+DERIVED = re.compile(r"tokeni[sz]ed|xstock|bstock|wrapped|bridged|staked|restaked|liquid staking", re.I)
 
 
 @dataclass
@@ -82,7 +86,7 @@ class Snapshot:
         return sum(1 for m in moves if m > 0), sum(1 for m in moves if m < 0)
 
     def coin_movers(self, period: str) -> list[Mover]:
-        attr = CRYPTO_PERIODS.get(period)
+        attr = CRYPTO_PERIODS.get(CRYPTO_ALIASES.get(period, period))
         if not attr:
             return []
         out = [Mover(f"{c.symbol}-USD", c.name, c.price, getattr(c, attr), c.volume, c.cap)
@@ -122,11 +126,15 @@ def period_changes(t: np.ndarray, close: np.ndarray, now: float | None = None) -
             start = 0  # a newer listing: since its first close
         if start >= 0 and clean_since(start):
             out[period] = float((last / close[start] - 1) * 100)
-    year = datetime.fromtimestamp(now or t[-1], NEW_YORK).year
-    begin = datetime(year, 1, 1, tzinfo=NEW_YORK).timestamp()
-    before = np.nonzero(t < begin)[0]
-    if len(before) and clean_since(int(before[-1])):
-        out["YTD"] = float((last / close[before[-1]] - 1) * 100)
+    # Calendar periods: from the last close before this week, month or year began (New York time).
+    today = datetime.fromtimestamp(now or t[-1], NEW_YORK).date()
+    starts = {"WTD": today - timedelta(days=today.weekday()), "MTD": today.replace(day=1),
+              "YTD": today.replace(month=1, day=1)}
+    for period, first in starts.items():
+        begin = datetime(first.year, first.month, first.day, tzinfo=NEW_YORK).timestamp()
+        before = np.nonzero(t < begin)[0]
+        if len(before) and clean_since(int(before[-1])):
+            out[period] = float((last / close[before[-1]] - 1) * 100)
     return out
 
 
@@ -147,12 +155,13 @@ class ClosesStore:
             for day in sorted(series)[:-KEEP_DAYS]:
                 del series[day]
 
-    def series(self, symbol: str, live: float | None = None, live_t: float | None = None) -> tuple[np.ndarray, np.ndarray]:
-        s = dict(self.days.get(symbol, {}))
-        if live and live_t:
-            s[int(live_t // DAY)] = live
+    def series(self, symbol: str, extra: dict[int, float] | None = None, before: int | None = None
+               ) -> tuple[np.ndarray, np.ndarray]:
+        """Saved closes (only days before `before`, if given) plus `extra` {day number: close}, oldest first."""
+        s = {d: c for d, c in self.days.get(symbol, {}).items() if before is None or d < before}
+        s.update(extra or {})
         days = sorted(s)
-        return np.array(days, dtype=np.int64) * DAY, np.array([s[d] for d in days], dtype=float)
+        return np.array(days, dtype=np.int64) * DAY + BAR_HOUR, np.array([s[d] for d in days], dtype=float)
 
     def save(self) -> None:
         if not self.path:
@@ -181,25 +190,33 @@ class ClosesStore:
         try:
             with np.load(self.path, allow_pickle=False) as z:
                 symbols, days, grid = z["symbols"], z["days"], z["grid"]
+            if grid.ndim != 2 or grid.shape != (len(symbols), len(days)):
+                raise ValueError(f"shapes don't match: {grid.shape} vs {len(symbols)} x {len(days)}")
+            loaded = {}
+            for row, s in enumerate(symbols.tolist()):
+                vals = grid[row]
+                ok = np.isfinite(vals) & (vals > 0)
+                loaded[str(s)] = {int(d): float(c) for d, c in zip(days[ok].tolist(), vals[ok].tolist())}
         except FileNotFoundError:
             return
         except Exception:
-            log.warning("Saved trend closes are unreadable; starting over")
+            log.warning("Saved trend closes are unreadable; starting over", exc_info=True)
             return
-        for row, s in enumerate(symbols.tolist()):
-            vals = grid[row]
-            ok = np.isfinite(vals)
-            self.days[str(s)] = {int(d): float(c) for d, c in zip(days[ok].tolist(), vals[ok].tolist())}
+        self.days = loaded
 
 
 def movers_from_screener(rows: list[dict]) -> list[Mover]:
+    """Screener quotes as movers; rows with missing or unreadable numbers are skipped."""
+    from .backup import number
     out = []
-    for q in rows:
-        sym, price, chg = q.get("symbol"), q.get("regularMarketPrice"), q.get("regularMarketChangePercent")
-        if not sym or price is None or chg is None:
+    for q in rows or []:
+        if not isinstance(q, dict):
             continue
-        out.append(Mover(sym, q.get("shortName") or q.get("longName") or sym, float(price), float(chg),
-                         q.get("regularMarketVolume"), q.get("marketCap")))
+        sym, price, chg = q.get("symbol"), number(q.get("regularMarketPrice")), number(q.get("regularMarketChangePercent"))
+        if not sym or not isinstance(sym, str) or price is None or chg is None:
+            continue
+        out.append(Mover(sym, str(q.get("shortName") or q.get("longName") or sym), price, chg,
+                         number(q.get("regularMarketVolume")), number(q.get("marketCap"))))
     return out
 
 
@@ -238,11 +255,11 @@ class TrendsDesk:
                           ("most_active", "most_actives")):
             try:
                 rows = await self.data.screener(scr, 25)
+                setattr(snap, attr, movers_from_screener(rows))
+                if rows and isinstance(rows[0], dict):
+                    snap.day_source = "Nasdaq (last close)" if rows[0].get("source") else "Yahoo Finance"
             except Exception as exc:
                 snap.errors.append(f"{scr}: {exc}"[:160])
-                continue
-            setattr(snap, attr, movers_from_screener(rows))
-            snap.day_source = "Nasdaq (last close)" if rows and rows[0].get("source") else "Yahoo Finance"
 
     async def _periods(self, snap: Snapshot) -> None:
         symbols = self.universe()
@@ -259,14 +276,12 @@ class TrendsDesk:
         for s in symbols:
             if s in got:
                 t, c = got[s]
+                ch = period_changes(t, c, now)
             elif s in live and live[s].price:
-                t, c = self.closes.series(s, live[s].price, live[s].time or now)
+                ch, c = self.backup_changes(s, live[s], now)
                 snap.names.setdefault(s, live[s].name)
             else:
                 continue
-            ch = period_changes(t, c, now)
-            if s not in got and "1D" not in ch and live[s].change_pct is not None:
-                ch["1D"] = float(live[s].change_pct)  # no saved close for yesterday: the quote's own change
             if ch:
                 snap.changes[s] = ch
                 snap.prices[s] = float(c[-1])
@@ -274,12 +289,37 @@ class TrendsDesk:
             if s not in snap.names:
                 item = self.directory.get(s) if self.directory else None
                 snap.names[s] = item.name if item else s
-        snap.periods_source = "Yahoo Finance" if len(got) >= len(live) else "saved closes + Nasdaq"
+        snap.periods_source = ("Yahoo Finance" if got and len(got) >= len(live) else
+                               "saved closes + Nasdaq" if live else "")
         if got:
             try:
                 self.closes.save()
             except OSError:
                 log.warning("Couldn't save the trend closes", exc_info=True)
+
+    def backup_changes(self, symbol: str, q, now: float) -> tuple[dict[str, float], np.ndarray]:
+        """Period changes from a backup quote and the saved closes. Today's change is the quote's own; the longer
+        periods only when the saved closes run up to the session before the quote's previous close (no gap)."""
+        from .hours import is_trading_day
+        session = datetime.fromtimestamp(q.time or now, NEW_YORK).date()
+        if (q.market_state or "").startswith("PRE") and not q.time:
+            session = _trading_day_before(session, is_trading_day)  # before the open: yesterday's close
+        elif not is_trading_day(session):
+            session = _trading_day_before(session + timedelta(days=1), is_trading_day)  # the last trading day
+        prev = _trading_day_before(session, is_trading_day)
+        day_no = lambda d: (d - EPOCH).days
+        extra = {day_no(session): q.price}
+        if q.prev_close and q.prev_close > 0:
+            extra[day_no(prev)] = q.prev_close
+        t, c = self.closes.series(symbol, extra, before=day_no(prev))
+        ch: dict[str, float] = {}
+        saved_days = [d for d in self.closes.days.get(symbol, {}) if d < day_no(prev)]
+        if q.prev_close and saved_days and max(saved_days) == day_no(_trading_day_before(prev, is_trading_day)):
+            ch = period_changes(t, c, now)
+        ch.pop("1D", None)
+        if q.change_pct is not None:
+            ch["1D"] = float(q.change_pct)
+        return ch, c
 
     async def _spark(self, symbols: list[str], snap: Snapshot) -> dict[str, tuple[np.ndarray, np.ndarray]]:
         """A year of daily closes per symbol from Yahoo, 20 symbols a call."""
@@ -310,6 +350,16 @@ class TrendsDesk:
             snap.coins = await self.sources.top_coins(250)
         except Exception as exc:
             snap.errors.append(f"CoinGecko: {exc}"[:160])
+
+
+EPOCH = datetime(1970, 1, 1).date()
+
+
+def _trading_day_before(day, is_trading_day):
+    d = day - timedelta(days=1)
+    while not is_trading_day(d):
+        d -= timedelta(days=1)
+    return d
 
 
 # ----- recaps: when they're due -----

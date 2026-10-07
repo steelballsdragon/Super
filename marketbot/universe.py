@@ -136,8 +136,18 @@ def title_of(symbol: str, name: str | None = None) -> str:
     return f"{short(symbol)} · {name}"
 
 
+_CMC_ID = re.compile(r"(?<=[A-Za-z])\d{4,}$")
+
+
+def coin_base(symbol: str) -> str:
+    """A coin's ticker from its Yahoo symbol: SUI20947-USD -> SUI (Yahoo adds a 4+ digit CoinMarketCap id when
+    tickers clash), while digits that belong to the ticker stay: API3-USD -> API3, C98-USD -> C98."""
+    base = symbol[:-4] if symbol.endswith("-USD") else symbol
+    return _CMC_ID.sub("", base)
+
+
 def short(symbol: str) -> str:
-    """Symbol as shown in tight tables: BTC-USD -> BTC, SUI20947-USD -> SUI."""
+    """Symbol as shown in tight tables: BTC-USD -> BTC, SUI20947-USD -> SUI, API3-USD -> API3."""
     if symbol.endswith("-USD"):
-        return re.sub(r"\d+$", "", symbol[:-4])
+        return coin_base(symbol)
     return symbol

@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .universe import ALIASES, COINS, CRYPTO, FUTURES, INDICES, MACRO, NAMES, SECTORS, STOCKS
+from .universe import ALIASES, COINS, CRYPTO, FUTURES, INDICES, MACRO, NAMES, SECTORS, STOCKS, coin_base
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ class Listing:
     def ticker(self) -> str:
         """What people type: BRK-B -> BRK-B, HYPE32196-USD -> HYPE, ^GSPC -> ^GSPC."""
         if self.market == CRYPTO and self.symbol.endswith("-USD"):
-            return re.sub(r"\d+$", "", self.symbol[:-4])
+            return coin_base(self.symbol)
         return self.symbol
 
 
@@ -136,10 +136,15 @@ class Directory:
             return self.coin(up)
         if up in self._by_symbol:
             return self._by_symbol[up]
+        stock = self._by_symbol.get(up.replace(".", "-").replace("/", "-"))
+        if stock:
+            return stock
+        if self.coin(up):  # a coin's own ticker first: TUSD is TrueUSD, not Threshold (T) priced in dollars
+            return self.coin(up)
         for suffix in ("-USD", "/USD", "USDT", "USD"):
             if up.endswith(suffix) and len(up) > len(suffix) and self.coin(up[:-len(suffix)]):
                 return self.coin(up[:-len(suffix)])
-        return self._by_symbol.get(up.replace(".", "-").replace("/", "-")) or self.coin(up)
+        return None
 
     def search(self, text: str, limit: int = 10, market: str | None = None) -> list[Listing]:
         """Best matches for a ticker or a name, most likely first."""
@@ -235,7 +240,8 @@ def crypto_name(name: str) -> str:
 
 
 async def download(http, nasdaq, yahoo) -> list[Listing]:
-    """The full list, fresh. Raises if the stock list can't be fetched (the crypto part is optional)."""
+    """The full list, fresh. Raises if the stock list can't be fetched; the index lists and coins are optional
+    (refresh() keeps the old ones when they come back short)."""
     from .backup import clean_name, from_nasdaq_symbol, number
 
     sp500: set[str] = set()
@@ -288,15 +294,33 @@ async def download(http, nasdaq, yahoo) -> list[Listing]:
     return out
 
 
+MIN_MEMBERS = {"sp500": 450, "ndx100": 90}  # fewer means the list download failed
+
+
 async def refresh(directory: Directory, data_dir: str | Path, http, nasdaq, yahoo) -> Directory:
-    """A fresh list when the saved one is a week old; the old one if the download fails or looks wrong."""
+    """A fresh list when the saved one is a week old; the old one if the download fails or looks wrong. Parts that
+    came back short (the index lists, Yahoo's coins) are filled in from the old list instead of being lost."""
     if time.time() - directory.updated < REFRESH_DAYS * 86400:
         return directory
-    listings = await download(http, nasdaq, yahoo)
-    crypto = sum(1 for i in listings if i.market == CRYPTO)
-    if crypto < 100:  # Yahoo didn't answer: keep the coins we had
-        listings += [i for i in directory.listings if i.market == CRYPTO and i.kind == "crypto"]
+    listings = merge_lists(await download(http, nasdaq, yahoo), directory)
     if len(listings) < 0.8 * len(directory):
         raise RuntimeError(f"The new symbol list is much shorter ({len(listings)} vs {len(directory)})")
     write(Path(data_dir) / FILENAME, listings)
     return Directory(listings, time.time())
+
+
+def merge_lists(fresh: list[Listing], old: Directory) -> list[Listing]:
+    """The fresh list, keeping the old index tags when a fresh index list is missing or short, and the old coins
+    when fewer came back (Yahoo's crypto list failed part way)."""
+    from dataclasses import replace
+    out = list(fresh)
+    for tag, minimum in MIN_MEMBERS.items():
+        if sum(1 for i in out if tag in i.tags) < minimum:
+            members = set(old.members(tag))
+            out = [replace(i, tags=tuple(sorted(set(i.tags) | {tag}))) if i.symbol in members else i for i in out]
+    old_coins = [i for i in old.listings if i.market == CRYPTO and i.kind == "crypto"]
+    new_coins = sum(1 for i in out if i.market == CRYPTO)
+    if new_coins < 0.9 * len(old_coins):
+        have = {i.symbol for i in out}
+        out += [i for i in old_coins if i.symbol not in have]
+    return out
