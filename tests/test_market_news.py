@@ -158,7 +158,7 @@ def test_yahoo_news_keeps_related_tickers():
 # ----- the optional Claude reader -----
 
 def test_ai_reader_is_off_without_a_key():
-    reader = ai.NewsAI(api_key="")
+    reader = ai.NewsAI(readers=[])
     assert not reader.enabled
     assert asyncio.run(reader.review([analyse(h("Fed cuts rates"))])) == 0
 

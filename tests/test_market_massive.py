@@ -2579,7 +2579,7 @@ def nvidia_bot(tmp_path, monkeypatch=None, key="k", http=True, clock=None, quote
     clock = clock or Clock(ny(2026, 10, 6, 12, 0))
     server = FakeMassive(clock, key=key or "k")
     data = FakeData(Http(server, sleep=no_retry_sleep) if http else None, quotes)
-    bot = MarketBot(tmp_path, engine=FakeEngine(data), ai=NewsAI(api_key=""), massive_key=key)
+    bot = MarketBot(tmp_path, engine=FakeEngine(data), ai=NewsAI(readers=[]), massive_key=key)
     if bot.massive:
         bot.massive.limiter = limiter_on(clock)
         bot.spotlight = Spotlight(bot.massive, bot.spotlight.path, clock=clock)
@@ -2600,7 +2600,7 @@ def nvidia_bot(tmp_path, monkeypatch=None, key="k", http=True, clock=None, quote
 
 def test_the_bot_builds_massive_from_the_engines_http(tmp_path):
     data = FakeData(Http(Backend()))
-    bot = MarketBot(tmp_path, engine=FakeEngine(data), ai=NewsAI(api_key=""), massive_key="k")
+    bot = MarketBot(tmp_path, engine=FakeEngine(data), ai=NewsAI(readers=[]), massive_key="k")
     assert isinstance(bot.massive, Massive) and bot.massive.key == "k" and bot.massive.http is data.http
     assert bot.spotlight.massive is bot.massive and bot.spotlight.enabled
     assert bot.spotlight.path == tmp_path / "nvidia.json" and bot.spotlight.symbol == "NVDA"
@@ -2611,7 +2611,7 @@ def test_the_bot_builds_massive_from_the_engines_http(tmp_path):
 @pytest.mark.parametrize("key,http", [(None, True), ("", True), ("k", False)])
 def test_the_bot_has_no_massive_without_a_key_or_http(tmp_path, key, http):
     data = FakeData(Http(Backend()) if http else None)
-    bot = MarketBot(tmp_path, engine=FakeEngine(data), ai=NewsAI(api_key=""), massive_key=key)
+    bot = MarketBot(tmp_path, engine=FakeEngine(data), ai=NewsAI(readers=[]), massive_key=key)
     assert bot.massive is None and not bot.spotlight.enabled and bot.massive_used() == 0
     assert bot.spotlight.plan() == "no key"
 

@@ -1729,7 +1729,7 @@ class FakeEngine:
 
 
 def make_bot(tmp_path, data=None, desk=None):
-    bot = MarketBot(tmp_path, engine=FakeEngine(data), ai=NewsAI(api_key=""))
+    bot = MarketBot(tmp_path, engine=FakeEngine(data), ai=NewsAI(readers=[]))
     bot.sent, bot.boards = [], []
 
     async def send(cid, post):
@@ -1747,7 +1747,7 @@ def make_bot(tmp_path, data=None, desk=None):
 
 
 def test_the_bot_builds_its_trends_desk(tmp_path):
-    bot = MarketBot(tmp_path, engine=FakeEngine(), ai=NewsAI(api_key=""))
+    bot = MarketBot(tmp_path, engine=FakeEngine(), ai=NewsAI(readers=[]))
     assert isinstance(bot.trends, TrendsDesk) and bot.trends.closes.path == tmp_path / "trend-closes.npz"
     assert bot.trends.sources is None and bot.trends.directory is None  # the fake engine has neither
     assert ("trends", 60, bot.job_trends) in bot.schedule()
@@ -2146,7 +2146,7 @@ def test_directory_refresh_reaches_the_trends_desk(tmp_path, monkeypatch):
     engine.directory = old
     forgot = []
     engine.forget_lookups = lambda: forgot.append(True)
-    bot = MarketBot(tmp_path, engine=engine, ai=NewsAI(api_key=""))
+    bot = MarketBot(tmp_path, engine=engine, ai=NewsAI(readers=[]))
     assert bot.trends.directory is old and "NEW" not in bot.trends.universe()
 
     async def same(directory, *args):

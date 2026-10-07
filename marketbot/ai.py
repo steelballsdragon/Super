@@ -112,6 +112,7 @@ class AIStatus:
     calls_today: int = 0
     last_error: str | None = None
     last_ok: float | None = None
+    resting: str | None = None  # why it's out for the rest of the day
 
 
 @dataclass(frozen=True)
@@ -361,24 +362,29 @@ class OpenAIReader(Reader):
             raise ReaderError(f"couldn't reach {self.name} ({type(exc).__name__})", pause=60) from exc
         if status == 200:
             self.limited = 0
+            self.searched = False
             return self._answer(entry, text)
         self.pacer.finish(entry, 0)
-        detail = self._detail(text)
+        code, detail = self._error(text)
         if status == 429:
             self.limited += 1
             asked = retry_after(headers, text)
-            floor = 5.0 * 2 ** (self.limited - 1) if asked is not None else 30.0 * 2 ** (self.limited - 1)
+            floor = (5.0 if asked is not None else 30.0) * 2 ** (min(self.limited, 12) - 1)
             pause = min(max(asked or 0.0, floor, 1.0), MAX_PAUSE)
             raise ReaderError(f"rate limited · paused {duration(pause)}", pause=pause, again=True)
         if status in (401, 403) or (status == 400 and re.search(r"api[ _-]?key", detail, re.I)):
             raise ReaderError(f"key rejected (HTTP {status})", pause=3600)
-        if status == 404 and not self.searched:
-            self.searched = True
-            other = await self._other_model()
-            if other and other != self.model:
-                log.warning("%s: model %s isn't available; using %s", self.name, self.model, other)
-                self.status.model = other
-                raise _Retry
+        if status == 404 or code in ("model_decommissioned", "model_not_found") or (
+                status == 400 and re.search(r"\bmodel\b.{0,120}\b(decommissioned|does not exist|not found|no longer "
+                                            r"supported)", detail, re.I)):
+            if not self.searched:
+                self.searched = True
+                other = await self._other_model()
+                if other and other != self.model:
+                    log.warning("%s: model %s isn't available; using %s", self.name, self.model, other)
+                    self.status.model = other
+                    raise _Retry
+            raise ReaderError(f"model {self.model} isn't available (HTTP {status})", pause=3600)
         if status in (400, 422) and not self.plain:
             log.info("%s refused the structured request (%s); asking for plain JSON", self.name, detail)
             self.plain = True
@@ -394,7 +400,12 @@ class OpenAIReader(Reader):
         except (ValueError, KeyError, IndexError, TypeError, AttributeError):
             raise ReaderError("unreadable answer")
         usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
-        self.pacer.finish(entry, usage.get("total_tokens"))
+        tokens = usage.get("total_tokens")
+        cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens") \
+            if isinstance(usage.get("prompt_tokens_details"), dict) else None
+        if isinstance(tokens, int) and isinstance(cached, int) and 0 < cached <= tokens:
+            tokens -= cached  # Groq doesn't count cached prompt tokens against its limits
+        self.pacer.finish(entry, tokens)
         if choice.get("finish_reason") == "length":
             raise ReaderError("answer cut off")
         try:
@@ -405,18 +416,22 @@ class OpenAIReader(Reader):
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"}
 
-    def _detail(self, text: str) -> str:
-        """The service's own error message, short and without the key."""
-        message = text or ""
+    def _error(self, text: str) -> tuple[str | None, str]:
+        """The service's error code and its own message, short and without the key."""
+        code, message = None, text or ""
         try:
             data = json.loads(text)
             data = data[0] if isinstance(data, list) and data else data
             error = data.get("error") if isinstance(data, dict) else None
-            message = (error.get("message") if isinstance(error, dict) else error) or message
+            if isinstance(error, dict):
+                code = error.get("code") if isinstance(error.get("code"), str) else None
+                message = error.get("message") or message
+            elif error:
+                message = error
         except (ValueError, TypeError, AttributeError):
             pass
         message = str(message).strip()
-        return "" if "<" in message[:20] else _quiet(message, [self.key])[:100]
+        return code, "" if "<" in message[:20] else _quiet(message, [self.key])[:100]
 
     async def _other_model(self) -> str | None:
         try:
@@ -474,6 +489,13 @@ class NewsAI:
         return bool(self.readers)
 
     def statuses(self) -> list[AIStatus]:
+        for r in self.readers:
+            if r.calls_today() >= self.daily_calls:
+                r.status.resting = f"reached {self.daily_calls} calls (NEWS_AI_DAILY_CALLS) · back at 00:00 UTC"
+            elif r.wait() is None:
+                r.status.resting = "used the free plan's daily allowance · back at 00:00 UTC"
+            else:
+                r.status.resting = None
         return [r.status for r in self.readers]
 
     async def close(self) -> None:
@@ -513,8 +535,18 @@ class NewsAI:
                 todo = batch + todo
                 log.info("%s couldn't read the news: %s", reader.name, exc)
                 continue
+            except Exception as exc:  # a bug, not the service: keep the news going on the rules' read
+                log.warning("%s failed reading the news", reader.name, exc_info=True)
+                reader.status.last_error = f"unexpected error ({type(exc).__name__})"
+                reader.pause(600)
+                done.add(id(reader))
+                todo = batch + todo
+                continue
             reader.status.last_error, reader.status.last_ok = None, time.time()
-            changed += fold(batch, items)
+            try:
+                changed += fold(batch, items)
+            except Exception:
+                log.warning("Couldn't use %s's answer", reader.name, exc_info=True)
         if todo:
             log.info("%d headlines keep the rules' read (no reader free in time)", len(todo))
         return changed
@@ -620,7 +652,7 @@ def number(value) -> float | None:
         value = m.group(1)
     try:
         f = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return f if math.isfinite(f) else None
 

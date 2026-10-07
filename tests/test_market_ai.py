@@ -378,7 +378,101 @@ def test_a_404_with_no_replacement_is_reported():
     service = Service((404, {}, json.dumps({"error": {"message": "model not found"}})), models=[])
     r = reader(service=service, clock=clock)
     asyncio.run(desk(r, clock=clock).review(news(2)))
-    assert r.status.last_error == "HTTP 404 (model not found)" and r.model == "openai/gpt-oss-120b"
+    assert r.status.last_error == "model openai/gpt-oss-120b isn't available (HTTP 404)"
+    assert r.model == "openai/gpt-oss-120b" and r.wait() == 3600 and not r.plain
+
+
+GROQ_RETIRED = {"error": {"message": "The model `openai/gpt-oss-120b` has been decommissioned and is no longer "
+                                    "supported. Please refer to https://console.groq.com/docs/deprecations for a "
+                                    "recommendation on which model to use instead.",
+                         "type": "invalid_request_error", "code": "model_decommissioned"}}
+
+
+def test_groq_retiring_the_model_with_a_400_switches_models_not_formats():
+    clock = Clock()
+    service = Service((400, {}, json.dumps(GROQ_RETIRED)), answer(2),
+                      models=["openai/gpt-oss-20b", "openai/gpt-oss-safeguard-20b", "whisper-large-v3"])
+    r = reader(service=service, clock=clock)
+    assert asyncio.run(desk(r, clock=clock).review(news(2))) == 2
+    assert r.model == "openai/gpt-oss-20b" and not r.plain
+    assert service.posts()[1][3]["response_format"]["type"] == "json_schema"
+    assert not r.searched  # a later retirement gets looked up again
+
+
+def test_a_retired_model_found_by_its_message_alone():
+    clock = Clock()
+    body = {"error": {"message": "The model `x` does not exist or you do not have access to it."}}
+    r = reader(service=Service((400, {}, json.dumps(body)), models=[]), clock=clock)
+    asyncio.run(desk(r, clock=clock).review(news(1)))
+    assert r.status.last_error == "model openai/gpt-oss-120b isn't available (HTTP 400)" and not r.plain
+
+
+def test_a_schema_complaint_is_not_mistaken_for_a_retired_model():
+    clock = Clock()
+    body = {"error": {"message": "Invalid schema for response_format: property `ticker` does not exist in required"}}
+    service = Service((400, {}, json.dumps(body)), answer(1))
+    r = reader(service=service, clock=clock)
+    assert asyncio.run(desk(r, clock=clock).review(news(1))) == 1
+    assert r.plain and not service.calls[1][0] == "GET"
+
+
+def test_endless_429s_never_overflow_the_backoff():
+    r = reader(service=Service(*[(429, {"retry-after": "37"}, "{}") for _ in range(3)]))
+    r.limited = 5000
+    for _ in range(3):
+        with pytest.raises(ai.ReaderError) as e:
+            asyncio.run(r.read("x"))
+        assert e.value.pause == 5 * 2 ** 11 and e.value.again
+
+
+def test_a_bug_in_a_reader_never_stops_the_news():
+    clock = Clock()
+
+    class Broken(ai.Reader):
+        async def read(self, prompt):
+            raise RuntimeError("boom")
+
+    broken = Broken("Broken", "m", clock)
+    gemini = Service(answer(3))
+    m = reader(ai.GEMINI, gemini, clock, key="AIza")
+    batch = news(3)
+    assert asyncio.run(desk(broken, m, clock=clock).review(batch)) == 3
+    assert broken.status.last_error == "unexpected error (RuntimeError)" and broken.wait() == 600
+    assert all(a.source == "ai" for a in batch)
+
+
+def test_a_bad_answer_never_stops_the_news(monkeypatch):
+    clock = Clock()
+    r = reader(service=Service(answer(1)), clock=clock)
+    monkeypatch.setattr(ai, "fold", lambda batch, items: 1 / 0)
+    assert asyncio.run(desk(r, clock=clock).review(news(1))) == 0
+
+
+def test_status_says_when_a_reader_is_out_for_the_day():
+    clock = Clock()
+    service = Service()
+    r = reader(service=service, clock=clock)
+    d = desk(r, clock=clock)
+    assert d.statuses()[0].resting is None
+    r.pacer.tokens_today = 179_000
+    r.pacer.day = time.strftime("%Y-%m-%d", time.gmtime(clock.t))
+    assert d.statuses()[0].resting == "used the free plan's daily allowance · back at 00:00 UTC"
+    assert asyncio.run(d.review(news(2))) == 0 and not service.posts()
+    clock.t = (int(START) // 86400 + 1) * 86400 + 1
+    assert d.statuses()[0].resting is None
+    capped = ai.NewsAI(readers=[r], daily_calls=1, sleep=clock.sleep, clock=clock)
+    asyncio.run(capped.review(news(1)))
+    assert capped.statuses()[0].resting.startswith("reached 1 calls (NEWS_AI_DAILY_CALLS)")
+
+
+def test_cached_prompt_tokens_dont_count_against_groq_limits():
+    clock = Clock()
+    status, headers, text = answer(2, tokens=2500)
+    body = json.loads(text)
+    body["usage"]["prompt_tokens_details"] = {"cached_tokens": 600}
+    r = reader(service=Service((status, headers, json.dumps(body))), clock=clock)
+    asyncio.run(desk(r, clock=clock).review(news(2)))
+    assert r.pacer.tokens_today == 1900
 
 
 def test_a_cut_off_answer_is_an_error():
@@ -483,8 +577,8 @@ def test_pick_model_prefers_stable_and_newest():
 
 def test_number_reads_loose_values():
     assert [ai.number(v) for v in (1, "1.5", "-0.4%", "+8bp", " 12 bps ", "1e3", "nan", float("inf"), True,
-                                    None, "0.4-0.6", [1])] == [1, 1.5, -0.4, 8, 12, None, None, None, None, None,
-                                                               None, None]
+                                    None, "0.4-0.6", [1], 10 ** 400)] == [1, 1.5, -0.4, 8, 12, None, None, None, None, None,
+                                                               None, None, None]
 
 
 def test_duration():

@@ -141,7 +141,7 @@ class FakeEngine:
 
 
 def make_bot(tmp_path, quotes=None):
-    bot = MarketBot(tmp_path, engine=FakeEngine(quotes or {}), ai=NewsAI(api_key=""))
+    bot = MarketBot(tmp_path, engine=FakeEngine(quotes or {}), ai=NewsAI(readers=[]))
     bot.sent = []
 
     async def send(cid, post):
