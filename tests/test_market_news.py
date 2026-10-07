@@ -191,12 +191,11 @@ def test_ai_review_sends_one_request_per_batch_and_handles_refusals():
             import json
             return SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text=json.dumps({"items": items}))])
 
-    reader = ai.NewsAI(api_key="")
-    reader.client = SimpleNamespace(beta=SimpleNamespace(messages=Messages()))
-    reader.status.enabled = True
+    claude = ai.ClaudeReader("k", client=SimpleNamespace(beta=SimpleNamespace(messages=Messages())))
+    reader = ai.NewsAI(readers=[claude])
     batch = [analyse(h(f"Fed cuts rates {i}")) for i in range(ai.BATCH + 3)]
     changed = asyncio.run(reader.review(batch))
     assert changed == ai.BATCH and len(calls) == 2
     assert calls[0]["model"] == ai.DEFAULT_MODEL and calls[0]["fallbacks"] == "default"
     assert calls[0]["output_config"]["format"]["type"] == "json_schema"
-    assert reader.status.last_error == "declined"
+    assert claude.status.last_error == "declined" and claude.status.calls_today == 2

@@ -182,6 +182,7 @@ class MarketBot(discord.Client):
         for task in self._jobs.values():
             task.cancel()
         await self.news.close()
+        await self.ai.close()
         await self.engine.close()
         await super().close()
 

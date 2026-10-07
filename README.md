@@ -9,7 +9,8 @@ MarketWatch, WSJ, Nasdaq, Investing.com, Seeking Alpha, the Federal Reserve, the
 The Block, Decrypt and Google News. When Yahoo doesn't answer, Nasdaq (US stocks and ETFs), Coinbase and CoinGecko
 (crypto) stand in. It knows **every US-listed stock and ETF and the top 1,000 coins** by ticker and name.
 
-Two keys are optional: with an Anthropic key, Claude also reads the headlines; with a
+Keys are optional: with a free Groq or Gemini key, or an Anthropic key for Claude, an AI also reads the
+headlines; with a
 [Massive](https://massive.com) (formerly Polygon.io) key, the NVIDIA channel adds Massive's data, using it for
 NVIDIA only and never more than 5 calls a minute (the free plan's limit).
 
@@ -104,12 +105,24 @@ stablecoins, adoption, network upgrades…). Then:
 4. **Learning:** every call on a posted story is checked against what the market did over the next day. The
    hit rate shows in `/record`, and each event type's sizes are re-scaled toward what markets actually did.
 
-**Optional: Claude reads the news too.** Set `ANTHROPIC_API_KEY` and the important headlines (importance 40+)
-are sent to Claude in batches of 10; its read (event, one-line takeaway, which markets, direction, size,
-confidence) replaces the keyword model's for those stories. It uses `claude-opus-5-5` by default
-(`NEWS_AI_MODEL` changes it) and is capped at 150 calls a day (`NEWS_AI_DAILY_CALLS`); a busy news day is
-typically 50–100 calls, roughly a few dollars a day at Opus pricing. The news footer says which reader scored
-each story.
+**Optional: an AI reads the news too.** With a key for any of the services below, the important headlines
+(importance 40+) are sent to it in batches, most important first; its read (event, one-line takeaway, which
+markets, direction, size, confidence) replaces the keyword model's for those stories. The news footer says which
+reader scored each story.
+
+| Key | Service | Cost | Notes |
+|---|---|---|---|
+| `GROQ_API_KEY` | Groq (`openai/gpt-oss-120b`) | free plan | Sign up at console.groq.com (no card), API Keys → Create. The free plan allows 8,000 tokens a minute and 200,000 a day, so calls are paced to about two a minute (5 headlines each) |
+| `GEMINI_API_KEY` | Google Gemini (`gemini-3.5-flash-lite`) | free plan | Get a key at aistudio.google.com. Google may use free-plan requests to improve its products (the headlines are public) |
+| `ANTHROPIC_API_KEY` | Claude (`claude-opus-5-5`) | paid | The sharpest read; batches of 10 |
+
+Set more than one and they back each other up: each batch goes to the first one (Claude, then Groq, then Gemini)
+that's free to answer, and the others take over while it's rate limited, out of calls for the day or down.
+Calls to the free plans are paced to stay under their per-minute and per-day limits, and a "slow down" (HTTP 429)
+pauses that service for as long as it asks. Headlines no reader gets to within about 100 seconds keep the keyword
+model's read, so the news is never held up. `/status` shows each reader, its calls today and any problem.
+Every reader is capped at 150 calls a day (`NEWS_AI_DAILY_CALLS`); `NEWS_AI_MODEL`, `GROQ_MODEL` and
+`GEMINI_MODEL` change the models (if a free model is retired, the bot switches to the service's closest one).
 
 ## Setup
 
@@ -164,8 +177,8 @@ registers its own (it can take up to an hour to show everywhere). Give the bot's
 
 1. **New Project → Deploy from GitHub repo →** this repository. Railway detects Python, installs
    `requirements.txt` and runs `python main.py` by itself; no start command or config file is needed.
-2. In the service's **Variables** tab, add `MARKET_DISCORD_TOKEN` (and optionally `ANTHROPIC_API_KEY` and
-   `MASSIVE_API_KEY`), then apply the changes.
+2. In the service's **Variables** tab, add `MARKET_DISCORD_TOKEN` (and optionally `GROQ_API_KEY`, `ANTHROPIC_API_KEY`
+   and `MASSIVE_API_KEY`), then apply the changes.
 3. **Attach a volume** to the service (right-click it on the canvas, or ⌘K → *Add volume*) with mount path
    `/data`. The bot finds it on its own (Railway sets `RAILWAY_VOLUME_MOUNT_PATH`), and keeps its price history,
    channels, alerts and track record there across redeploys. With a volume, Railway also never runs two copies at
@@ -201,11 +214,15 @@ A service first set up for ScoreBot keeps working: its `DISCORD_TOKEN` is used, 
 | `MARKET_DISCORD_TOKEN` | (required) | Bot token (`DISCORD_TOKEN` also works) |
 | `MARKET_DATA_DIR` | the Railway volume if one is attached, else `market-data` | Where price history, models, channel settings (`channels.json`), state and the track record (`record.json`) are kept |
 | `LIVE_INTERVAL` | `60` | Seconds between live board and alert updates (minimum 30) |
+| `GROQ_API_KEY` | (none) | Turns on Groq's free plan as a news reader |
+| `GEMINI_API_KEY` | (none) | Turns on Google Gemini's free plan as a news reader |
 | `ANTHROPIC_API_KEY` | (none) | Turns on Claude as a second news reader |
 | `MASSIVE_API_KEY` | (none) | Massive (Polygon.io) key for the NVIDIA channel; at most 5 calls a minute, NVIDIA only (`POLYGON_API_KEY` also works). Massive's free and individual plans are licensed for personal use |
 | `YAHOO_PROXY` | (none) | Proxy URL for Yahoo Finance requests only, if Yahoo blocks the host's IP address |
 | `NEWS_AI_MODEL` | `claude-opus-5-5` | Claude model for the news reader |
-| `NEWS_AI_DAILY_CALLS` | `150` | Cap on news-reader calls per day |
+| `GROQ_MODEL` | `openai/gpt-oss-120b` | Groq model for the news reader |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Gemini model for the news reader |
+| `NEWS_AI_DAILY_CALLS` | `150` | Cap on calls per day, for each news reader |
 | `DEV_GUILD_ID` | (none) | Sync slash commands to one server instantly while developing |
 
 ## Built to run unattended

@@ -761,10 +761,12 @@ def register_commands(bot) -> None:
         if bot.engine.training_error:
             models.append(f"⚠️ {bot.engine.training_error}")
         e.add_field(name="Models", value="\n".join(models) or "Not trained yet", inline=False)
-        ai = bot.ai.status
-        e.add_field(name="News reader", value=(f"Claude ({ai.model}) · {ai.calls_today} calls today"
-                                               + (f" · ⚠️ {ai.last_error}" if ai.last_error else ""))
-                    if ai.enabled else "Keyword model (set ANTHROPIC_API_KEY to add Claude)", inline=False)
+        readers = [f"{r.name}{' (free plan)' if r.free else ''} · {r.model} · {r.calls_today} call{'' if r.calls_today == 1 else 's'} today"
+                   + (f" · ⚠️ {r.last_error}" if r.last_error else "") for r in bot.ai.statuses()]
+        readers += [f"⚠️ {p}" for p in bot.ai.problems]
+        e.add_field(name="News reader", value="\n".join(readers) or (
+            "Keyword model. For an AI read of the news, set GROQ_API_KEY or GEMINI_API_KEY (free plans) or "
+            "ANTHROPIC_API_KEY (Claude)"), inline=False)
         if bot.news.failures:
             e.add_field(name="Feeds failing", value="\n".join(clip(u, 80) for u in list(bot.news.failures)[:6]),
                         inline=False)
