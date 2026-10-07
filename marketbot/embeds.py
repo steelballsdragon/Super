@@ -141,7 +141,7 @@ def crypto_board(quotes: dict[str, Quote], watchlist: list[str], cg: CryptoGloba
                     f"BTC dominance **{cg.btc_dominance:.1f}%** · ETH {cg.eth_dominance:.1f}% · "
                     f"stablecoins {cg.stable_dominance:.1f}%")
     if fng is not None:
-        desc.append(f"Fear & Greed: **{fng:.0f} {fear_greed_label(fng)}**")
+        desc.append(f"Fear & Greed: **{fng:.0f} {fear_greed_label(fng, crypto=True)}**")
     e = discord.Embed(title="🪙 Crypto Market · Live", color=GREEN if (chg or 0) >= 0 else RED,
                       description="\n".join(desc))
     rows = []
@@ -514,7 +514,7 @@ def macro_embed(m: Macro, cape) -> discord.Embed:
         parts = "\n".join(f"-# {k}: {v * 100:.0f}" for k, v in m.mood_parts.items())
         e.add_field(name="Stock market mood", value=f"**{m.mood:.0f}/100 · {mood_label(m.mood)}**\n{parts}", inline=True)
     if m.crypto_fng is not None:
-        txt = f"**{m.crypto_fng:.0f} · {fear_greed_label(m.crypto_fng)}**"
+        txt = f"**{m.crypto_fng:.0f} · {fear_greed_label(m.crypto_fng, crypto=True)}**"
         if m.crypto_fng_prev_week is not None:
             txt += f" (week ago {m.crypto_fng_prev_week:.0f})"
         if m.fng_history:
@@ -617,12 +617,12 @@ def fear_greed_embed(stocks: Gauge | None, crypto: Gauge | None, fng_history: di
 def _fg_color(fg: Gauge | None) -> int:
     if fg is None:
         return GREY
-    return {0: RED, 1: RED, 2: GREY, 3: GREEN, 4: GREEN}[ZONES.index(fg.label)]
+    return {0: RED, 1: RED, 2: GREY, 3: GREEN, 4: GREEN}[fg.zone]
 
 
 def fear_greed_alert(fg: Gauge, before: int) -> discord.Embed:
     """An index has moved into another zone."""
-    up = ZONES.index(fg.label) > before
+    up = fg.zone > before
     e = discord.Embed(title=f"{fg.emoji} {fg.market} Fear & Greed is now {fg.label}",
                       color=_fg_color(fg),
                       description=f"`{_meter(fg.score)}` **{fg.score:.0f}** {'▲' if up else '▼'} from {ZONES[before]}"

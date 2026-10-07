@@ -24,7 +24,7 @@ from .ai import NewsAI
 from .briefs import Post
 from .channels import NEWS_LEVELS, ChannelStore
 from .engine import Engine, Macro, ScanHit
-from .feargreed import ZONES, moved_zone, zone
+from .feargreed import ZONES, moved_zone
 from .feeds import NewsFetcher
 from .hours import NEW_YORK, is_trading_day, market_open
 from .massive import Massive, Spotlight, find_key
@@ -494,9 +494,9 @@ class MarketBot(discord.Client):
             key = fg.market.lower()
             before = self.state.get("fear_greed_zone", key)
             if not isinstance(before, int) or isinstance(before, bool) or not 0 <= before < len(ZONES):
-                self.state.set("fear_greed_zone", key, zone(fg.score))  # first reading: nothing to compare yet
+                self.state.set("fear_greed_zone", key, fg.zone)  # first reading: nothing to compare yet
                 continue
-            moved = moved_zone(before, fg.score)
+            moved = moved_zone(before, fg.score, fg.market)
             if moved is None:
                 continue
             self.state.set("fear_greed_zone", key, moved)

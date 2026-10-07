@@ -182,7 +182,7 @@ async def crypto_daily(bot, watchlist: list[str]) -> list[Post]:
         pass
     m = bot.macro_cache
     if m and m.crypto_fng is not None:
-        txt = f"**{m.crypto_fng:.0f} {E.fear_greed_label(m.crypto_fng)}**"
+        txt = f"**{m.crypto_fng:.0f} {E.fear_greed_label(m.crypto_fng, crypto=True)}**"
         if m.fng_history:
             txt += (f" · after similar readings BTC was higher 30 days later {m.fng_history['up']:.0%} of the time "
                     f"(median {E.pct(m.fng_history['median'], 1)})")

@@ -174,7 +174,7 @@ def ok(score=43.9):
 def test_cnn_is_asked_like_a_browser_and_cached():
     backend = Backend(ok(43.9), ok(60.0))
     clock = Clock()
-    cnn = CNNFearGreed(Http(backend, sleep=_no_sleep), clock)
+    cnn = CNNFearGreed(Http(backend, sleep=_no_sleep), clock, market_open=lambda: True)
     assert asyncio.run(cnn.get()).score == 43.9
     url, headers = backend.calls[0]
     assert url == fgm.CNN_URL and headers["Referer"] == fgm.CNN_PAGE
@@ -188,7 +188,7 @@ def test_cnn_down_keeps_a_recent_reading_then_gives_up():
     backend = Backend(ok(43.9), Response(418, "I'm a teapot"))
     clock = Clock()
     http = Http(backend, sleep=_no_sleep)
-    cnn = CNNFearGreed(http, clock)
+    cnn = CNNFearGreed(http, clock, market_open=lambda: False)
     assert asyncio.run(cnn.get()).score == 43.9
     clock.t += fgm.CNN_TTL + 1
     assert asyncio.run(cnn.get()).score == 43.9  # a reading from minutes ago beats none
@@ -210,8 +210,35 @@ def test_cnn_down_keeps_a_recent_reading_then_gives_up():
 ])
 def test_cnn_failures_are_recorded_and_return_nothing(answer, error):
     http = Http(Backend(answer), sleep=_no_sleep)
-    assert asyncio.run(CNNFearGreed(http, Clock()).get()) is None
+    assert asyncio.run(CNNFearGreed(http, Clock(), market_open=lambda: True).get()) is None
     assert http.health["CNN"].failing and error in http.health["CNN"].last_error
+
+
+def test_while_the_market_is_open_an_old_cnn_reading_gives_way_to_the_estimate():
+    backend = Backend(ok(43.9), Response(403, "Forbidden"))
+    clock = Clock()
+    cnn = CNNFearGreed(Http(backend, sleep=_no_sleep), clock, market_open=lambda: True)
+    asyncio.run(cnn.get())
+    clock.t += fgm.KEEP_OPEN - 60
+    assert asyncio.run(cnn.get()).score == 43.9
+    clock.t += fgm.CNN_RETRY + 61
+    assert asyncio.run(cnn.get()) is None  # half an hour of a frozen number is enough while it's moving
+
+
+@pytest.mark.parametrize("value, stocks, crypto", [
+    (25, "Fear", "Extreme Fear"), (45, "Neutral", "Fear"), (46, "Neutral", "Fear"), (47, "Neutral", "Neutral"),
+    (54, "Neutral", "Neutral"), (55, "Neutral", "Greed"), (75, "Greed", "Greed"), (76, "Extreme Greed", "Extreme Greed"),
+])
+def test_each_index_uses_its_publishers_zones(value, stocks, crypto):
+    assert gauge(value).label == stocks
+    assert gauge(value, "Crypto", "alternative.me").label == crypto
+    assert E.fear_greed_label(value, crypto=True) == crypto
+
+
+def test_crypto_zone_moves_use_alternative_me_edges():
+    assert moved_zone(3, 45, "Crypto") == 1  # 45 is Fear for alternative.me, two points past its 47-54 Neutral
+    assert moved_zone(3, 45, "Stocks") == 2
+    assert moved_zone(1, 48, "Crypto") is None and moved_zone(1, 49, "Crypto") == 2
 
 
 # ----- alerts in the trends channel -----

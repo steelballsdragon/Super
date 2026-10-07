@@ -35,6 +35,8 @@ ZONE_EMOJI = {"Extreme Fear": "😱", "Fear": "😟", "Neutral": "😐", "Greed"
 HYSTERESIS = 2.0  # points past a zone's edge before a move into it counts (no alerts while it wobbles on an edge)
 CNN_TTL = 600.0  # CNN updates its index every few minutes while the market is open
 CNN_RETRY = 120.0  # after a failure, wait this long before asking CNN again
+KEEP_OPEN = 1800.0  # while CNN fails, its last reading stands in for this long during market hours (it moves then)
+KEEP_CLOSED = 6 * 3600.0  # and this long outside them (it barely moves); after that the bot's estimate takes over
 DAY = 86400.0
 
 
@@ -53,7 +55,11 @@ class Gauge:
 
     @property
     def label(self) -> str:
-        return fear_greed_label(self.score)
+        return fear_greed_label(self.score, crypto=self.market == "Crypto")
+
+    @property
+    def zone(self) -> int:
+        return zone(self.score, self.market)
 
     @property
     def emoji(self) -> str:
@@ -65,9 +71,9 @@ class Gauge:
         return self.source != "bot's estimate"
 
 
-def zone(value: float) -> int:
-    """0 (Extreme Fear) to 4 (Extreme Greed), on the same edges as the labels."""
-    return ZONES.index(fear_greed_label(value))
+def zone(value: float, market: str = "Stocks") -> int:
+    """0 (Extreme Fear) to 4 (Extreme Greed), on the same edges as the labels (each publisher's own)."""
+    return ZONES.index(fear_greed_label(value, crypto=market == "Crypto"))
 
 
 def score(value) -> float | None:
@@ -149,9 +155,12 @@ def estimate_gauge(mood: float | None, parts: dict[str, float], at: float) -> Ga
 class CNNFearGreed:
     """CNN's index, cached for a few minutes and not asked again for a couple of minutes after a failure."""
 
-    def __init__(self, http: Http, clock=time.monotonic):
+    def __init__(self, http: Http, clock=time.monotonic, market_open=None):
         self.http = http
         self.clock = clock
+        if market_open is None:
+            from .hours import market_open
+        self.market_open = market_open
         self._gauge: Gauge | None = None
         self._at = -math.inf
         self._failed_at = -math.inf
@@ -161,7 +170,7 @@ class CNNFearGreed:
         if self._gauge is not None and now - self._at < CNN_TTL:
             return self._gauge
         if now - self._failed_at < CNN_RETRY:
-            return self._gauge if self._gauge is not None and now - self._at < 6 * 3600 else None
+            return self._kept(now)
         try:
             resp = await self.http.get(CNN_URL, headers=CNN_HEADERS, source="CNN", retries=1, timeout=20)
             if resp.status != 200:
@@ -176,20 +185,24 @@ class CNNFearGreed:
                 raise
         except (HttpError, ValueError):
             self._failed_at = self.clock()
-            # A reading from the last few hours beats none while CNN is down.
-            return self._gauge if self._gauge is not None and now - self._at < 6 * 3600 else None
+            return self._kept(now)
         self._gauge, self._at = gauge, self.clock()
         return gauge
 
+    def _kept(self, now: float) -> Gauge | None:
+        """The last reading while CNN is failing, if it's recent enough to still be right."""
+        keep = KEEP_OPEN if self.market_open() else KEEP_CLOSED
+        return self._gauge if self._gauge is not None and now - self._at < keep else None
 
-def moved_zone(previous: int | None, value: float) -> int | None:
+
+def moved_zone(previous: int | None, value: float, market: str = "Stocks") -> int | None:
     """The new zone when `value` has clearly moved out of zone `previous` (by HYSTERESIS points past the edge),
     else None. With no previous zone there's nothing to compare: None."""
     if previous is None:
         return None
-    now = zone(value)
-    if now > previous and zone(max(0.0, value - HYSTERESIS)) > previous:
+    now = zone(value, market)
+    if now > previous and zone(max(0.0, value - HYSTERESIS), market) > previous:
         return now
-    if now < previous and zone(min(100.0, value + HYSTERESIS)) < previous:
+    if now < previous and zone(min(100.0, value + HYSTERESIS), market) < previous:
         return now
     return None
