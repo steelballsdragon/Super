@@ -199,7 +199,7 @@ A service first set up for ScoreBot keeps working: its `DISCORD_TOKEN` is used, 
 | `MARKET_DATA_DIR` | the Railway volume if one is attached, else `market-data` | Where price history, models, channel settings (`channels.json`), state and the track record (`record.json`) are kept |
 | `LIVE_INTERVAL` | `60` | Seconds between live board and alert updates (minimum 30) |
 | `ANTHROPIC_API_KEY` | (none) | Turns on Claude as a second news reader |
-| `MASSIVE_API_KEY` | (none) | Massive (Polygon.io) key for the NVIDIA channel; at most 5 calls a minute, NVIDIA only (`POLYGON_API_KEY` also works) |
+| `MASSIVE_API_KEY` | (none) | Massive (Polygon.io) key for the NVIDIA channel; at most 5 calls a minute, NVIDIA only (`POLYGON_API_KEY` also works). Massive's free and individual plans are licensed for personal use |
 | `YAHOO_PROXY` | (none) | Proxy URL for Yahoo Finance requests only, if Yahoo blocks the host's IP address |
 | `NEWS_AI_MODEL` | `claude-opus-5-5` | Claude model for the news reader |
 | `NEWS_AI_DAILY_CALLS` | `150` | Cap on news-reader calls per day |
@@ -233,4 +233,13 @@ pip install -r requirements.txt pytest
 python -m pytest
 ```
 
-The tests use synthetic prices and fake Discord and data clients, so they run offline.
+The tests (about 1,500) use synthetic prices and fake Discord and data clients, so they run offline: every data
+source failing in every way it can, the 5-a-minute Massive budget under heavy concurrency and restarts, and every
+post checked against Discord's limits.
+
+For a dress rehearsal against the real data sources (Discord faked out), with Yahoo up or unreachable:
+
+```bash
+python -m tests.live_rehearsal
+python -m tests.live_rehearsal --yahoo-down
+```

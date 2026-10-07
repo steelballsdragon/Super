@@ -216,9 +216,9 @@ class YahooClient:
     def resting(self) -> bool:
         return self.http.resting(self.SOURCE)
 
-    async def _get(self, url: str, params: dict | None = None) -> Response:
+    async def _get(self, url: str, params: dict | None = None, answered: tuple[int, ...] = ()) -> Response:
         try:
-            return await self.http.get(url, params=params, source=self.SOURCE)
+            return await self.http.get(url, params=params, source=self.SOURCE, answered=answered)
         except HttpError as exc:
             raise YahooError(f"Yahoo: {exc}", exc.status) from exc
 
@@ -227,11 +227,15 @@ class YahooClient:
         once."""
         for refreshed in (False, True):
             p = dict(params or {})
+            used = None
             if crumb:
-                p["crumb"] = await self.crumb()
-            resp = await self._get(url, p)
+                used = p["crumb"] = await self.crumb()
+            # An expired crumb is routine: its first rejection isn't counted against Yahoo's health (several
+            # requests rejected at once would otherwise rest Yahoo before the crumb could be renewed).
+            resp = await self._get(url, p, answered=(401, 403) if crumb and not refreshed else ())
             if resp.status in (401, 403) and crumb and not refreshed:
-                self._crumb = None
+                if self._crumb == used:
+                    self._crumb = None  # another request may have renewed it already
                 continue
             if resp.status == 404:
                 raise YahooError(f"not found: {url}", 404)

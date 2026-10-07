@@ -129,6 +129,7 @@ class MarketBot(discord.Client):
         self.spotlight = Spotlight(self.massive, self.data_dir / "nvidia.json")
         self.quotes: dict[str, Quote] = {}
         self.quote_seen: dict[str, float] = {}  # symbol -> when a source last sent its quote
+        self._trends_board_at = 0.0  # when the trends board was last refreshed
         self.quotes_at = 0.0
         self.recent_news: list[Analysis] = []
         self.vol_ratio: dict[str, float] = {}
@@ -391,6 +392,9 @@ class MarketBot(discord.Client):
         line = crossed(q.change_pct, steps)
         if sym == "^VIX" and q.change_pct < 0:
             return  # only fear spikes
+        if q.extra.get("change_window") == "24h":
+            await self._rolling_move(cid, market, sym, q, line)
+            return
         # Stocks: the trading session. Crypto: Yahoo's day starts at midnight UTC.
         day = session_day(q) if market == STOCKS else datetime.now(timezone.utc).strftime("%Y-%m-%d")
         key = f"{cid}|{sym}|{day}"
@@ -398,9 +402,20 @@ class MarketBot(discord.Client):
         signed = line if q.change_pct > 0 else -line
         if line and (abs(signed) > abs(before) or (signed > 0) != (before > 0)):
             self.state.set("moves", key, signed)
-            window = ("today" if market == STOCKS else
-                      "in 24 hours" if q.extra.get("change_window") == "24h" else "since midnight UTC")
+            window = "today" if market == STOCKS else "since midnight UTC"
             await self.send(cid, Post([E.move_alert(q, line, window, q.change_pct, market)]))
+
+    async def _rolling_move(self, cid: int, market: str, sym: str, q: Quote, line: float) -> None:
+        """A move alert for a rolling 24-hour change (CoinGecko's), which doesn't reset at midnight: remembered for
+        24 hours rather than for the calendar day, so the same move isn't alerted again after midnight."""
+        key = f"{cid}|{sym}|24h"
+        now = time.time()
+        seen = self.state.get("rolling_moves", key)
+        before = seen["line"] if isinstance(seen, dict) and now - seen.get("at", 0) < 86400 else 0.0
+        signed = line if q.change_pct > 0 else -line
+        if line and (abs(signed) > abs(before) or (signed > 0) != (before > 0)):
+            self.state.set("rolling_moves", key, {"line": signed, "at": now})
+            await self.send(cid, Post([E.move_alert(q, line, "in 24 hours", q.change_pct, market)]))
 
     async def _fast_move(self, cid: int, sym: str, q: Quote) -> None:
         trail = self.trail.get(sym)
@@ -488,9 +503,11 @@ class MarketBot(discord.Client):
         if not channels:
             return
         every = TRENDS_OPEN_SECONDS if market_open() else TRENDS_CLOSED_SECONDS
-        if self.trends.last and time.time() - self.trends.last.at < every - 5:
+        if time.time() - self._trends_board_at < every - 5:
             return
-        snap = await self.trends.refresh()
+        # The board has its own clock; a snapshot /trends or a recap just made is reused rather than refetched.
+        snap = await self.trends.refresh(max_age=min(every - 5, 120))
+        self._trends_board_at = time.time()
         lead = self.quotes.get("^GSPC")
         embed = E.trends_board(snap, self.trends.index_members("sp500"), self.trends.index_members("ndx100"),
                                E.state_label(lead) if lead else "")
@@ -747,6 +764,9 @@ class MarketBot(discord.Client):
                         self.state.delete(section, key)
                 except ValueError:
                     self.state.delete(section, key)
+        for key, seen in self.state.items("rolling_moves"):
+            if not isinstance(seen, dict) or now - seen.get("at", 0) > 86400:
+                self.state.delete("rolling_moves", key)
         for section, keep in (("setup_alerts", 30), ("fast_moves", 2), ("briefs", 10)):
             for key, at in self.state.items(section):
                 if now - at > keep * 86400:

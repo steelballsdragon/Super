@@ -166,7 +166,8 @@ def move_alert(q: Quote, threshold: float, window: str, change: float, market: s
     name = display_name(q.symbol, q.name)
     e = discord.Embed(
         title=f"{'🚀' if up else '📉'} {tag(q.symbol)} {'up' if up else 'down'} {abs(change):.1f}% {window}",
-        description=f"**{name}** at **{money(q.price, q.symbol)}** ({pct(q.change_pct, already_pct=True)} today)"
+        description=f"**{name}** at **{money(q.price, q.symbol)}** ({pct(q.change_pct, already_pct=True)} "
+                    f"{'in 24 hours' if q.extra.get('change_window') == '24h' else 'today'})"
                     f"\nCrossed the ±{threshold:g}% alert line.",
         color=GREEN if up else RED)
     if q.high52 and q.price >= q.high52 * 0.995:
@@ -874,13 +875,14 @@ def nvidia_board(q: Quote | None, spot, budget: tuple[int, int] = (0, 5)) -> dis
     cap, staff = _n(d.get("market_cap")), _n(d.get("total_employees"))
     if cap:
         info.append(f"Market cap ${big(cap)}" + (f" · {staff:,.0f} employees" if staff else ""))
-    if show and spot.dividends:
-        dv = spot.dividends[0]
-        info.append(f"Dividend ${dv['cash_amount']:g} (ex-date {dv.get('ex_dividend_date') or '?'}, paid "
+    dv = spot.dividends[0] if show and spot.dividends and isinstance(spot.dividends[0], dict) else {}
+    if _n(dv.get("cash_amount")) is not None:
+        info.append(f"Dividend ${_n(dv['cash_amount']):g} (ex-date {dv.get('ex_dividend_date') or '?'}, paid "
                     f"{dv.get('pay_date') or '?'})")
-    if show and spot.splits:
-        sp = spot.splits[0]
-        info.append(f"Last split {sp['split_to']:g}-for-{sp['split_from']:g} on {sp.get('execution_date') or '?'}")
+    sp = spot.splits[0] if show and spot.splits and isinstance(spot.splits[0], dict) else {}
+    if _n(sp.get("split_to")) and _n(sp.get("split_from")):
+        info.append(f"Last split {_n(sp['split_to']):g}-for-{_n(sp['split_from']):g} on "
+                    f"{sp.get('execution_date') or '?'}")
     if show and spot.related:
         info.append("Related: " + ", ".join(spot.related[:8]))
     if info:
@@ -899,12 +901,13 @@ def nvidia_board(q: Quote | None, spot, budget: tuple[int, int] = (0, 5)) -> dis
                         value="\n".join(lines), inline=False)
     used, limit = budget
     massive = getattr(spot, "massive", None)
+    live = f"Live price: {SOURCE_NAMES.get(q.source, q.source) if q else 'Yahoo Finance'}"
     if massive is not None and massive.key and massive.key_rejected:
-        foot = "Live price: Yahoo Finance · Massive rejected the key (see /status)"
+        foot = f"{live} · Massive rejected the key (see /status)"
     elif not show:
-        foot = "Live price: Yahoo Finance · add MASSIVE_API_KEY for Massive's data"
+        foot = f"{live} · add MASSIVE_API_KEY for Massive's data"
     else:
-        foot = f"Live price: Yahoo Finance · Massive ({spot.plan()}): {used}/{limit} calls in the last minute"
+        foot = f"{live} · Massive ({spot.plan()}): {used}/{limit} calls in the last minute"
     e.set_footer(text=foot)
     return fit_embed(e)
 

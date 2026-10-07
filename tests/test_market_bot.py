@@ -368,3 +368,64 @@ def test_sigterm_closes_the_bot(tmp_path):
         asyncio.get_running_loop().remove_signal_handler(signal.SIGTERM)
     asyncio.run(run())
     assert closed == [True]
+
+
+# ----- fixes from the extreme-testing review -----
+
+def test_setting_the_same_kind_again_keeps_the_board_and_settings(tmp_path: Path):
+    """/setup run again (to add the trends and NVIDIA channels) mustn't orphan the existing boards."""
+    store = ChannelStore(tmp_path / "c.json")
+    store.set(1, "stocks", 9)
+    store.update(1, board_message_id=555, watchlist=("AAPL",), alerts=False)
+    again = store.set(1, "stocks", 9)
+    assert again.board_message_id == 555 and again.watchlist == ("AAPL",) and again.alerts is False
+    changed = store.set(1, "crypto", 9)  # a new kind starts over
+    assert changed.board_message_id is None and changed.watchlist == () and changed.kind == "crypto"
+
+
+def test_rolling_24h_crypto_moves_alert_once_across_midnight(tmp_path):
+    """CoinGecko's change is a rolling 24 hours: it doesn't reset at midnight UTC, so neither does the alert."""
+    q = quote("TON11419-USD", price=5.0, change=7.2, quote_type="CRYPTOCURRENCY", extra={"change_window": "24h"})
+    bot = make_bot(tmp_path, {"TON11419-USD": q})
+    bot.channels.set(2, CRYPTO)
+    bot.channels.update(2, watchlist=("TON11419-USD",))
+    bot.quotes = {"TON11419-USD": q}
+    asyncio.run(bot.check_moves())
+    assert len(bot.sent) == 1 and "in 24 hours" in bot.sent[0][1].embeds[0].title
+    assert "in 24 hours" in bot.sent[0][1].embeds[0].description  # not "today"
+    # Same move a minute after midnight UTC (the daily key would have changed): no second alert.
+    bot.quotes["TON11419-USD"] = quote("TON11419-USD", price=4.99, change=7.0, quote_type="CRYPTOCURRENCY",
+                                       extra={"change_window": "24h"})
+    asyncio.run(bot.check_moves())
+    assert len(bot.sent) == 1
+    bot.quotes["TON11419-USD"] = quote("TON11419-USD", price=5.4, change=11.0, quote_type="CRYPTOCURRENCY",
+                                       extra={"change_window": "24h"})
+    asyncio.run(bot.check_moves())
+    assert len(bot.sent) == 2  # a bigger line still alerts
+    with bot.state.batch():
+        bot._prune(time.time())
+    assert bot.state.items("rolling_moves")  # kept for 24 hours
+    with bot.state.batch():
+        bot._prune(time.time() + 25 * 3600)
+    assert not bot.state.items("rolling_moves")
+
+
+def test_the_yahoo_cookie_visit_uses_the_yahoo_proxy():
+    from marketbot.http import Http, Response
+    from marketbot.yahoo import YahooClient
+    seen = []
+
+    class Backend:
+        name = "fake"
+
+        async def get(self, url, headers, timeout, proxy):
+            seen.append((url.split("?")[0], proxy))
+            return Response(404 if "fc.yahoo.com" in url else 200, "abc123" if "getcrumb" in url else "")
+
+        async def close(self):
+            pass
+
+    http = Http(backend=Backend(), proxies={"Yahoo": "http://proxy:8080"})
+    assert asyncio.run(YahooClient(http).crumb()) == "abc123"
+    assert seen == [("https://fc.yahoo.com", "http://proxy:8080"),
+                    ("https://query1.finance.yahoo.com/v1/test/getcrumb", "http://proxy:8080")]

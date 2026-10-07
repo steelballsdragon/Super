@@ -20,6 +20,7 @@ log = logging.getLogger(__name__)
 COINGECKO = "https://api.coingecko.com/api/v3"
 FEAR_GREED = "https://api.alternative.me/fng/"
 SHILLER_CSV = "https://raw.githubusercontent.com/datasets/s-and-p-500/main/data/data.csv"
+FAIL_FAST = 60.0  # seconds a failed fetch is remembered
 
 
 @dataclass
@@ -46,6 +47,7 @@ class Coin:
     volume: float
     change_30d: float | None = None
     change_1y: float | None = None
+    at: float = 0.0  # when CoinGecko sent it (unix time)
 
 
 @dataclass
@@ -101,6 +103,7 @@ class Sources:
     def __init__(self, session: aiohttp.ClientSession | None = None):
         self._session = session
         self._cache: dict[str, tuple[float, object]] = {}
+        self._failed: dict[str, tuple[float, BaseException]] = {}  # a recent failure, to fail fast for a minute
         self._locks: dict[str, asyncio.Lock] = {}
 
     async def session(self) -> aiohttp.ClientSession:
@@ -120,13 +123,20 @@ class Sources:
             hit = self._cache.get(key)
             if hit and time.monotonic() - hit[0] < ttl:
                 return hit[1]
+            failed = self._failed.get(key)
+            if failed and time.monotonic() - failed[0] < FAIL_FAST:
+                if hit:
+                    return hit[1]
+                raise failed[1]  # it failed moments ago: don't make every caller wait for the retries again
             try:
                 value = await fetch()
-            except Exception:
+            except Exception as exc:
+                self._failed[key] = (time.monotonic(), exc)
                 if hit:  # an old answer beats none when the source is down
                     log.warning("%s refresh failed; using the last one", key, exc_info=True)
                     return hit[1]
                 raise
+            self._failed.pop(key, None)
             self._cache[key] = (time.monotonic(), value)
             return value
 
@@ -162,12 +172,13 @@ class Sources:
             data = await self._get(f"{COINGECKO}/coins/markets", {
                 "vs_currency": "usd", "order": "market_cap_desc", "per_page": "250", "page": "1",
                 "price_change_percentage": "1h,24h,7d,30d,1y"})
+            now = time.time()
             return [Coin(c["symbol"].upper(), c["name"], c.get("current_price") or 0.0, c.get("market_cap") or 0.0,
                          c.get("market_cap_rank") or 0, c.get("price_change_percentage_1h_in_currency"),
                          c.get("price_change_percentage_24h_in_currency"),
                          c.get("price_change_percentage_7d_in_currency"), c.get("ath_change_percentage"),
                          c.get("total_volume") or 0.0, c.get("price_change_percentage_30d_in_currency"),
-                         c.get("price_change_percentage_1y_in_currency"))
+                         c.get("price_change_percentage_1y_in_currency"), now)
                     for c in data if c.get("current_price")]
         return (await self._cached("coins", 300, fetch))[:count]
 

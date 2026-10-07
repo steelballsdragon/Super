@@ -23,11 +23,12 @@ pytest.importorskip("discord")
 
 from marketbot import bot as botmod, embeds as E  # noqa: E402
 from marketbot.ai import NewsAI  # noqa: E402
-from marketbot.bot import NVIDIA_NEWS_PER_STEP, NVIDIA_STEPS, MarketBot  # noqa: E402
+from marketbot.bot import NVIDIA_NEWS_PER_STEP, NVIDIA_STEPS, STALE_QUOTE, MarketBot  # noqa: E402
 from marketbot.hours import NEW_YORK, is_trading_day, market_open  # noqa: E402
 from marketbot.http import TIMEOUT, Http, Response  # noqa: E402
 from marketbot.massive import (AFTER_NEW_SESSION, BASE, INDICATORS, JOBS, KEY_NAMES, MAX_NEWS, PLAN_RETRY,  # noqa: E402
-                               SOURCE, WINDOW, Massive, MassiveError, RateLimiter, Spotlight, find_key)
+                               RETRY_FIRST, RETRY_MAX, SNAPSHOT_FRESH, SOURCE, WINDOW, Massive, MassiveError,
+                               RateLimiter, Spotlight, find_key)
 from tests.market_helpers import quote  # noqa: E402
 
 KEY = "mk_S3cretMassiveKey_0123456789abcdef"
@@ -142,7 +143,7 @@ def make_massive(*answers, key=KEY, clock=None, calls=5):
     backend = Backend(*answers)
     clock = clock or Clock(1000.0)
     http = Http(backend, sleep=no_retry_sleep)
-    return Massive(key, http, RateLimiter(calls=calls, clock=clock, sleep=clock.sleep)), backend, clock
+    return Massive(key, http, RateLimiter(calls=calls, clock=clock, sleep=clock.sleep, wall=clock)), backend, clock
 
 
 def no_key_anywhere(m: Massive, exc: BaseException | None = None) -> None:
@@ -416,10 +417,18 @@ class FakeMassive:
                      "results": [{"ticker": t} for t in RELATED]}
 
 
-def desk(clock, key=KEY, path=None, calls=5, server=None, **kw):
+def limiter_on(clock, calls=5, mono_offset=0.0):
+    """A limiter on fake time. Its wall clock is `clock`; its monotonic clock runs `mono_offset` seconds behind (a
+    new process's monotonic clock has nothing to do with the last one's)."""
+    if mono_offset:
+        return RateLimiter(calls=calls, clock=lambda: clock.t - mono_offset, sleep=clock.sleep, wall=clock)
+    return RateLimiter(calls=calls, clock=clock, sleep=clock.sleep, wall=clock)
+
+
+def desk(clock, key=KEY, path=None, calls=5, server=None, mono_offset=0.0, **kw):
     """A Spotlight wired to a fake Massive server through the real Http and Massive classes."""
     server = server or FakeMassive(clock, **kw)
-    massive = Massive(key, Http(server, sleep=no_retry_sleep), RateLimiter(calls=calls, clock=clock, sleep=clock.sleep))
+    massive = Massive(key, Http(server, sleep=no_retry_sleep), limiter_on(clock, calls, mono_offset))
     return Spotlight(massive, path, clock=clock), server
 
 
@@ -460,10 +469,16 @@ def assert_fits(e) -> None:
 # find_key
 # =====================================================================================================================
 
+def test_the_documented_key_names_in_order():
+    assert KEY_NAMES == ("MASSIVE_API_KEY", "MASSIVE_KEY", "MASSIVE_API", "MASSIVE_TOKEN", "MASSIVE", "POLYGON_API_KEY",
+                         "POLYGON_IO_API_KEY", "POLYGONIO_API_KEY")
+
+
 @pytest.mark.parametrize("name", KEY_NAMES)
 def test_find_key_reads_each_documented_name(name):
     assert find_key({name: f"  {KEY}\n"}) == (KEY, name)
     assert find_key({name: "short"}) == ("short", name)  # a documented name is trusted whatever the value looks like
+    assert find_key({name: "has spaces: and colons"}) == ("has spaces: and colons", name)
 
 
 def test_find_key_prefers_the_documented_names_in_order():
@@ -471,20 +486,38 @@ def test_find_key_prefers_the_documented_names_in_order():
     for i, name in enumerate(KEY_NAMES):
         assert find_key({k: v for k, v in env.items() if k in KEY_NAMES[i:]}) == (f"value-for-{name}", name)
     # a documented name beats a look-alike, even one that sorts first
-    assert find_key({"A_MASSIVE_KEY_OLD": "x" * 32, "POLYGON": "pk"}) == ("pk", "POLYGON")
+    assert find_key({"A_MASSIVE_KEY_OLD": "x" * 32, "POLYGONIO_API_KEY": "pk"}) == ("pk", "POLYGONIO_API_KEY")
+    assert find_key({"A_MASSIVE_KEY_OLD": "x" * 32, "MASSIVE": "mk"}) == ("mk", "MASSIVE")
+    # a bare POLYGON is no documented name: never read, so the MASSIVE look-alike is the key
+    assert find_key({"A_MASSIVE_KEY_OLD": "x" * 32, "POLYGON": "pk"}) == ("x" * 32, "A_MASSIVE_KEY_OLD")
 
 
 @pytest.mark.parametrize("empty", ["", "   ", "\n\t "])
 def test_find_key_skips_empty_values(empty):
     assert find_key({"MASSIVE_API_KEY": empty, "POLYGON_API_KEY": "pk_live"}) == ("pk_live", "POLYGON_API_KEY")
     assert find_key({name: empty for name in KEY_NAMES}) == (None, None)
+    assert find_key({"MASSIVE_X": empty}) == (None, None)
     assert find_key({}) == (None, None)
 
 
-@pytest.mark.parametrize("name", ["MY_MASSIVE_SECRET", "massive_api_token", "RAILWAY_POLYGON_IO", "PolygonKey",
-                                  "MASSIVE_API_KEY_2", "MASSIVEKEY"])
-def test_find_key_finds_key_like_values_under_other_massive_or_polygon_names(name):
+@pytest.mark.parametrize("name", ["massive_api_token", "MASSIVE_API_KEY_2", "MASSIVEKEY", "Massive_ApiKey",
+                                  "RAILWAY_MASSIVE_IO", "MY_MASSIVE", "MASSIVE_POLYGON_KEY"])
+def test_find_key_finds_key_like_values_under_other_massive_names(name):
     assert find_key({name: f" {KEY} ", "OTHER": "x" * 40}) == (KEY, name)
+
+
+@pytest.mark.parametrize("name", [
+    # Polygon names other than the documented three: crypto setups keep wallet and explorer secrets under these
+    "POLYGON", "POLYGON_KEY", "POLYGON_API", "POLYGON_TOKEN", "POLYGON_APIKEY", "RAILWAY_POLYGON_IO", "PolygonKey",
+    "POLYGON_PRIVATE_KEY", "POLYGON_RPC_URL", "POLYGONSCAN_API_KEY", "POLYGON_MNEMONIC", "POLYGON_WALLET_KEY",
+    # MASSIVE names that say they hold something else
+    "MY_MASSIVE_SECRET", "massive_secret_key", "MASSIVE_PRIVATE_KEY", "MASSIVE_WALLET", "MASSIVE_SEED_PHRASE",
+    "MASSIVE_MNEMONIC", "MASSIVE_RPC", "MASSIVESCAN_KEY", "MASSIVE_PASSWORD", "massive_passphrase",
+])
+def test_find_key_never_reads_secrets_or_other_polygon_names(name):
+    assert find_key({name: f" {KEY} ", "OTHER": "x" * 40}) == (None, None)
+    # and a usable name next to it still wins, even when the refused one sorts first
+    assert find_key({name: KEY, "ZZ_MASSIVE_KEY": "z" * 20}) == ("z" * 20, "ZZ_MASSIVE_KEY")
 
 
 @pytest.mark.parametrize("value", ["https://api.massive.com", "true", "1", "your key here", "abc def ghi jkl mno pq",
@@ -492,17 +525,21 @@ def test_find_key_finds_key_like_values_under_other_massive_or_polygon_names(nam
                                    "=" * 20,
                                    "${MASSIVE_API_KEY}", '"' + "a" * 20 + '"'])
 def test_find_key_ignores_junk_under_look_alike_names(value):
-    assert find_key({"MASSIVE_URL": value, "POLYGON_SETTING": value}) == (None, None)
+    assert find_key({"MASSIVE_URL": value, "MASSIVE_SETTING": value}) == (None, None)
 
 
 def test_find_key_key_like_length_bounds_and_unrelated_names():
     assert find_key({"MASSIVE_X": "k" * 16}) == ("k" * 16, "MASSIVE_X")
     assert find_key({"MASSIVE_X": "k" * 128}) == ("k" * 128, "MASSIVE_X")
+    assert find_key({"MASSIVE_X": "k" * 15}) == (None, None)
+    assert find_key({"MASSIVE_X": "k" * 129}) == (None, None)
     assert find_key({"MASSIVE_X": "Ab_-09" * 4}) == ("Ab_-09" * 4, "MASSIVE_X")
     assert find_key({"GITHUB_TOKEN": KEY, "OPENAI_API_KEY": KEY, "MASS_IVE": KEY}) == (None, None)
-    # several look-alikes: the first by name, every time
-    env = {"Z_POLYGON": "z" * 20, "B_MASSIVE": "b" * 20, "M_MASSIVE": "m" * 20}
+    # several look-alikes: the first by name, every time (a POLYGON look-alike sorting first is never read)
+    env = {"A_POLYGON": "a" * 20, "B_MASSIVE": "b" * 20, "M_MASSIVE": "m" * 20, "Z_POLYGON": "z" * 20}
     assert find_key(env) == ("b" * 20, "B_MASSIVE")
+    # a look-alike with junk is skipped for the next one
+    assert find_key({"A_MASSIVE": "not a key", "B_MASSIVE": "b" * 20}) == ("b" * 20, "B_MASSIVE")
 
 
 def test_find_key_reads_the_process_environment_by_default(monkeypatch):
@@ -511,8 +548,13 @@ def test_find_key_reads_the_process_environment_by_default(monkeypatch):
         if "MASSIVE" in name.upper() or "POLYGON" in name.upper():
             monkeypatch.delenv(name)
     assert find_key() == (None, None)
-    monkeypatch.setenv("POLYGON_KEY", " pk_from_env ")
-    assert find_key() == ("pk_from_env", "POLYGON_KEY")
+    monkeypatch.setenv("POLYGON_KEY", " pk_from_env_0123456789 ")
+    monkeypatch.setenv("POLYGON_PRIVATE_KEY", "0x" + "ab" * 32)
+    assert find_key() == (None, None)  # neither is a Massive key
+    monkeypatch.setenv("POLYGON_API_KEY", " pk_from_env ")
+    assert find_key() == ("pk_from_env", "POLYGON_API_KEY")
+    monkeypatch.setenv("MASSIVE_API_KEY", KEY)
+    assert find_key() == (KEY, "MASSIVE_API_KEY")
 
 
 # =====================================================================================================================
@@ -728,8 +770,6 @@ def test_limiter_never_grants_more_than_five_in_any_61_seconds(model, seed):
         assert not [t for t in grants if start <= t < end], (start, end)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: acquire(timeout) waits for the limiter's lock with no deadline, so behind "
-                                       "another waiter it blocks (and can even succeed) long after its timeout")
 def test_acquire_timeout_holds_while_another_waiter_sleeps():
     vt = VirtualTime(1000.0)
     lim = RateLimiter(clock=vt, sleep=vt.sleep)
@@ -739,14 +779,142 @@ def test_acquire_timeout_holds_while_another_waiter_sleeps():
 
     async def patient():  # no timeout: holds the queue while it sleeps until 1061
         assert await lim.acquire() is True
+        out["patient"] = vt.t
 
     async def hurried():  # can wait one second at most
         ok = await lim.acquire(timeout=1.0)
         out["hurried"] = (ok, vt.t)
     asyncio.run(vt.run(patient(), hurried()))
-    ok, at = out["hurried"]
-    assert at <= 1001.0, f"acquire(timeout=1) returned {ok} after {at - 1000:.0f}s"
-    assert ok is False
+    assert out == {"hurried": (False, 1000.0), "patient": 1061.0}  # gave up at once, without sleeping
+    assert lim.total == 6 and list(lim._queue) == []
+
+
+def test_acquire_deadlines_are_judged_by_the_place_in_the_queue():
+    """Five slots free at 1061 (all used at 1000), the next five at 1122. Five patient waiters queue first."""
+    vt = VirtualTime(1000.0)
+    lim = RateLimiter(clock=vt, sleep=vt.sleep)
+    for _ in range(5):
+        assert lim.try_acquire()
+    out = {}
+
+    async def waiter(name, timeout):
+        ok = await lim.acquire(timeout)
+        out[name] = (ok, vt.t)
+    names = [f"patient{i}" for i in range(5)]
+    timeouts = {"one short": 121.0, "just enough": 122.0, "also enough": 122.0, "plenty": 500.0, "too short": 60.0}
+    asyncio.run(vt.run(*[waiter(n, None) for n in names], *[waiter(n, t) for n, t in timeouts.items()]))
+    assert out == {**{n: (True, 1061.0) for n in names},
+                   "one short": (False, 1000.0),  # sixth in line: its turn (1122) is after its deadline (1121)
+                   "just enough": (True, 1122.0), "also enough": (True, 1122.0), "plenty": (True, 1122.0),
+                   "too short": (False, 1000.0)}
+    assert lim.total == 5 + 8 and list(lim._queue) == []
+    assert 1000.0 not in [t for name, (ok, t) in out.items() if ok]
+
+
+def test_acquire_deadline_counts_a_penalty():
+    clock = Clock(1000.0)
+    lim = RateLimiter(clock=clock, sleep=clock.sleep)
+    lim.penalize(100.0)
+    assert asyncio.run(lim.acquire(99.9)) is False and clock.t == 1000.0 and clock.slept == []
+    assert asyncio.run(lim.acquire(100.0)) is True and clock.t == 1100.0 and lim.total == 1
+
+
+def test_slots_are_one_element_lists_and_the_bool_forms_agree():
+    clock = Clock(1000.0)
+    lim = RateLimiter(calls=2, clock=clock, sleep=clock.sleep)
+    a = lim.try_slot()
+    assert a == [1000.0] and isinstance(a, list)
+    clock.t = 1001.0
+    assert asyncio.run(lim.acquire_slot(0.0)) == [1001.0]
+    assert lim.try_slot() is None and lim.try_acquire() is False
+    assert asyncio.run(lim.acquire_slot(59.9)) is None and clock.t == 1001.0  # needs 60 s: gives up at once
+    assert asyncio.run(lim.acquire(59.9)) is False and clock.slept == []
+    slot = asyncio.run(lim.acquire_slot(60.0))
+    assert slot == [1061.0] and clock.t == 1061.0 and lim.total == 3
+    assert asyncio.run(lim.acquire_slot()) == [1062.0] and clock.slept == [60.0, 1.0]
+
+
+def test_finish_counts_the_window_from_when_the_request_ended():
+    clock = Clock(1000.0)
+    lim = RateLimiter(calls=2, clock=clock, sleep=clock.sleep)
+    slow, quick = lim.try_slot(), lim.try_slot()
+    clock.t = 1030.0
+    lim.finish(slow)  # a slow request: its answer came 30 s later
+    assert slow == [1030.0] and quick == [1000.0]
+    assert lim.wait_time() == 31.0  # the quick one frees first
+    clock.t = 1061.0
+    assert lim.used() == 1 and lim.wait_time() == 0.0
+    assert lim.try_slot() == [1061.0]
+    assert lim.wait_time() == 30.0  # the slow one still counts until 1091
+    clock.t = 1091.0
+    assert lim.used() == 1 and lim.try_acquire()
+
+
+def test_finish_never_moves_a_slot_back():
+    clock = Clock(1000.0)
+    lim = RateLimiter(calls=1, clock=clock, sleep=clock.sleep)
+    slot = lim.try_slot()
+    clock.t = 990.0  # a clock that seems to go back (only fake ones do)
+    lim.finish(slot)
+    assert slot == [1000.0]
+    clock.t = 1000.0
+    lim.finish(slot)
+    lim.finish(slot)
+    assert slot == [1000.0] and lim.used() == 1 and lim.total == 1  # finishing takes no extra slot
+
+
+def test_recent_gives_the_wall_clock_times_of_the_slots_still_counting():
+    mono = Clock(50.0)
+    wall0 = 1_791_000_000.0
+    lim = RateLimiter(clock=mono, sleep=mono.sleep, wall=lambda: wall0 + mono.t)
+    assert lim.recent() == []
+    slots = []
+    for t in (100.0, 50.0, 60.0):  # out of order on purpose
+        mono.t = t
+        slots.append(lim.try_slot())
+    mono.t = 105.0
+    lim.finish(slots[0])
+    assert lim.recent() == [wall0 + 50, wall0 + 60, wall0 + 105]  # sorted, and the finished one re-stamped
+    mono.t = 111.0
+    assert lim.recent() == [wall0 + 60, wall0 + 105]  # the one from 50 is a window old
+    mono.t = 166.0
+    assert lim.recent() == []
+
+
+def test_restore_counts_what_a_previous_run_sent_in_the_last_window():
+    mono = Clock(10.0)  # a new process: its monotonic clock starts over
+    wall = 1_791_000_000.0
+    lim = RateLimiter(clock=mono, sleep=mono.sleep, wall=lambda: wall + mono.t - 10.0)
+    lim.restore([wall - 70, wall - 61, wall - 60.5, wall - 30, wall, wall + 5, "x", None, True, [1], {"t": wall}])
+    assert lim.used() == 3 and lim.total == 0  # only those still inside the window; restoring isn't sending
+    assert lim.recent() == [wall - 60.5, wall - 30, wall]
+    assert lim.wait_time() == 0.0
+    mono.t = 10.5
+    assert lim.used() == 2  # the one from 60.5 s before the restart has just left the window
+    lim.restore([wall - 20, wall - 10, wall - 5])
+    assert lim.used() == 5 and lim.recent() == [wall - 30, wall - 20, wall - 10, wall - 5, wall]
+    assert lim.wait_time() == 30.5 and not lim.try_acquire()
+    lim.restore([wall - 1, wall - 2])  # never more than `calls`
+    assert lim.used() == 5
+    lim.restore(None)
+    lim.restore([])
+    assert lim.used() == 5
+    mono.t = 10.0 + 61.0
+    assert lim.used() == 0 and lim.try_acquire()
+
+
+def test_recent_and_restore_carry_the_budget_across_a_restart():
+    clock = Clock(1_791_000_000.0)
+    first = limiter_on(clock, mono_offset=1_000_000.0)
+    for _ in range(5):
+        assert first.try_acquire()
+    saved = first.recent()
+    assert saved == [clock.t] * 5
+    clock.t += 20.0
+    second = limiter_on(clock, mono_offset=1_791_000_000.0 - 3.0)  # the new process's clock reads 3 + 20
+    second.restore(saved)
+    assert second.used() == 5 and second.wait_time() == 41.0 and not second.try_acquire()
+    assert asyncio.run(second.acquire()) is True and clock.t == saved[0] + 61.0
 
 
 # =====================================================================================================================
@@ -953,33 +1121,117 @@ def test_a_success_clears_the_last_error_and_errors_stay_short():
     assert m.last_error is None
 
 
-@pytest.mark.parametrize("body", ["", "   ", "null", "{}", "[]"])
-def test_empty_answers_are_empty_dicts(body):
+@pytest.mark.parametrize("status", [200, 201, 204])
+@pytest.mark.parametrize("body", ["", "   ", "null", "[]", "[1, 2, 3]", '"OK"', "42", "true",
+                                  "<html><body>Service temporarily unavailable</body></html>", "{not json", '{"a": 1'])
+def test_a_2xx_answer_that_is_not_a_json_object_raises(status, body):
+    m, backend, _ = make_massive(Response(status, body))
+    with pytest.raises(MassiveError) as err:
+        asyncio.run(m.get("/v1/marketstatus/now"))
+    assert err.value.kind == "other" and err.value.status == status
+    assert str(err.value) == m.last_error == f"Massive sent an unreadable answer (HTTP {status})"
+    assert len(backend.calls) == 1 and m.limiter.total == 1 and m.enabled  # no retry, and the key is fine
+    no_key_anywhere(m, err.value)
+
+
+@pytest.mark.parametrize("body,data", [("{}", {}), ('{"results": []}', {"results": []}),
+                                       (' {"a": {"b": [1, null]}} ', {"a": {"b": [1, None]}})])
+def test_a_json_object_answer_is_returned_as_it_came(body, data):
     m, _, _ = make_massive(Response(200, body))
-    assert asyncio.run(m.get("/v1/marketstatus/now")) == {}
+    assert asyncio.run(m.get("/v1/marketstatus/now")) == data and m.last_error is None
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: Massive.get raises AttributeError (not MassiveError) when an error "
-                                       "answer's JSON is a string, list or number instead of an object")
-@pytest.mark.parametrize("status,kind", [(401, "key"), (403, "plan"), (404, "other")])
-@pytest.mark.parametrize("body", ['"Forbidden"', "[1, 2]", "42"])
+@pytest.mark.parametrize("status,kind", [(401, "key"), (403, "plan"), (404, "other"), (400, "other")])
+@pytest.mark.parametrize("body", ['"Forbidden"', "[1, 2]", "42", "null", "", "true"])
 def test_error_answers_with_odd_json_still_raise_massive_error(status, kind, body):
     m, backend, _ = make_massive(Response(status, body))
     with pytest.raises(MassiveError) as err:
         asyncio.run(m.get("/v1/marketstatus/now"))
     assert err.value.kind == kind and err.value.status == status and len(backend.calls) == 1
+    expected = {401: "Massive rejected the key (HTTP 401)", 403: "not in this Massive plan",
+                404: "HTTP 404: ", 400: "HTTP 400: "}[status]
+    assert str(err.value) == expected
+    assert m.key_rejected == (status == 401)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: Massive.get copies the server's error text into MassiveError/last_error "
-                                       "(shown by /status) without removing the key, so an answer echoing it leaks it")
-@pytest.mark.parametrize("status", [401, 400, 404])
-def test_an_answer_that_echoes_the_key_does_not_leak_it(status):
-    body = {"status": "ERROR", "request_id": "x", "error": f"API key '{KEY}' is not valid",
-            "message": f"API key '{KEY}' is not valid"}
-    m, _, _ = make_massive(reply(status, body))
+ECHOES = {  # answers (or failures) that repeat the key back
+    "401": reply(401, {"status": "ERROR", "error": f"key {KEY}"}),
+    "401 long": reply(401, {"status": "ERROR", "request_id": "x", "error": f"API key '{KEY}' is not valid",
+                            "message": f"API key '{KEY}' is not valid"}),
+    "400": reply(400, {"status": "ERROR", "error": f"bad key {KEY}"}),
+    "403": reply(403, {"status": "NOT_AUTHORIZED", "message": f"{KEY} is not entitled to this data"}),
+    "404": reply(404, {"status": "NOT_FOUND", "message": f"nothing for {KEY}"}),
+    "418": reply(418, {"error": f"{KEY}{KEY}"}),
+    "500": reply(500, f"crash for {KEY}"),
+    "503 json": reply(503, {"error": f"key {KEY}"}),
+    "network": OSError(f"connect failed (Authorization: Bearer {KEY})"),
+}
+
+
+@pytest.mark.parametrize("answer", list(ECHOES.values()), ids=list(ECHOES))
+def test_an_answer_that_echoes_the_key_does_not_leak_it(answer):
+    m, _, _ = make_massive(answer)
     with pytest.raises(MassiveError) as err:
         asyncio.run(m.get("/v1/marketstatus/now"))
-    no_key_anywhere(m, err.value)
+    for text in (str(err.value), repr(err.value), m.last_error or ""):
+        assert KEY not in text, text
+    assert "…" in str(err.value)  # replaced, not dropped
+
+
+@pytest.mark.parametrize("answer", [reply(401, {"error": KEY}), reply(500, f"crash for {KEY}"), reply(503, {"error": KEY}),
+                                    OSError(f"connect failed (Authorization: Bearer {KEY})")],
+                         ids=["401", "500", "503", "network"])
+def test_a_key_echoed_by_massive_stays_out_of_the_status_health_line(answer):
+    m, _, _ = make_massive(answer)
+    with pytest.raises(MassiveError):
+        asyncio.run(m.get("/v1/marketstatus/now"))
+    h = m.http.health[SOURCE]
+    assert KEY not in h.line() and KEY not in (h.last_error or "")
+
+
+@pytest.mark.parametrize("body", [{"error": "GET /v2/x?apiKey=abc123&key=zzz failed"},
+                                  {"message": "see https://api.massive.com/v1/x?apikey=SECRET1&token=SECRET2"}])
+def test_key_parameters_in_error_text_are_scrubbed(body):
+    m, _, _ = make_massive(reply(400, body))
+    with pytest.raises(MassiveError) as err:
+        asyncio.run(m.get("/v1/marketstatus/now"))
+    for secret in ("abc123", "zzz", "SECRET1", "SECRET2"):
+        assert secret not in str(err.value) and secret not in m.last_error
+    assert "=…" in str(err.value)
+
+
+class SlowBackend(Backend):
+    """Each request takes `seconds` of fake time before its answer (or failure) comes."""
+
+    def __init__(self, clock, seconds, *answers):
+        super().__init__(*answers)
+        self.clock, self.seconds = clock, seconds
+
+    async def get(self, url, headers, timeout, proxy=None):
+        self.clock.t += self.seconds
+        return await super().get(url, headers, timeout, proxy)
+
+
+SLOW = {"ok": reply(200, {"n": 1}), "network": OSError("reset"), "500": reply(500, "x"),
+        "404": reply(404, {"message": "no"}), "403": reply(403, NOT_ENTITLED), "garbled": Response(200, "<html>"),
+        "429": reply(429, {"error": "too many"}), "401": reply(401, {"error": "Unknown API Key"})}
+
+
+@pytest.mark.parametrize("answer", list(SLOW.values()), ids=list(SLOW))
+def test_a_slow_request_counts_against_the_budget_from_when_it_ended(answer):
+    clock = Clock(1000.0)
+    backend = SlowBackend(clock, 30.0, answer)
+    m = Massive(KEY, Http(backend, sleep=no_retry_sleep), limiter_on(clock, calls=1))
+    try:
+        asyncio.run(m.get("/v1/marketstatus/now"))
+    except MassiveError:
+        pass
+    assert clock.t == 1030.0 and len(backend.calls) == 1
+    assert m.limiter.recent() == [1030.0] and m.limiter.total == 1  # the slot is finished, success or not
+    clock.t = 1090.9
+    assert m.limiter.try_slot() is None
+    clock.t = 1091.0
+    assert m.limiter.wait_time() == 0.0
 
 
 # =====================================================================================================================
@@ -995,7 +1247,7 @@ def test_everything_is_due_on_a_fresh_spotlight_in_priority_order():
     assert set(AFTER_NEW_SESSION) == {"daily", "minutes", *INDICATORS}
 
 
-@pytest.mark.parametrize("job", [j for j in JOBS if not j.paid], ids=lambda j: j.name)
+@pytest.mark.parametrize("job", JOBS, ids=lambda j: j.name)
 @pytest.mark.parametrize("market_is_open", [True, False])
 def test_each_job_comes_due_after_its_interval(job, market_is_open):
     clock = Clock(ny(2026, 10, 6, 12, 0))
@@ -1003,7 +1255,6 @@ def test_each_job_comes_due_after_its_interval(job, market_is_open):
     every = job.every_open if market_is_open else job.every_closed
     for other in JOB_NAMES:
         spot.ran[other] = clock.t
-    spot.ok_at["snapshot"] = clock.t
     spot.ran[job.name] = clock.t - every + 1
     assert job.name not in [j.name for j in spot.due(market_is_open)]
     spot.ran[job.name] = clock.t - every
@@ -1012,24 +1263,52 @@ def test_each_job_comes_due_after_its_interval(job, market_is_open):
     spot.ran[job.name] = clock.t - max(every, PLAN_RETRY) + 1
     assert job.name not in [j.name for j in spot.due(market_is_open)]
     spot.ran[job.name] = clock.t - max(every, PLAN_RETRY)
-    assert job.name in [j.name for j in spot.due(market_is_open)]
+    assert [j.name for j in spot.due(market_is_open)] == [job.name]
+    # a passing failure's retry time holds the job back, whatever its interval says
+    spot.retry_at[job.name] = clock.t + 1
+    assert spot.due(market_is_open) == []
+    spot.retry_at[job.name] = clock.t
+    assert [j.name for j in spot.due(market_is_open)] == [job.name]
 
 
-def test_the_paid_snapshot_is_probed_rarely_until_it_works():
+def test_the_intervals_and_retry_constants():
+    assert {j.name: (j.every_open, j.every_closed) for j in JOBS} == {
+        "snapshot": (60, 900), "news": (180, 600), "prev": (900, 1800), "status": (900, 3600),
+        "daily": (21600, 21600), "minutes": (21600, 21600), "sma50": (21600, 21600), "sma200": (21600, 21600),
+        "ema20": (21600, 21600), "rsi14": (21600, 21600), "macd": (21600, 21600), "details": (86400, 86400),
+        "dividends": (86400, 86400), "splits": (604800, 604800), "related": (604800, 604800)}
+    assert PLAN_RETRY == 12 * HOUR and (RETRY_FIRST, RETRY_MAX) == (120.0, 1800.0) and SNAPSHOT_FRESH == 1800.0
+
+
+def test_the_snapshot_is_due_on_its_interval_until_massive_says_it_is_not_in_the_plan():
     clock = Clock(ny(2026, 10, 6, 12, 0))
-    spot, _ = desk(clock)
+    t0 = clock.t
+    spot, server = desk(clock)
     for name in JOB_NAMES:
         spot.ran[name] = clock.t
-    clock.t += 3600
-    assert "snapshot" not in [j.name for j in spot.due(True)]  # untested: once every 12 hours
-    clock.t = spot.ran["snapshot"] + PLAN_RETRY
-    assert "snapshot" in [j.name for j in spot.due(True)]
-    spot.ok_at["snapshot"] = spot.ran["snapshot"] = clock.t  # it worked: every minute while open
+    # never answered yet: no special rule, just its interval (a minute while open, 15 minutes while closed)
+    clock.t = t0 + 59
+    assert "snapshot" not in [j.name for j in spot.due(True)]
+    clock.t = t0 + 60
+    assert [j.name for j in spot.due(True)] == ["snapshot"] and "snapshot" not in spot.ok_at
+    assert "snapshot" not in [j.name for j in spot.due(False)]
+    clock.t = t0 + 900
+    assert "snapshot" in [j.name for j in spot.due(False)]
+    # the free plan answers 403: from then on every 12 hours, open or closed
+    assert asyncio.run(spot.step(True)) == ["news", "prev", "status"]
+    assert server.of("snapshot")[-1].t == t0 + 900 and spot.not_in_plan == {"snapshot": t0 + 900}
+    assert spot.ran["snapshot"] == t0 + 900 and spot.plan() == "free plan (end of day)"
+    for t, due in ((t0 + 900 + 60, False), (t0 + 900 + PLAN_RETRY - 1, False), (t0 + 900 + PLAN_RETRY, True)):
+        clock.t = t
+        assert ("snapshot" in [j.name for j in spot.due(True)]) is due
+        assert ("snapshot" in [j.name for j in spot.due(False)]) is due
+    # an upgraded key: the next probe works, and it's back to every minute
+    server.paid = True
+    assert "snapshot" in asyncio.run(spot.step(True))
+    assert spot.not_in_plan == {} and spot.ok_at["snapshot"] == clock.t
+    assert spot.plan() == "paid plan (delayed snapshot available)"
     clock.t += 60
     assert "snapshot" in [j.name for j in spot.due(True)]
-    assert "snapshot" not in [j.name for j in spot.due(False)]  # 15 minutes while closed
-    clock.t += 840
-    assert "snapshot" in [j.name for j in spot.due(False)]
 
 
 def test_the_first_step_asks_for_the_most_important_things_first():
@@ -1069,49 +1348,160 @@ def test_a_rejected_key_stops_the_desk_at_once():
     assert asyncio.run(spot.step(True)) == []
     assert len(server.calls) == 1  # the first 401 ends the step
     assert spot.massive.key_rejected and not spot.enabled and spot.plan() == "key rejected"
-    assert "rejected the key" in spot.errors["snapshot"]
+    assert spot.massive.last_error == "Massive rejected the key (Unknown API Key)"
+    assert spot.ran == spot.ok_at == spot.retry_at == spot.errors == {}  # nothing is marked: the key is the problem
     simulate(spot, clock, hours=2)
     assert len(server.calls) == 1
 
 
 def test_a_429_ends_the_step_and_silences_the_desk_for_a_window():
     clock = Clock(ny(2026, 10, 6, 12, 0))
+    t0 = clock.t
     spot, server = desk(clock)
     server.hooks["prev"] = once(reply(429, {"status": "ERROR", "error": "exceeded the maximum requests per minute"}))
     assert asyncio.run(spot.step(True)) == ["news"]
     assert [c.name for c in server.calls] == ["snapshot", "news", "prev"]  # status and the rest wait
-    assert spot.errors["prev"] == "rate limited by Massive (backing off a minute)"
-    hit = server.calls[-1].t
+    assert spot.massive.last_error == "rate limited by Massive (backing off a minute)"
+    assert "prev" not in spot.ran and "prev" not in spot.errors and "prev" not in spot.retry_at
+    assert spot.massive.limiter.wait_time() == WINDOW
     simulate(spot, clock, hours=0.5)
-    assert min(c.t for c in server.calls[3:]) >= hit + WINDOW
+    later = server.calls[3:]
+    assert later[0].name == "prev" and later[0].t == t0 + 75  # the first step after the minute's pause
+    assert min(c.t for c in later) >= t0 + WINDOW
     assert_budget([c.t for c in server.calls])
+    assert spot.prev and "prev" in spot.ok_at
 
 
 def test_one_broken_answer_does_not_stop_the_other_jobs():
     clock = Clock(ny(2026, 10, 6, 12, 0))
+    t0 = clock.t
     spot, server = desk(clock)
     server.hooks["news"] = reply(200, {"results": "not a list"})
-    server.hooks["related"] = reply(200, {"results": ["AMD", "INTC"]})
+    server.hooks["related"] = reply(200, {"results": ["AMD", {"ticker": 7}, {"ticker": "INTC"}, None, {"t": "X"}]})
     server.hooks["status"] = OSError("network is unreachable")
-    simulate(spot, clock, hours=0.05)  # three steps: everything once
-    assert set(spot.ok_at) == set(JOB_NAMES) - {"snapshot", "news", "status", "related"}
-    assert spot.errors["news"].startswith("AttributeError")
-    assert spot.errors["related"].startswith("AttributeError")
-    assert "network is unreachable" in spot.errors["status"]
-    assert spot.related == [] and spot.news == []
-    # tried ones wait for their next turn, not for the next step
-    assert len(server.of("news")) == len(server.of("status")) == len(server.of("related")) == 1
+    simulate(spot, clock, hours=0.1)
+    assert set(spot.ok_at) == set(JOB_NAMES) - {"snapshot", "news", "status"}
+    assert spot.errors == {"news": "unexpected news answer", "status": "OSError: network is unreachable"}
+    assert spot.related == ["INTC"] and spot.news == []  # only the rows that make sense are kept
+    # the failed ones are tried again in 2 minutes (when the budget allows), then 4: not after their interval
+    assert [c.t - t0 for c in server.of("news")] == [c.t - t0 for c in server.of("status")] == [0, 150]
+    assert spot.retry_at == {"news": t0 + 150 + 240, "status": t0 + 150 + 240}
+    assert "news" not in spot.ran and "status" not in spot.ran
+    assert len(server.of("related")) == 1 and spot.ran["related"] == t0 + 225
 
 
 def test_odd_but_valid_json_answers_never_escape_step():
     clock = Clock(ny(2026, 10, 6, 12, 0))
-    spot, server = desk(clock)
+    t0 = clock.t
+    spot, server = desk(clock, calls=100)
     for name in JOB_NAMES:
         server.hooks[name] = Response(200, "[1, 2, 3]")
-    simulate(spot, clock, hours=0.05)  # three steps: everything once
-    assert len(server.calls) == len(JOB_NAMES) - 1  # minutes never asks without a previous bar
-    assert set(spot.errors) == set(JOB_NAMES) - {"status"}  # the status is kept as it came
-    assert spot.prev is None and spot.news == [] and spot.daily == [] and spot.details is None
+    assert asyncio.run(spot.step(True)) == []
+    assert [c.name for c in server.calls] == [n for n in JOB_NAMES if n != "minutes"]  # no session to ask minutes for
+    assert spot.errors == {n: ("waiting for the previous session's bar" if n == "minutes"
+                               else "Massive sent an unreadable answer (HTTP 200)") for n in JOB_NAMES}
+    assert spot.retry_at == {n: t0 + 120 for n in JOB_NAMES} and spot.ran == {} and spot.ok_at == {}
+    assert spot.prev is None and spot.status is None and spot.snapshot is None and spot.details is None
+    assert spot.news == spot.daily == spot.minutes == spot.dividends == spot.splits == spot.related == []
+    assert spot.indicators == {}
+    clock.t = t0 + 119
+    assert asyncio.run(spot.step(True)) == [] and len(server.calls) == len(JOB_NAMES) - 1
+    server.hooks.clear()
+    clock.t = t0 + 120
+    assert asyncio.run(spot.step(True)) == [n for n in JOB_NAMES if n != "snapshot"]
+    assert spot.errors == {} and spot.not_in_plan.keys() == {"snapshot"}
+    assert not [n for n, t in spot.retry_at.items() if t > clock.t]
+
+
+# How each kind of failure of one job (news) is handled: (the answer, how the step goes on, when news is asked again)
+OUTCOMES = {
+    "timeout": (TimeoutError("timed out"), "retry", 120),
+    "connection reset": (OSError("Connection reset by peer"), "retry", 120),
+    "500": (reply(500, "Internal Server Error"), "retry", 120),
+    "503": (reply(503, ""), "retry", 120),
+    "html with 200": (Response(200, "<html>captive portal</html>"), "retry", 120),
+    "empty 200": (Response(200, ""), "retry", 120),
+    "a list": (Response(200, "[]"), "retry", 120),
+    "the wrong shape": (reply(200, {"results": "nope"}), "retry", 120),
+    "404": (reply(404, {"status": "NOT_FOUND", "message": "Not found"}), "ran", 180),
+    "400": (reply(400, {"status": "ERROR", "error": "bad request"}), "ran", 180),
+    "418": (reply(418, "{not json"), "ran", 180),
+    "403": (reply(403, NOT_ENTITLED), "plan", None),
+    "429": (reply(429, {"status": "ERROR", "error": "too many"}), "stop", 75),
+    "401": (reply(401, {"status": "ERROR", "error": "Unknown API Key"}), "stop", None),
+}
+
+
+@pytest.mark.parametrize("answer,how,again", list(OUTCOMES.values()), ids=list(OUTCOMES))
+def test_how_each_failure_is_handled(answer, how, again):
+    clock = Clock(ny(2026, 10, 6, 12, 0))
+    t0 = clock.t
+    spot, server = desk(clock, calls=100)
+    server.hooks["news"] = once(answer)
+    done = asyncio.run(spot.step(True))
+    if how == "stop":  # 429 and 401: the step ends there, and nothing is marked
+        assert [c.name for c in server.calls] == ["snapshot", "news"] and done == []
+        assert "news" not in spot.ran and "news" not in spot.retry_at and "news" not in spot.errors
+    else:  # the other jobs carry on
+        assert done == [n for n in JOB_NAMES if n not in ("snapshot", "news")]
+        assert len(server.calls) == len(JOB_NAMES)
+        assert "news" not in spot.ok_at
+    if how == "retry":
+        assert "news" not in spot.ran and spot.retry_at["news"] == t0 + 120 and spot.errors["news"]
+    elif how == "ran":
+        assert spot.ran["news"] == t0 and "news" not in spot.retry_at and spot.errors["news"].startswith("HTTP 4")
+    elif how == "plan":
+        assert spot.ran["news"] == spot.not_in_plan["news"] == t0 and "news" not in spot.errors
+    simulate(spot, clock, hours=0.2)
+    asked = [c.t - t0 for c in server.of("news")]
+    assert asked[0] == 0 and (asked[1] if len(asked) > 1 else None) == again
+    if again is not None:
+        assert "news" in spot.ok_at and "news" not in spot.errors and "news" not in spot.retry_at
+
+
+def test_passing_failures_back_off_doubling_up_to_half_an_hour():
+    clock = Clock(ny(2026, 10, 6, 12, 0))
+    t0 = clock.t
+    spot, server = desk(clock, calls=1000)
+    server.hooks["status"] = OSError("network is unreachable")
+    simulate(spot, clock, hours=2)
+    assert [c.t - t0 for c in server.of("status")] == [0, 120, 360, 840, 1800, 3600, 5400]
+    assert spot.retry_at["status"] == t0 + 5400 + 1800 and spot._fails["status"] == 7
+    assert "status" not in spot.ran and "status" not in spot.ok_at
+    assert spot.errors["status"] == "OSError: network is unreachable"
+    # the other jobs kept to their own intervals meanwhile
+    assert [c.t - t0 for c in server.of("prev")] == [0, 900, 1800, 2700, 3600, 4500, 5400, 6300]
+    # it comes back: everything about the failures is forgotten, and the job keeps its interval again
+    server.hooks.clear()
+    assert "status" in asyncio.run(spot.step(True))
+    assert spot.ok_at["status"] == spot.ran["status"] == t0 + 7200
+    for d in (spot.retry_at, spot._fails, spot.errors):
+        assert "status" not in d
+    simulate(spot, clock, hours=0.51)
+    assert [c.t - t0 for c in server.of("status")][-3:] == [7200, 8100, 9000]
+
+
+def test_a_403_for_another_job_keeps_its_data_and_asks_again_in_12_hours():
+    clock = Clock(ny(2026, 10, 6, 12, 0))
+    t0 = clock.t
+    spot, server = desk(clock)
+    simulate(spot, clock, hours=0.1)
+    daily = list(spot.daily)
+    assert daily and "daily" in spot.ok_at
+    server.hooks["daily"] = reply(403, TODAY_REFUSED)
+    spot.ran.pop("daily")
+    clock.t = t0 + 1000
+    assert "daily" not in asyncio.run(spot.step(True))
+    assert spot.not_in_plan["daily"] == spot.ran["daily"] == t0 + 1000
+    assert "daily" not in spot.ok_at and "daily" not in spot.errors
+    assert spot.daily == daily  # the bars it has are still good
+    assert spot.plan() == "free plan (end of day)"
+    clock.t = t0 + 1000 + PLAN_RETRY - 1
+    assert "daily" not in [j.name for j in spot.due(True)]
+    clock.t = t0 + 1000 + PLAN_RETRY
+    server.hooks.clear()
+    assert "daily" in asyncio.run(spot.step(True))
+    assert "daily" not in spot.not_in_plan and spot.ok_at["daily"] == clock.t
 
 
 # =====================================================================================================================
@@ -1340,74 +1730,83 @@ def test_last_session_is_the_previous_bar_or_yesterday():
     assert spot.last_session() == "2026-10-04"  # no bar yet: yesterday (a Sunday, so nothing is asked for today)
     spot.prev = {"t": session_ms(date(2026, 10, 2)), "c": 1.0}
     assert spot.last_session() == "2026-10-02"
-    spot.prev = {"t": 0}
-    assert spot.last_session() == "2026-10-04"
+    for t in (0, None, "1759377600000", True, float("nan")):
+        spot.prev = {"t": t}
+        assert spot.last_session() == "2026-10-04", t
     for hour in range(24):
         for minute in (0, 59):
             clock.t = ny(2026, 10, 6, hour, minute)
             assert Spotlight(None, clock=clock).last_session() == "2026-10-05"
-    clock.t = ny(2026, 3, 9, 0, 30)  # the day after the clocks went forward
-    assert Spotlight(None, clock=clock).last_session() < "2026-03-09"
+    for when, day in (((2026, 3, 9, 0, 30), "2026-03-08"),  # the day after the clocks went forward
+                      ((2026, 3, 8, 23, 30), "2026-03-07"),  # the 23-hour day itself
+                      ((2026, 1, 1, 0, 0), "2025-12-31")):
+        clock.t = ny(*when)
+        assert Spotlight(None, clock=clock).last_session() == day, when
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: without a previous bar last_session() is 'now minus 24 hours', which is "
-                                       "still today late on the 25-hour day when the clocks go back")
 def test_last_session_is_never_today_on_the_25_hour_day():
-    for hour, minute in ((0, 30), (12, 0), (22, 59), (23, 0), (23, 30), (23, 59)):
+    """Sunday 2026-11-01 has 25 hours in New York. 'Now minus 24 hours' would still be that Sunday late in the day."""
+    for hour, minute in ((0, 30), (1, 30), (12, 0), (22, 59), (23, 0), (23, 30), (23, 59)):
         clock = Clock(ny(2026, 11, 1, hour, minute))
         spot, server = desk(clock)
         server.prev_bar = "none"
-        assert spot.last_session() < "2026-11-01", (hour, minute)
+        assert spot.last_session() == "2026-10-31", (hour, minute)
         simulate(spot, clock, hours=0.1)
-        for c in server.of("daily"):
-            assert c.match.group(3) < "2026-11-01"
-        for name in INDICATORS:
-            for c in server.of(name):
-                assert c.params["timestamp.lte"] < "2026-11-01"
+        asked = server.of("daily") + [c for name in INDICATORS for c in server.of(name)]
+        assert len(asked) == 1 + len(INDICATORS), (hour, minute)
+        for c in asked:
+            end = c.match.group(3) if c.name == "daily" else c.params["timestamp.lte"]
+            # the calendar day before the server's today (at 23:59 the indicators are asked after midnight)
+            assert end == (c.today - timedelta(days=1)).isoformat() < str(c.today), (hour, minute, c.name)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: once the snapshot worked, a later 403 leaves ok_at['snapshot'] and the "
-                                       "old snapshot: plan() still says paid and the board shows a stale delayed price")
 def test_losing_the_paid_snapshot_is_noticed():
     clock = Clock(ny(2026, 10, 6, 10, 0))
     spot, server = desk(clock, paid=True)
     simulate(spot, clock, hours=0.1)
-    assert spot.plan() == "paid plan (delayed snapshot available)" and spot.snapshot
+    assert spot.plan() == "paid plan (delayed snapshot available)" and spot.snapshot and spot.snapshot_fresh()
+    q = quote("NVDA", price=180.0, change=1.0)
+    assert "15-min delayed" in E.nvidia_board(q, spot).description
     server.paid = False  # the trial ended, or the key was swapped for a free one
     simulate(spot, clock, hours=0.1)
     assert "snapshot" in spot.not_in_plan  # Massive said so
+    assert spot.snapshot is None and "snapshot" not in spot.ok_at and not spot.snapshot_fresh()
     assert spot.plan() == "free plan (end of day)"
-    board = E.nvidia_board(quote("NVDA", price=180.0, change=1.0), spot)
+    board = E.nvidia_board(q, spot)
     assert "15-min delayed" not in board.description
+    assert board.footer.text.startswith("Live price: Yahoo Finance · Massive (free plan (end of day)): ")
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a 429 marks the job as run, so the job that was rate limited waits its "
-                                       "whole interval (a week for related/splits) instead of the next step")
 def test_a_rate_limited_job_is_asked_again_after_the_back_off():
     clock = Clock(ny(2026, 10, 6, 12, 0))
     spot, server = desk(clock)
     server.hooks["related"] = once(reply(429, {"status": "ERROR", "error": "exceeded the maximum requests per minute"}))
     simulate(spot, clock, hours=1)
-    assert len(server.of("related")) == 2
-    assert spot.related == RELATED[:10] and "related" not in spot.errors
+    first, second = server.of("related")  # asked twice in the hour, not once a week
+    assert WINDOW <= second.t - first.t <= WINDOW + 15  # the first step after the minute's pause
+    assert spot.related == RELATED[:10] and "related" not in spot.errors and spot.ok_at["related"] == second.t
+    assert_budget([c.t for c in server.calls])
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a 200 answer that isn't JSON becomes {}, so the spotlight replaces good "
-                                       "data with nothing and marks it fresh (details for a day, related for a week)")
 def test_a_garbled_answer_does_not_wipe_good_data():
     clock = Clock(ny(2026, 10, 6, 12, 0))
     spot, server = desk(clock)
     simulate(spot, clock, hours=0.1)
     names = ("daily", "details", "dividends", "splits", "related")
     before = {name: getattr(spot, name) for name in names}
+    ok_before = {name: spot.ok_at[name] for name in names}
     assert all(before.values())
     html = Response(200, "<html><body><h1>Service temporarily unavailable</h1></body></html>")
     for name in names:
         server.hooks[name] = html
         spot.ran.pop(name)
+    t1 = clock.t
     simulate(spot, clock, hours=0.1)
     assert {name: getattr(spot, name) for name in names} == before
-    assert set(names) <= set(spot.errors)
+    assert {name: spot.ok_at[name] for name in names} == ok_before  # not counted as fresh
+    for name in names:
+        assert spot.errors[name] == "Massive sent an unreadable answer (HTTP 200)"
+        assert name not in spot.ran and spot.retry_at[name] > t1  # tried again soon, not after a day or a week
 
 
 # =====================================================================================================================
@@ -1539,45 +1938,188 @@ def test_plan_strings():
     assert Spotlight(None, clock=clock).plan() == "no key"
     spot, _ = desk(clock)
     assert spot.plan() == "plan being checked"
-    spot.not_in_plan["snapshot"] = clock.t
-    assert spot.plan() == "free plan (end of day)"
     spot.ok_at["snapshot"] = clock.t
     assert spot.plan() == "paid plan (delayed snapshot available)"
+    spot.not_in_plan["snapshot"] = clock.t  # Massive's 403 wins over an old success
+    assert spot.plan() == "free plan (end of day)"
+    spot.ok_at.clear()
+    assert spot.plan() == "free plan (end of day)"
+    spot.not_in_plan = {"daily": clock.t}  # another job outside the plan says nothing about the snapshot
+    assert spot.plan() == "plan being checked"
+    spot.not_in_plan["snapshot"] = clock.t
     spot.massive.key_rejected = True
     assert spot.plan() == "key rejected"
     assert desk(clock, key="")[0].plan() == "no key"
+    assert desk(clock, key=None)[0].plan() == "no key"
+
+
+def test_snapshot_fresh_needs_a_usable_key_a_snapshot_and_a_recent_success():
+    clock = Clock(ny(2026, 10, 6, 12, 0))
+    spot, _ = desk(clock)
+    assert not spot.snapshot_fresh()
+    spot.snapshot = {"lastTrade": {"p": 181.0}}
+    assert not spot.snapshot_fresh()  # it never worked
+    for age, fresh in ((0, True), (1799.9, True), (1800, False), (86400, False)):
+        spot.ok_at["snapshot"] = clock.t - age
+        assert spot.snapshot_fresh() is fresh, age
+    spot.ok_at["snapshot"] = clock.t
+    spot.not_in_plan["snapshot"] = clock.t
+    assert not spot.snapshot_fresh()
+    del spot.not_in_plan["snapshot"]
+    spot.snapshot = {}
+    assert not spot.snapshot_fresh()
+    spot.snapshot = {"lastTrade": {"p": 181.0}}
+    assert spot.snapshot_fresh()
+    spot.massive.key_rejected = True
+    assert not spot.snapshot_fresh()
+    stale = Spotlight(None, clock=clock)
+    stale.snapshot, stale.ok_at = {"lastTrade": {"p": 181.0}}, {"snapshot": clock.t}
+    assert not stale.snapshot_fresh()  # no Massive at all
 
 
 _BARS = [day_bar(d) for d in trading_days(date(2026, 9, 1), date(2026, 10, 5))]
-MALFORMED = {
-    "a daily bar without high and low": ("daily", {"results": _BARS[:3] + [{"c": 170.0, "t": _BARS[3]["t"], "v": 1}]
-                                                   + _BARS[4:], "status": "OK"}),
-    "details as a list": ("details", {"results": [{"ticker": "NVDA", "market_cap": 4.4e12}], "status": "OK"}),
-    "dividends as text": ("dividends", {"results": ["0.01 on 2026-09-11"], "status": "OK"}),
-    "a dividend without an amount": ("dividends", {"results": [{"cash_amount": None, "ex_dividend_date": "2026-09-11",
-                                                                "pay_date": "2026-10-02"}], "status": "OK"}),
-    "an indicator value as a bare number": ("sma50", {"results": {"values": [181.5]}, "status": "OK"}),
-    "a story with an empty insight": ("news", {"results": [story(1, ny(2026, 10, 6, 11, 0), insights=[None])],
-                                               "status": "OK"}),
-    "a snapshot that is text": ("snapshot", {"ticker": "NVDA", "status": "OK"}),
+MALFORMED = {  # (job, its answer, what the spotlight keeps)
+    "a daily bar without high and low": (
+        "daily", {"results": _BARS[:3] + [{"c": 170.0, "t": _BARS[3]["t"], "v": 1}] + _BARS[4:], "status": "OK"},
+        lambda spot: spot.daily == _BARS[:3] + _BARS[4:] and "daily" in spot.ok_at),
+    "details as a list": (
+        "details", {"results": [{"ticker": "NVDA", "market_cap": 4.4e12}], "status": "OK"},
+        lambda spot: spot.details is None and spot.errors["details"] == "unexpected company details answer"),
+    "dividends as text": (
+        "dividends", {"results": ["0.01 on 2026-09-11"], "status": "OK"},
+        lambda spot: spot.dividends == [] and "dividends" in spot.ok_at),
+    "a dividend without an amount": (
+        "dividends", {"results": [{"cash_amount": None, "ex_dividend_date": "2026-09-11", "pay_date": "2026-10-02"}],
+                      "status": "OK"},
+        lambda spot: spot.dividends == []),
+    "an indicator value as a bare number": (
+        "sma50", {"results": {"values": [181.5]}, "status": "OK"},
+        lambda spot: "sma50" not in spot.indicators and spot.errors["sma50"] == "no sma50 value in the answer"),
+    "a story with an empty insight": (
+        "news", {"results": [story(1, ny(2026, 10, 6, 11, 0), insights=[None])], "status": "OK"},
+        lambda spot: [n["insights"] for n in spot.news] == [[]]),
+    "a snapshot that is text": (
+        "snapshot", {"ticker": "NVDA", "status": "OK"},
+        lambda spot: spot.snapshot is None and spot.errors["snapshot"] == "unexpected snapshot answer"),
 }
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: the spotlight stores Massive's answers without checking their shape, and "
-                                       "nvidia_board then raises on them")
-@pytest.mark.parametrize("job,body", list(MALFORMED.values()), ids=list(MALFORMED))
-def test_the_board_survives_malformed_answers(job, body):
+@pytest.mark.parametrize("job,body,kept", list(MALFORMED.values()), ids=list(MALFORMED))
+def test_the_board_survives_malformed_answers(job, body, kept):
     clock = Clock(ny(2026, 10, 6, 12, 0))
     spot, server = desk(clock)
     server.hooks[job] = reply(200, body)
     simulate(spot, clock, hours=0.05)
     assert server.of(job)
+    assert kept(spot)
     assert_fits(E.nvidia_board(quote("NVDA", price=180.0), spot))
+    assert_fits(E.nvidia_board(None, spot))
+
+
+NAN = float("nan")
+GOOD_BAR = {"o": 180.0, "h": 182.5, "l": 178.25, "c": 181.0, "t": session_ms(date(2026, 10, 5))}
+# (job, what Massive sends, what is kept: an attribute and its value, or an error when nothing usable came)
+VALIDATED = {
+    "prev without a close": ("prev", {"results": [dict(GOOD_BAR, c=None)]}, "no previous-day bar in the answer"),
+    "prev with text": ("prev", {"results": [dict(GOOD_BAR, o="180")]}, "no previous-day bar in the answer"),
+    "prev as a list of lists": ("prev", {"results": [[1, 2, 3]]}, "no previous-day bar in the answer"),
+    "prev results as text": ("prev", {"results": "none"}, "no previous-day bar in the answer"),
+    "prev keeps numbers only": ("prev", {"results": [dict(GOOD_BAR, v="many", vw=181.1, n=True, T="NVDA")]},
+                                ("prev", dict(GOOD_BAR, vw=181.1))),
+    "daily with odd bars": ("daily", {"results": [GOOD_BAR, dict(GOOD_BAR, h=None), dict(GOOD_BAR, t="x"),
+                                                  dict(GOOD_BAR, l=True), dict(GOOD_BAR, c=NAN), "bar", None, 5,
+                                                  dict(GOOD_BAR, t=GOOD_BAR["t"] + 1, v=10, extra="kept?")]},
+                            ("daily", [GOOD_BAR, dict(GOOD_BAR, t=GOOD_BAR["t"] + 1, v=10)])),
+    "daily with no good bar": ("daily", {"results": [dict(GOOD_BAR, o=None)]}, "no daily bars in the answer"),
+    "daily without results": ("daily", {"status": "OK"}, "no daily bars in the answer"),
+    "daily results as an object": ("daily", {"results": {"o": 1}}, "unexpected answer (no bars)"),
+    "dividends": ("dividends", {"results": [{"cash_amount": 0.25, "pay_date": "2026-10-02"}, {"cash_amount": "0.25"},
+                                            {"cash_amount": True}, {"pay_date": "x"}, "0.25", None]},
+                  ("dividends", [{"cash_amount": 0.25, "pay_date": "2026-10-02"}])),
+    "dividends as an object": ("dividends", {"results": {"cash_amount": 0.25}}, "unexpected dividends answer"),
+    "splits": ("splits", {"results": [{"split_from": 1, "split_to": 4}, {"split_from": "1", "split_to": 10},
+                                      {"split_from": 1}, {"split_from": 1, "split_to": None}, ["x"]]},
+               ("splits", [{"split_from": 1, "split_to": 4}])),
+    "splits as text": ("splits", {"results": "1-for-10"}, "unexpected splits answer"),
+    "related": ("related", {"results": [{"ticker": "AMD"}, {"ticker": 5}, "TSM", {"ticker": None}, {},
+                                        {"ticker": "INTC"}]}, ("related", ["AMD", "INTC"])),
+    "related as an object": ("related", {"results": {"ticker": "AMD"}}, "unexpected related companies answer"),
+    "news": ("news", {"results": [{"id": "a", "title": "Fine", "article_url": "https://x.example/a",
+                                   "published_utc": "2026-10-06T15:00:00Z", "insights": [{"ticker": "NVDA"}]},
+                                  {"id": "b", "title": 5}, {"id": "c"},
+                                  {"id": "d", "title": "Odd", "article_url": 7, "published_utc": None,
+                                   "insights": [None, "x", {"ticker": "NVDA", "sentiment": "positive"}]},
+                                  {"id": "e", "title": "Odder", "insights": {"ticker": "NVDA"}}]},
+             ("news", [{"id": "a", "title": "Fine", "article_url": "https://x.example/a",
+                        "published_utc": "2026-10-06T15:00:00Z", "insights": [{"ticker": "NVDA"}]},
+                       {"id": "d", "title": "Odd", "article_url": "", "published_utc": "",
+                        "insights": [{"ticker": "NVDA", "sentiment": "positive"}]},
+                       {"id": "e", "title": "Odder", "article_url": "", "published_utc": "", "insights": []}])),
+    "news as an object": ("news", {"results": {"title": "x"}}, "unexpected news answer"),
+    "an indicator as text": ("rsi14", {"results": {"values": [{"value": "58.3", "timestamp": 1}]}},
+                             "no rsi14 value in the answer"),
+    "an indicator without values": ("ema20", {"results": {"values": []}}, "no ema20 value in the answer"),
+    "an indicator's results as a list": ("sma200", {"results": [{"value": 1.0}]}, "no sma200 value in the answer"),
+    "macd keeps its numbers": ("macd", {"results": {"values": [{"value": 2.5, "signal": "x", "histogram": 0.75,
+                                                                "timestamp": 7, "note": "hi"}]}},
+                               ("indicators", {"macd": {"value": 2.5, "histogram": 0.75, "timestamp": 7.0}})),
+    "details as text": ("details", {"results": "Nvidia"}, "unexpected company details answer"),
+    "a snapshot as a list": ("snapshot", {"ticker": [1]}, "unexpected snapshot answer"),
+}
+
+
+def kept_by(spot, job):
+    """What a job's answers are kept in."""
+    return spot.indicators.get(job) if job in INDICATORS else getattr(spot, job)
+
+
+@pytest.mark.parametrize("job,answer,expected", list(VALIDATED.values()), ids=list(VALIDATED))
+def test_answers_are_checked_before_they_are_kept(job, answer, expected):
+    clock = Clock(ny(2026, 10, 6, 12, 0))
+    t0 = clock.t
+    spot, server = desk(clock, calls=100, paid=True)
+    server.hooks[job] = reply(200, answer)
+    # what a good earlier answer left behind (the previous bar is the session before)
+    spot.prev = dict(GOOD_BAR, c=1.0, t=session_ms(date(2026, 10, 2)))
+    spot.daily, spot.details = [dict(GOOD_BAR, c=2.0)], {"name": "Nvidia Corp"}
+    spot.snapshot, spot.dividends, spot.splits = {"lastTrade": {"p": 3.0}}, [{"cash_amount": 0.01}], [
+        {"split_from": 1, "split_to": 10}]
+    spot.related, spot.indicators = ["OLD"], {k: {"value": 4.0} for k in INDICATORS}
+    spot.news = [{"id": "old", "title": "Old", "article_url": "", "published_utc": "", "insights": []}]
+    spot._seen_news = {"old"}
+    before = kept_by(spot, job)
+    asyncio.run(spot.step(True))
+    assert len(server.of(job)) == 1
+    if isinstance(expected, str):  # nothing usable: what it had stays, and the job is tried again soon
+        assert spot.errors[job] == expected and job not in spot.ok_at and job not in spot.ran
+        assert spot.retry_at[job] == t0 + 120
+        assert kept_by(spot, job) == before
+    else:
+        name, value = expected
+        assert job in spot.ok_at and job not in spot.errors and job not in spot.retry_at
+        got = getattr(spot, name)
+        if name == "indicators":
+            got = {job: got[job]}
+        elif name == "news":
+            got = [n for n in got if n["id"] != "old"]
+        assert got == value
+    assert_fits(E.nvidia_board(quote("NVDA", price=180.0), spot))
+    assert_fits(E.nvidia_board(None, spot))
 
 
 # =====================================================================================================================
 # Spotlight: saving
 # =====================================================================================================================
+
+STATE_KEYS = {"symbol", "prev", "snapshot", "daily", "minutes", "indicators", "details", "news", "dividends", "splits",
+              "related", "status", "ran", "ok_at", "not_in_plan", "seen", "recent_requests"}
+
+
+def restarted(server, path, clock, mono_offset=5_000_000.0):
+    """The bot after a restart: a new Http, Massive and limiter (with a new monotonic clock), the same file."""
+    massive = Massive(KEY, Http(server, sleep=no_retry_sleep), limiter_on(clock, mono_offset=mono_offset))
+    return Spotlight(massive, path, clock=clock)
+
 
 def test_spotlight_state_survives_a_restart(tmp_path):
     path = tmp_path / "nvidia.json"
@@ -1587,16 +2129,18 @@ def test_spotlight_state_survives_a_restart(tmp_path):
         server.add(story(i, clock.t - (10 - i) * 600))
     simulate(spot, clock, hours=0.2)
     text = path.read_text()
-    assert KEY not in text and json.loads(text)["symbol"] == "NVDA"
-    again = Spotlight(spot.massive, path, clock=clock)
+    state = json.loads(text)
+    assert KEY not in text and state["symbol"] == "NVDA" and set(state) == STATE_KEYS
+    again = restarted(server, path, clock)
     for name in ("prev", "daily", "minutes", "indicators", "details", "news", "dividends", "splits", "related",
-                 "status", "ok_at"):
+                 "status", "ran", "ok_at", "not_in_plan", "snapshot"):
         assert getattr(again, name) == getattr(spot, name), name
-    # the key or plan may have changed while it was down: the snapshot is checked again at once
-    assert again.ran == {k: v for k, v in spot.ran.items() if k != "snapshot"}
-    assert again.not_in_plan == {} and spot.not_in_plan.keys() == {"snapshot"}
-    assert [j.name for j in again.due(True)][0] == "snapshot" and "snapshot" not in [j.name for j in spot.due(True)]
+    # a restart asks nothing again by itself: the snapshot keeps its 12-hour wait for the free plan
+    assert again.not_in_plan.keys() == {"snapshot"} and again.plan() == "free plan (end of day)"
+    assert [j.name for j in again.due(True)] == [j.name for j in spot.due(True)]
+    assert "snapshot" not in [j.name for j in again.due(True)]
     assert again.state()["seen"] == spot.state()["seen"]
+    assert again.errors == again.retry_at == {}  # passing troubles aren't saved
     # stories seen before the restart aren't alerted again; a new one is
     clock.t += 700
     server.add(story(500, clock.t - 30))
@@ -1605,19 +2149,61 @@ def test_spotlight_state_survives_a_restart(tmp_path):
     assert json.loads(path.read_text())["news"][0]["id"] == "nvda-story-0500"
 
 
-def test_spotlight_saves_only_after_something_worked(tmp_path):
+def test_a_restart_keeps_the_minute_budget(tmp_path):
     path = tmp_path / "nvidia.json"
     clock = Clock(ny(2026, 10, 6, 12, 0))
+    t0 = clock.t
+    spot, server = desk(clock, path=path)
+    assert asyncio.run(spot.step(True)) == ["news", "prev", "status", "daily"]
+    assert json.loads(path.read_text())["recent_requests"] == [t0] * 5  # wall-clock times
+    clock.t = t0 + 20  # the bot restarts 20 seconds later
+    again = restarted(server, path, clock)
+    assert again.massive.limiter.used() == 5 and again.massive.limiter.wait_time() == 41.0
+    assert asyncio.run(again.step(True)) == [] and len(server.calls) == 5  # the five requests before still count
+    clock.t = t0 + 60
+    assert asyncio.run(again.step(True)) == [] and len(server.calls) == 5
+    clock.t = t0 + 61
+    assert asyncio.run(again.step(True)) == ["minutes", "sma50", "sma200", "ema20", "rsi14"]
+    assert_budget([c.t for c in server.calls])
+    # a restart after the window: the old requests no longer count
+    clock.t = t0 + 61 + 61
+    third = restarted(server, path, clock, mono_offset=123.0)
+    assert third.massive.limiter.used() == 0
+    assert asyncio.run(third.step(True)) == ["macd", "details", "dividends", "splits", "related"]
+    assert_budget([c.t for c in server.calls])
+
+
+def test_spotlight_saves_whenever_requests_were_made(tmp_path):
+    path = tmp_path / "nvidia.json"
+    clock = Clock(ny(2026, 10, 6, 12, 0))
+    t0 = clock.t
     spot, server = desk(clock, path=path)
     for name in JOB_NAMES:
         server.hooks[name] = OSError("down")
-    simulate(spot, clock, hours=0.1)
-    assert not path.exists() and set(spot.errors) == set(JOB_NAMES)
-    assert spot.errors["minutes"] == "waiting for the previous session's bar"
+    assert asyncio.run(spot.step(True)) == []
+    # nothing worked, but five requests went out: the file counts them for a restart
+    state = json.loads(path.read_text())
+    assert state["recent_requests"] == [t0] * 5 and state["ran"] == state["ok_at"] == state["not_in_plan"] == {}
+    assert spot.retry_at == {n: t0 + 120 for n in ("snapshot", "news", "prev", "status", "daily", "minutes")}
+    assert spot.errors["minutes"] == "waiting for the previous session's bar"  # no request for that one
+    # a step that sends nothing and changes nothing writes nothing
+    path.unlink()
+    clock.t = t0 + 15
+    assert asyncio.run(spot.step(True)) == [] and len(server.calls) == 5
+    assert not path.exists()
+    # failures again: written again
+    clock.t = t0 + 75
+    assert asyncio.run(spot.step(True)) == [] and len(server.calls) == 10
+    assert json.loads(path.read_text())["recent_requests"] == [t0 + 75] * 5
+    assert [c.name for c in server.calls[5:]] == ["sma50", "sma200", "ema20", "rsi14", "macd"]
+    # and of course after a success
     server.hooks.clear()
-    spot.ran.clear()
-    asyncio.run(spot.step(True))
-    assert path.exists()
+    path.unlink()
+    clock.t = t0 + 150
+    assert asyncio.run(spot.step(True)) == ["news", "prev", "status", "daily"]
+    state = json.loads(path.read_text())
+    assert state["ok_at"] == {n: t0 + 150 for n in ("news", "prev", "status", "daily")}
+    assert state["not_in_plan"] == {"snapshot": t0 + 150}
 
 
 def test_a_save_that_fails_is_only_logged(tmp_path, monkeypatch):
@@ -1640,11 +2226,13 @@ TOLERATED = {
     "a list": "[1, 2, 3]",
     "a string": '"NVDA"',
     "another symbol": json.dumps({"symbol": "AMD", "prev": {"t": 1, "c": 5.0}, "news": [{"id": "amd-1"}],
-                                  "ran": {"news": 1e18}}),
-    "no symbol": json.dumps({"prev": {"t": 1, "c": 5.0}, "ran": {"news": 1e18}}),
+                                  "ran": {"news": 1e18}, "recent_requests": [ny(2026, 10, 6, 11, 59, 50)] * 5}),
+    "no symbol": json.dumps({"prev": {"t": 1, "c": 5.0}, "ran": {"news": 1e18},
+                             "recent_requests": [ny(2026, 10, 6, 11, 59, 50)] * 5}),
     "wrong types": json.dumps({"symbol": "NVDA", "prev": [1], "snapshot": "x", "daily": {"a": 1}, "minutes": 5,
                                "indicators": [], "details": [], "news": {}, "dividends": "x", "splits": None,
-                               "related": {}, "status": 3, "ran": [], "ok_at": "x", "not_in_plan": 7, "seen": None}),
+                               "related": {}, "status": 3, "ran": [], "ok_at": "x", "not_in_plan": 7, "seen": None,
+                               "recent_requests": {"t": ny(2026, 10, 6, 11, 59, 50)}}),
 }
 
 
@@ -1657,6 +2245,7 @@ def test_a_corrupt_or_foreign_state_file_is_ignored(tmp_path, content):
     assert spot.prev is None and spot.snapshot is None and spot.details is None and spot.status is None
     assert spot.daily == spot.minutes == spot.news == spot.dividends == spot.splits == spot.related == []
     assert spot.indicators == spot.ran == spot.ok_at == spot.not_in_plan == {}
+    assert spot._seen_news == set() and spot.massive.limiter.used() == 0
     assert [j.name for j in spot.due(True)] == JOB_NAMES
     assert asyncio.run(spot.step(True)) == ["news", "prev", "status", "daily"]
     assert_fits(E.nvidia_board(quote("NVDA", price=180.0), spot))
@@ -1670,25 +2259,83 @@ def test_a_damaged_state_file_is_set_aside_not_deleted(tmp_path):
     assert not path.exists() and len(list(tmp_path.glob("nvidia.json.damaged-*"))) == 1
 
 
-BAD_INSIDE = {
-    "seen is a number": {"seen": 5},
-    "seen holds lists": {"seen": [["nvda-story-0001"]]},
-    "ran holds text": {"ran": {"news": "soon", "prev": None}},
-    "news holds text": {"news": ["not a story"], "seen": ["x"]},
+BAD_INSIDE = {  # (what the file holds, what is loaded)
+    "seen is a number": ({"seen": 5}, lambda spot: spot._seen_news == set()),
+    "seen holds lists": ({"seen": [["nvda-story-0001"]]}, lambda spot: spot._seen_news == set()),
+    "ran holds text": ({"ran": {"news": "soon", "prev": None}}, lambda spot: spot.ran == {}),
+    "news holds text": ({"news": ["not a story"], "seen": ["x"]},
+                        lambda spot: spot.news == [] and spot._seen_news == {"x"}),
+    "recent requests hold text": ({"recent_requests": ["soon", None, True]},
+                                  lambda spot: spot.massive.limiter.used() == 0),
 }
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: Spotlight._load checks only top-level types, so bad values inside a valid "
-                                       "file crash the constructor (the bot can't start), every step, or the board")
-@pytest.mark.parametrize("extra", list(BAD_INSIDE.values()), ids=list(BAD_INSIDE))
-def test_bad_values_inside_the_state_file_are_ignored(tmp_path, extra):
+@pytest.mark.parametrize("extra,loaded", list(BAD_INSIDE.values()), ids=list(BAD_INSIDE))
+def test_bad_values_inside_the_state_file_are_ignored(tmp_path, extra, loaded):
     path = tmp_path / "nvidia.json"
     path.write_text(json.dumps({"symbol": "NVDA", **extra}))
     clock = Clock(ny(2026, 10, 6, 12, 0))
     spot, server = desk(clock, path=path)
+    assert loaded(spot)
     asyncio.run(spot.step(True))
     assert len(server.calls) == 5
     assert_fits(E.nvidia_board(quote("NVDA", price=180.0), spot))
+
+
+def test_loading_checks_every_saved_value_like_a_fresh_answer(tmp_path):
+    clock = Clock(ny(2026, 10, 6, 12, 0))
+    now = clock.t
+    good = day_bar(date(2026, 10, 5))
+    ohlct = {k: good[k] for k in ("o", "h", "l", "c", "t")}
+    item = story(1, now - HOUR)
+    odd_item = story(2, now - 2 * HOUR, article_url=7, published_utc=None, insights={"ticker": "NVDA"})
+    mixed_item = story(3, now - 3 * HOUR, insights=[None, "x", {"ticker": "NVDA", "sentiment": "positive"}])
+    state = {
+        "symbol": "NVDA",
+        "prev": dict(good, T="NVDA"),
+        "snapshot": {"ticker": "NVDA", "lastTrade": {"p": 181.0}},
+        "daily": [good, {"c": 1.0, "t": 5}, dict(good, o="1"), dict(good, h=True), dict(good, l=NAN), "bar", None,
+                  dict(good, v="lots", vw=None, n=7)],
+        "minutes": [dict(good, t=good["t"] + 60_000), dict(good, c=float("inf"))],
+        "indicators": {"sma50": {"value": 170.5, "timestamp": 1}, "rsi14": {"value": "58"},
+                       "macd": {"value": 2.5, "signal": "x", "histogram": 0.75}, "vwap9": {"value": 1.0}, "ema20": 5},
+        "details": {"market_cap": 4.4e12, "total_employees": 36000},
+        "news": [item, {"title": 5, "id": "t"}, {"id": "no-title"}, odd_item, mixed_item, "story", None],
+        "dividends": [{"cash_amount": 0.01, "pay_date": "2026-10-02"}, {"cash_amount": "0.01"}, {"cash_amount": None},
+                      "x"],
+        "splits": [{"split_from": 1, "split_to": 10, "execution_date": "2024-06-10"}, {"split_from": "1", "split_to": 4},
+                   {"split_to": 2}],
+        "related": ["AMD", 5, None, "TSM", ["x"]],
+        "status": {"market": "open"},
+        "ran": {"news": now - 10, "prev": "soon", "daily": None, "status": True, "splits": now - 20, "macd": NAN,
+                "snapshot": now - 30},
+        "ok_at": {"news": now - 10, "splits": "x", "details": float("inf")},
+        "not_in_plan": {"snapshot": now - 30, "minutes": [1]},
+        "seen": ["a", 1, None, "b", ["c"]],
+        "recent_requests": [now - 70, now - 30, now - 10, "x", None, True, now + 5],
+    }
+    path = tmp_path / "nvidia.json"
+    path.write_text(json.dumps(state))  # NaN and Infinity are written as JSON's NaN/Infinity, which loads back
+    spot, server = desk(clock, path=path)
+    assert spot.prev == dict(good, t=float(good["t"]))  # no "T"
+    assert spot.snapshot == state["snapshot"] and spot.details == state["details"] and spot.status == state["status"]
+    assert spot.daily == [good, dict(ohlct, n=7)]
+    assert spot.minutes == [dict(good, t=good["t"] + 60_000)]
+    assert spot.indicators == {"sma50": {"value": 170.5, "timestamp": 1.0}, "macd": {"value": 2.5, "histogram": 0.75}}
+    assert spot.news == [item, dict(odd_item, article_url="", published_utc="", insights=[]),
+                         dict(mixed_item, insights=[{"ticker": "NVDA", "sentiment": "positive"}])]
+    assert spot.dividends == state["dividends"][:1] and spot.splits == state["splits"][:1]
+    assert spot.related == ["AMD", "TSM"]
+    assert spot.ran == {"news": now - 10, "splits": now - 20, "snapshot": now - 30}
+    assert spot.ok_at == {"news": now - 10}
+    assert spot.not_in_plan == {"snapshot": now - 30}
+    assert spot._seen_news == {"a", "b"}
+    assert spot.massive.limiter.used() == 2  # the two requests from the last minute
+    assert spot.plan() == "free plan (end of day)" and not spot.snapshot_fresh()
+    assert_fits(E.nvidia_board(quote("NVDA", price=180.0), spot))
+    assert_fits(E.nvidia_board(None, spot))
+    assert asyncio.run(spot.step(True)) == ["prev", "status", "daily"]  # three slots left; news ran 10 s ago
+    assert [c.name for c in server.calls] == ["prev", "status", "daily"]
 
 
 # =====================================================================================================================
@@ -1756,10 +2403,78 @@ def test_nvidia_board_survives_huge_values():
     spot.news = [story(i, spot._clock() - 60, title="Nvidia " + "x" * 3000,
                        article_url="https://e.example/" + "a" * 3000) for i in range(MAX_NEWS)]
     spot.dividends = [{"cash_amount": 123456.789, "ex_dividend_date": "z" * 500, "pay_date": "y" * 500}]
-    spot.splits = [{"split_to": "9" * 400, "split_from": "1" * 400, "execution_date": "d" * 400}]
+    spot.splits = [{"split_to": 9e300, "split_from": 1e-300, "execution_date": "d" * 400}]
+    spot.indicators = {k: {"value": 1e300, "signal": -1e300} for k in INDICATORS}
+    spot.prev = dict(spot.prev, v=1e30, vw=1e30, h=1e30)
     q = quote("NVDA", price=1e12, change=999.0, state="PRE", ext_price=1e13, ext_change_pct=5000.0, day_low=1e-9,
               day_high=1e15, volume=1e20)
     assert_fits(E.nvidia_board(q, spot, (5, 5)))
+    assert_fits(E.nvidia_board(None, spot, (10 ** 9, 5)))
+
+
+def test_nvidia_board_tolerates_split_values_that_are_not_numbers():
+    spot = full_spotlight()
+    spot.splits = [{"split_to": "9" * 400, "split_from": "1" * 400, "execution_date": "d" * 400}]
+    assert_fits(E.nvidia_board(quote("NVDA", price=180.0), spot))
+
+
+def test_nvidia_board_shows_massive_data_only_while_massive_is_usable(tmp_path):
+    spot = full_spotlight()
+    q = quote("NVDA", price=183.0, change=2.2, day_low=178.0, day_high=185.0, volume=2.1e8)
+    full = E.nvidia_board(q, spot)
+    assert len(full.fields) == 4 and "Massive (15-min delayed)" in full.description
+    # the key is rejected later: nothing Massive sent before is shown
+    spot.massive.key_rejected = True
+    e = E.nvidia_board(q, spot)
+    assert e.fields == [] and "Massive" not in e.description and "$183.00" in e.description
+    assert e.footer.text == "Live price: Yahoo Finance · Massive rejected the key (see /status)"
+    assert_fits(e)
+    # the key was removed while the file still holds everything
+    path = tmp_path / "nvidia.json"
+    spot.massive.key_rejected = False
+    spot.path = path
+    spot.save()
+    for massive in (None, Massive(None, spot.massive.http), Massive("", spot.massive.http)):
+        left = Spotlight(massive, path, clock=spot._clock)
+        assert left.prev and left.daily and left.news and left.snapshot  # loaded, but not shown
+        for quote_ in (q, None):
+            e = E.nvidia_board(quote_, left)
+            assert e.fields == [] and "Massive" not in e.description
+            assert e.footer.text == "Live price: Yahoo Finance · add MASSIVE_API_KEY for Massive's data"
+        assert E.nvidia_board(None, left).description == "Live price unavailable right now."
+
+
+def test_nvidia_board_shows_the_delayed_snapshot_only_while_it_is_fresh():
+    spot = full_spotlight()
+    q = quote("NVDA", price=183.0, change=2.2)
+    clock = spot._clock
+    worked = spot.ok_at["snapshot"]
+    price = spot.snapshot["lastTrade"]["p"]
+    line = f"Massive (15-min delayed): ${price:,.2f} "
+    for age, shown in ((0, True), (SNAPSHOT_FRESH - 1, True), (SNAPSHOT_FRESH, False), (DAY, False)):
+        clock.t = worked + age
+        assert (line in E.nvidia_board(q, spot).description) is shown, age
+        assert (line in E.nvidia_board(None, spot).description) is shown, age
+    clock.t = worked
+    spot.not_in_plan["snapshot"] = worked
+    assert line not in E.nvidia_board(q, spot).description
+    del spot.not_in_plan["snapshot"]
+    for odd in ({"lastTrade": None}, {"lastTrade": {"p": "181"}}, {"lastTrade": {"p": None}}, {"lastTrade": [1]},
+                {"lastTrade": {"p": NAN}}, {"lastTrade": {"p": 181.0}, "todaysChangePerc": "x"}):
+        spot.snapshot = odd
+        e = E.nvidia_board(q, spot)
+        assert ("15-min delayed" in e.description) == (odd.get("lastTrade") == {"p": 181.0})
+        assert_fits(e)
+
+
+def test_nvidia_board_news_links_only_web_addresses():
+    spot = full_spotlight()
+    spot.news = [dict(story(1, spot._clock() - 60), article_url="javascript:alert(1)"),
+                 dict(story(2, spot._clock() - 120), article_url=""),
+                 story(3, spot._clock() - 180)]
+    news = next(f for f in E.nvidia_board(quote("NVDA", price=180.0), spot).fields if f.name.startswith("News"))
+    assert news.value.splitlines() == ["🟢 Nvidia headline number 1", "🟢 Nvidia headline number 2",
+                                       "🟢 [Nvidia headline number 3](https://www.benzinga.com/news/nvda/3)"]
 
 
 def test_rsi_labels():
@@ -1802,6 +2517,37 @@ def test_nvidia_news_fits_with_huge_values():
     assert_fits(e)
 
 
+ODD_STORIES = {
+    "a script link": ({"article_url": "javascript:alert(1)", "image_url": "javascript:x"}, None, None),
+    "ftp links": ({"article_url": "ftp://x.example/a", "image_url": "ftp://x.example/a.png"}, None, None),
+    "links that aren't text": ({"article_url": ["https://x.example"], "image_url": 5}, None, None),
+    "plain http": ({"article_url": "http://x.example/a", "image_url": "http://x.example/a.png"},
+                   "http://x.example/a", "http://x.example/a.png"),
+}
+
+
+@pytest.mark.parametrize("extra,url,thumb", list(ODD_STORIES.values()), ids=list(ODD_STORIES))
+def test_nvidia_news_drops_links_that_are_not_web_addresses(extra, url, thumb):
+    e = E.nvidia_news(story(1, ny(2026, 10, 6, 11, 0), **extra), "neutral", "")
+    assert e.url == url and e.thumbnail.url == thumb
+    assert_fits(e)
+
+
+def test_nvidia_news_with_odd_types():
+    item = {"title": "Odd", "description": ["not", "text"], "tickers": "NVDA,AMD", "publisher": ["Benzinga"],
+            "published_utc": 1791300000, "article_url": None, "image_url": None}
+    e = E.nvidia_news(item, "negative", "")
+    assert e.title == "🔴 Odd" and e.url is None and not e.description and e.thumbnail.url is None
+    assert [f.name for f in e.fields] == ["For NVDA: negative"] and e.fields[0].value == "—"
+    assert e.footer.text == "Massive news · via Massive" and e.timestamp is None
+    assert_fits(e)
+    e = E.nvidia_news({"title": "t", "tickers": ["NVDA", 5, None, "AMD", ["TSM"]],
+                       "publisher": {"name": 7}}, "", "")
+    assert [(f.name, f.value) for f in e.fields] == [("Also mentions", "AMD")]
+    assert e.footer.text == "Massive news · via Massive"
+    assert_fits(e)
+
+
 # =====================================================================================================================
 # The bot
 # =====================================================================================================================
@@ -1835,7 +2581,7 @@ def nvidia_bot(tmp_path, monkeypatch=None, key="k", http=True, clock=None, quote
     data = FakeData(Http(server, sleep=no_retry_sleep) if http else None, quotes)
     bot = MarketBot(tmp_path, engine=FakeEngine(data), ai=NewsAI(api_key=""), massive_key=key)
     if bot.massive:
-        bot.massive.limiter = RateLimiter(clock=clock, sleep=clock.sleep)
+        bot.massive.limiter = limiter_on(clock)
         bot.spotlight = Spotlight(bot.massive, bot.spotlight.path, clock=clock)
     if monkeypatch:
         monkeypatch.setattr(botmod, "market_open", lambda now=None: is_open(clock.t))
@@ -1873,11 +2619,18 @@ def test_the_bot_has_no_massive_without_a_key_or_http(tmp_path, key, http):
 def test_the_bot_picks_up_the_saved_spotlight(tmp_path):
     clock = Clock(ny(2026, 10, 6, 12, 0))
     saved = Spotlight(None, tmp_path / "nvidia.json", clock=clock)
-    saved.prev = dict(T="NVDA", **day_bar(date(2026, 10, 5)))
+    bar = day_bar(date(2026, 10, 5))
+    saved.prev = dict(T="NVDA", **bar)
     saved.related = ["AMD"]
+    saved.ran = {"prev": clock.t - 60}
     saved.save()
+    data = json.loads((tmp_path / "nvidia.json").read_text())
+    data["recent_requests"] = [clock.t - 30, clock.t - 20]
+    (tmp_path / "nvidia.json").write_text(json.dumps(data))
     bot, _, _ = nvidia_bot(tmp_path, clock=clock)
-    assert bot.spotlight.prev == saved.prev and bot.spotlight.related == ["AMD"]
+    assert bot.spotlight.prev == bar  # checked like a fresh answer: only the bar's numbers are kept
+    assert bot.spotlight.related == ["AMD"] and bot.spotlight.ran == {"prev": clock.t - 60}
+    assert bot.massive_used() == 2  # the last run's requests still count against this minute
 
 
 def test_job_nvidia_needs_an_nvidia_channel(tmp_path, monkeypatch):
@@ -2095,18 +2848,48 @@ def test_job_live_shows_the_nvidia_board_and_alerts(tmp_path, monkeypatch):
     assert moves(bot) == [(7, "🚀 NVDA up 5.2% today", "5")]
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a daily bar without h/l (stored as-is) makes range_52w raise KeyError, "
-                                       "so nvidia_board fails and refresh_boards/job_live stop before other boards "
-                                       "and alerts")
 def test_a_malformed_massive_answer_does_not_break_every_board(tmp_path, monkeypatch):
     bot, server, clock = nvidia_bot(tmp_path, monkeypatch, quotes={"NVDA": nvda(5.2)})
     bars = [day_bar(d) for d in trading_days(date(2026, 9, 1), date(2026, 10, 5))]
+    good = list(bars)
     bars.insert(3, {"c": 170.0, "t": session_ms(date(2026, 9, 3)), "v": 1})  # no high or low
     server.hooks["daily"] = reply(200, {"results": bars, "status": "OK", "resultsCount": len(bars)})
     bot.channels.set(7, "nvidia")
     bot.channels.set(8, "stocks")
     asyncio.run(bot.job_nvidia())
-    assert bot.spotlight.daily  # stored
+    assert bot.spotlight.daily == good  # the bar without a high and low was left out
     asyncio.run(bot.job_live())
     assert [cid for cid, _ in bot.boards] == [7, 8]
-    assert moves(bot) == [(7, "🚀 NVDA up 5.2% today", "5")]
+    assert "52 weeks" in "\n".join(f.value for f in dict(bot.boards)[7].fields)
+    # NVDA is on the stocks channel's default list too, so both channels hear about the move
+    assert moves(bot) == [(7, "🚀 NVDA up 5.2% today", "5"), (8, "🚀 NVDA up 5.2% today", "5")]
+
+
+def test_a_failing_nvidia_board_does_not_stop_the_other_boards_or_the_alerts(tmp_path, monkeypatch):
+    bot, server, clock = nvidia_bot(tmp_path, monkeypatch, quotes={"NVDA": nvda(5.2)})
+    for cid, kind in ((7, "nvidia"), (8, "stocks"), (9, "nvidia")):
+        bot.channels.set(cid, kind)
+
+    def broken(*args, **kwargs):
+        raise KeyError("h")
+    monkeypatch.setattr(E, "nvidia_board", broken)
+    asyncio.run(bot.job_live())
+    assert [cid for cid, _ in bot.boards] == [8]
+    assert moves(bot) == [(7, "🚀 NVDA up 5.2% today", "5"), (8, "🚀 NVDA up 5.2% today", "5"),
+                          (9, "🚀 NVDA up 5.2% today", "5")]
+
+
+def test_an_nvda_quote_nobody_refreshed_leaves_the_nvidia_board(tmp_path, monkeypatch):
+    bot, server, clock = nvidia_bot(tmp_path, monkeypatch, quotes={"NVDA": nvda(1.2)})
+    bot.channels.set(7, "nvidia")
+    asyncio.run(bot.job_live())
+    assert "$182.16" in bot.boards[-1][1].description
+    bot.engine.data._quotes = {}  # every source stops answering for NVDA
+    bot.quote_seen["NVDA"] -= STALE_QUOTE - 30  # still within the 15 minutes
+    asyncio.run(bot.job_live())
+    assert "NVDA" in bot.quotes and "$182.16" in bot.boards[-1][1].description
+    bot.quote_seen["NVDA"] -= 60  # now past them
+    asyncio.run(bot.job_live())
+    assert "NVDA" not in bot.quotes
+    assert bot.boards[-1][1].description == "Live price unavailable right now."
+    assert STALE_QUOTE == 900

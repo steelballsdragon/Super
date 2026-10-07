@@ -437,9 +437,7 @@ def test_sources_rest_independently(clock):
     assert not http.resting("Never used") and "Never used" not in http.health
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: requests queued on a source's concurrency gate still call it after "
-                                       "the source has been rested (the rest is only checked on entry)")
-def test_requests_queued_behind_the_gate_do_not_call_a_source_rested_meanwhile():
+def test_requests_queued_behind_the_gate_do_not_call_a_source_rested_meanwhile(clock):
     http, backend, _ = make_http(ConnectionError("down"), retries=0, limits={"S": 1})
 
     async def main():
@@ -450,6 +448,80 @@ def test_requests_queued_behind_the_gate_do_not_call_a_source_rested_meanwhile()
     assert all(isinstance(r, HttpError) for r in results)
     assert http.resting("S")
     assert len(backend.calls) == FAILS_TO_REST  # the 4th..6th were refused once the source was rested
+    assert [str(r) for r in results] == ["ConnectionError: down"] * 3 + \
+        ["S is resting after 3 failures (ConnectionError: down)"] * 3
+    assert all(r.status is None and r.source == "S" for r in results)
+    h = http.health["S"]
+    assert (h.failed, h.streak, h.rests, h.ok) == (3, 3, 1, 0)  # the refused calls aren't more failures
+    assert h.rest_until == clock.mono + REST_SECONDS[0]
+    assert http._gates["S"]._value == 1  # the refused calls gave the gate back
+
+
+def test_a_retrying_request_stops_once_the_source_is_rested_meanwhile(clock):
+    backend = Backend(ConnectionError("reset"), J({"late": True}))
+
+    class OthersFailMeanwhile(Sleeper):
+        async def __call__(self, seconds):
+            await super().__call__(seconds)
+            for _ in range(FAILS_TO_REST):  # other requests to the source fail while this one waits to retry
+                http.record_failure("S", HttpError("S", "HTTP 502", 502))
+
+    sleeper = OthersFailMeanwhile()
+    http = Http(backend=backend, retries=2, sleep=sleeper)
+    with pytest.raises(HttpError) as e:
+        asyncio.run(http.get("https://x.test", source="S"))
+    assert str(e.value) == "S is resting after 3 failures (HTTP 502)" and e.value.status == 502
+    assert e.value.source == "S"
+    assert len(backend.calls) == 1 and sleeper.delays == [1.5]  # the retry never reached the backend
+    h = http.health["S"]
+    assert (h.failed, h.streak, h.rests, h.ok) == (3, 3, 1, 0)  # neither the network error nor the refusal counted
+    assert h.last_error == "HTTP 502" and h.rest_until == clock.mono + REST_SECONDS[0]
+
+
+def test_a_retrying_request_that_is_not_rested_keeps_trying(clock):
+    backend = Backend(ConnectionError("reset"), J({"late": True}))
+
+    class OthersFailOnce(Sleeper):
+        async def __call__(self, seconds):
+            await super().__call__(seconds)
+            http.record_failure("S", HttpError("S", "HTTP 502", 502))  # not enough to rest the source
+
+    http = Http(backend=backend, retries=2, sleep=OthersFailOnce())
+    resp = asyncio.run(http.get("https://x.test", source="S"))
+    assert resp.json() == {"late": True} and len(backend.calls) == 2
+    h = http.health["S"]
+    assert (h.ok, h.failed, h.streak, h.rests) == (1, 1, 0, 0) and not http.resting("S")
+
+
+def test_forced_requests_ignore_the_rest_on_every_attempt(clock):
+    http, backend, sleeper = make_http(Response(503, ""), retries=0)
+
+    async def main():
+        for _ in range(FAILS_TO_REST):
+            with pytest.raises(HttpError):
+                await http.get("https://x.test", source="S")
+        assert http.resting("S")
+        with pytest.raises(HttpError) as e:
+            await http.get("https://x.test", source="S", force=True, retries=2)
+        assert str(e.value) == "HTTP 503" and len(backend.calls) == FAILS_TO_REST + 3  # every retry was asked
+        assert sleeper.delays == [1.5, 3.0]
+
+    asyncio.run(main())
+    h = http.health["S"]
+    assert (h.failed, h.streak, h.rests) == (4, 4, 1)  # one forced call, one failure; the rest isn't lengthened
+
+
+def test_forced_requests_queued_behind_the_gate_still_ask_a_rested_source(clock):
+    http, backend, _ = make_http(ConnectionError("down"), retries=0, limits={"S": 1})
+
+    async def main():
+        return await asyncio.gather(*(http.get("https://x.test", source="S", force=True) for _ in range(5)),
+                                    return_exceptions=True)
+
+    results = asyncio.run(main())
+    assert [str(r) for r in results] == ["ConnectionError: down"] * 5 and len(backend.calls) == 5
+    h = http.health["S"]
+    assert http.resting("S") and (h.failed, h.streak, h.rests) == (5, 5, 1)
 
 
 # ----- proxies, headers, params -----
@@ -579,31 +651,56 @@ def test_the_gate_is_released_after_errors_and_cancellation():
     asyncio.run(main())
 
 
-def test_many_concurrent_calls_keep_the_books_straight(clock):
-    """60 calls at once through a gate of 3: each call is counted exactly once, as ok or failed."""
-    def answer(url):
-        n = int(query(url)["n"])
-        if n % 5 == 0:
-            return ConnectionError("reset")
-        if n % 7 == 0:
-            return Response(404, "")
-        return Response(200, str(n))
+def _every_fifth_fails(url):
+    n = int(query(url)["n"])
+    if n % 5 == 0:
+        return ConnectionError("reset")
+    if n % 7 == 0:
+        return Response(404, "")
+    return Response(200, str(n))
 
-    backend = Backend().on("x.test", answer)
+
+def _sixty_calls_through_a_gate_of_three():
+    backend = Backend().on("x.test", _every_fifth_fails)
     http = Http(backend=backend, retries=1, limits={"S": 3}, sleep=Sleeper())
 
     async def main():
         return await asyncio.gather(*(http.get("https://x.test", params={"n": n}, source="S") for n in range(1, 61)),
                                     return_exceptions=True)
 
-    results = asyncio.run(main())
+    return asyncio.run(main()), http, backend
+
+
+def test_many_concurrent_calls_keep_the_books_straight(clock, monkeypatch):
+    """60 calls at once through a gate of 3: each call is counted exactly once, as ok or failed (the source is
+    never rested here, so every call runs its course)."""
+    monkeypatch.setattr(http_mod, "FAILS_TO_REST", 10**6)
+    results, http, backend = _sixty_calls_through_a_gate_of_three()
     failed = [r for r in results if isinstance(r, HttpError)]
-    assert len(failed) == 12 and all(r.status is None for r in failed)
+    assert len(failed) == 12 and all(r.status is None and str(r) == "ConnectionError: reset" for r in failed)
     assert all(r.text == str(n) for n, r in enumerate(results, 1) if isinstance(r, Response) and r.status == 200)
     h = http.health["S"]
-    assert h.ok == 48 and h.failed == 12 and h.ok + h.failed == 60
+    assert h.ok == 48 and h.failed == 12 and h.ok + h.failed == 60 and not http.resting("S")
     assert len(backend.calls) == 48 + 12 * 2  # each failure was tried twice
     assert http._gates["S"]._value == 3  # every slot came back
+
+
+def test_many_concurrent_calls_stop_retrying_once_the_source_is_rested(clock):
+    """The same 60 calls with the real rest: the failures' retries queue behind the first tries, the first three
+    fail in a row and rest the source, and the other nine retries are refused without asking or being counted."""
+    results, http, backend = _sixty_calls_through_a_gate_of_three()
+    errors = {n: str(r) for n, r in enumerate(results, 1) if isinstance(r, HttpError)}
+    assert errors == {**{n: "ConnectionError: reset" for n in (5, 10, 15)},
+                      **{n: "S is resting after 3 failures (ConnectionError: reset)" for n in range(20, 61, 5)}}
+    answered = {n: r.status for n, r in enumerate(results, 1) if isinstance(r, Response)}
+    assert answered == {n: 404 if n % 7 == 0 else 200 for n in range(1, 61) if n % 5}
+    h = http.health["S"]
+    assert (h.ok, h.failed, h.streak, h.rests) == (48, 3, 3, 1) and http.resting("S")
+    assert h.ok + h.failed + 9 == 60  # ok, failed or refused: every call is accounted for once
+    asked = [int(c.query["n"]) for c in backend.calls]
+    assert len(asked) == 60 + 3 and asked[60:] == [5, 10, 15]  # every first try, then only three retries
+    assert sorted(asked[:60]) == list(range(1, 61))
+    assert http._gates["S"]._value == 3
 
 
 def test_cancellation_from_the_backend_is_not_a_failure_or_retried():
@@ -892,28 +989,53 @@ def chart_body(symbol="AAPL", adj=True, meta=None):
 
 # ----- the crumb -----
 
-def test_crumb_comes_from_the_cookie_page_then_getcrumb():
+COOKIE = "Yahoo cookie"
+
+
+def test_crumb_comes_from_the_cookie_page_then_getcrumb(clock):
     backend = with_crumb(None, "  AbC/1.2x \n")
-    y, http = yahoo_client(backend)
+    y, http = yahoo_client(backend, retries=2)
     assert asyncio.run(y.crumb()) == "AbC/1.2x"
     assert [c.url for c in backend.calls] == [FC, GETCRUMB]
+    fc, getcrumb = backend.calls
+    assert fc.timeout == 10 and getcrumb.timeout == TIMEOUT
     h = http.health["Yahoo"]
-    assert h.ok == 2 and not h.failing  # fc.yahoo.com's 404 is its normal answer
+    assert (h.ok, h.failed, h.streak, h.status) == (1, 0, 0, 200)  # only getcrumb counts for Yahoo
+    # fc.yahoo.com's 404 is its normal answer; it's kept as its own source and can't make Yahoo look healthy.
+    cookie = http.health[COOKIE]
+    assert (cookie.ok, cookie.failed, cookie.status, cookie.last_ok) == (1, 0, 404, clock.wall)
 
 
-@pytest.mark.parametrize("fc_answer", [ConnectionError("Could not resolve host: fc.yahoo.com"), Response(503, ""),
-                                       Response(429, "Too Many Requests"), Response(403, "denied"),
-                                       TimeoutError("timed out")])
-def test_a_failing_cookie_page_does_not_stop_getcrumb(fc_answer):
+def test_the_cookie_page_alone_does_not_make_yahoo_look_healthy():
+    backend = Backend().on("fc.yahoo.com", 404).on("getcrumb", Response(500, "down"))
+    y, http = yahoo_client(backend)
+    for _ in range(FAILS_TO_REST - 1):
+        http.record_failure("Yahoo", HttpError("Yahoo", "HTTP 502", 502))
+    with pytest.raises(YahooError) as e:
+        asyncio.run(y.crumb())
+    assert e.value.status == 500 and str(e.value) == "Yahoo: HTTP 500 (down)"
+    h = http.health["Yahoo"]
+    assert (h.ok, h.failed, h.streak) == (0, 3, 3) and y.resting  # the cookie's 404 didn't break the streak
+    assert http.health[COOKIE].ok == 1 and not http.health[COOKIE].failing
+
+
+@pytest.mark.parametrize("fc_answer, fc_failed", [
+    (ConnectionError("Could not resolve host: fc.yahoo.com"), "ConnectionError: Could not resolve host: fc.yahoo.com"),
+    (Response(503, ""), "HTTP 503"), (Response(429, "Too Many Requests"), "HTTP 429 (Too Many Requests)"),
+    (Response(403, "denied"), "HTTP 403 (denied)"), (TimeoutError("timed out"), "TimeoutError: timed out"),
+])
+def test_a_failing_cookie_page_does_not_stop_getcrumb(fc_answer, fc_failed):
     backend = Backend().on("fc.yahoo.com", fc_answer).on("getcrumb", Response(200, "good"))
     y, http = yahoo_client(backend, retries=2)
     assert asyncio.run(y.crumb()) == "good"
     assert backend.calls[-1].url == GETCRUMB and len(backend.calls_to("getcrumb")) == 1
-    assert not http.health["Yahoo"].failing
+    assert len(backend.calls_to("fc.yahoo.com")) == 1  # the optional visit is never retried
+    h = http.health["Yahoo"]
+    assert (h.ok, h.failed, h.streak) == (1, 0, 0) and not h.failing
+    cookie = http.health[COOKIE]
+    assert (cookie.ok, cookie.failed, cookie.streak, cookie.last_error) == (0, 1, 1, fc_failed)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a failing fc.yahoo.com cookie visit counts as a Yahoo failure, so it "
-                                       "can rest Yahoo and getcrumb is then refused without being asked")
 def test_a_failing_cookie_page_cannot_rest_yahoo_before_getcrumb():
     backend = Backend().on("fc.yahoo.com", ConnectionError("Could not resolve host: fc.yahoo.com")).on(
         "getcrumb", Response(200, "good"))
@@ -922,6 +1044,37 @@ def test_a_failing_cookie_page_cannot_rest_yahoo_before_getcrumb():
         http.record_failure("Yahoo", HttpError("Yahoo", "HTTP 502", 502))
     assert not y.resting
     assert asyncio.run(y.crumb()) == "good"
+    h = http.health["Yahoo"]
+    assert (h.ok, h.failed, h.streak, h.rests) == (1, 2, 0, 0) and not y.resting
+    assert http.health[COOKIE].failed == 1 and len(backend.calls_to("getcrumb")) == 1
+
+
+def test_a_cookie_page_that_keeps_failing_rests_itself_not_yahoo(clock, monkeypatch):
+    monkeypatch.setattr(yahoo_mod, "CRUMB_TTL", 0)  # every call fetches a fresh crumb
+    backend = Backend().on("fc.yahoo.com", Response(503, "")).on("getcrumb", *(Response(200, f"c{i}")
+                                                                              for i in range(1, 6)))
+    y, http = yahoo_client(backend)
+
+    async def main():
+        return [await y.crumb() for _ in range(4)]
+
+    assert asyncio.run(main()) == ["c1", "c2", "c3", "c4"]
+    assert len(backend.calls_to("fc.yahoo.com")) == FAILS_TO_REST  # resting: the 4th visit wasn't made
+    assert len(backend.calls_to("getcrumb")) == 4
+    cookie = http.health[COOKIE]
+    assert (cookie.failed, cookie.streak, cookie.rests) == (3, 3, 1)
+    assert http.health["Yahoo"].ok == 4 and not http.health["Yahoo"].failing and not y.resting
+
+
+def test_a_resting_yahoo_refuses_getcrumb_whatever_the_cookie_page_says():
+    backend = with_crumb(None, "never")
+    y, http = yahoo_client(backend)
+    for _ in range(FAILS_TO_REST):
+        http.record_failure("Yahoo", HttpError("Yahoo", "HTTP 502", 502))
+    with pytest.raises(YahooError) as e:
+        asyncio.run(y.crumb())
+    assert str(e.value) == "Yahoo: Yahoo is resting after 3 failures (HTTP 502)" and e.value.status == 502
+    assert not backend.calls_to("getcrumb") and http.health["Yahoo"].ok == 0
 
 
 def test_crumb_is_cached_for_six_hours(clock):
@@ -1008,22 +1161,62 @@ def test_a_crumb_rejected_twice_gives_up_with_401():
     assert len(backend.calls_to(V7)) == 2 and len(backend.calls_to("getcrumb")) == 2
 
 
-def test_concurrent_rejections_refresh_the_crumb_without_deadlock():
+def _stale_crumb_backend():
     good = v7_answer({"AAPL": 1.0, "MSFT": 2.0})
 
     def quote(url):
         return Response(401, "Invalid Crumb") if query(url)["crumb"] == "c1" else good(url)
 
-    backend = with_crumb(None, "c1", "c2", "c3", "c4").on(V7, quote)
-    y, _ = yahoo_client(backend)
+    return with_crumb(None, "c1", "c2", "c3", "c4").on(V7, quote).on(SPARK, spark_answer({"AAPL": [7.0],
+                                                                                          "MSFT": [8.0]}))
+
+
+def test_concurrent_rejections_refresh_the_crumb_without_deadlock():
+    backend = _stale_crumb_backend()
+    y, http = yahoo_client(backend)
+    symbols = ("AAPL", "MSFT")
 
     async def main():
         await y.crumb()  # everyone starts with c1
-        return await asyncio.wait_for(asyncio.gather(*(y.quotes([s]) for s in ("AAPL", "MSFT", "AAPL", "MSFT"))), 5)
+        return await asyncio.wait_for(asyncio.gather(*(y.quotes([s]) for s in symbols)), 5)
 
     results = asyncio.run(main())
-    assert [r[s].price for r, s in zip(results, ("AAPL", "MSFT", "AAPL", "MSFT"))] == [1.0, 2.0, 1.0, 2.0]
-    assert not backend.calls_to(SPARK) and len(backend.calls_to("getcrumb")) <= 5
+    assert [{s: q.price for s, q in r.items()} for r in results] == [{"AAPL": 1.0}, {"MSFT": 2.0}]
+    assert not backend.calls_to(SPARK)
+    assert len(backend.calls_to("getcrumb")) == 2  # the first fetch, then one refresh shared by both callers
+    assert [c.query["crumb"] for c in backend.calls_to(V7)] == ["c1", "c1", "c2", "c2"]
+    h = http.health["Yahoo"]
+    assert (h.failed, h.streak) == (0, 0) and not y.resting  # an expired crumb isn't Yahoo failing
+
+
+def test_many_concurrent_rejections_renew_the_crumb_without_resting_yahoo():
+    """An expired crumb is routine: even many requests turned away at once share one renewal and all get their
+    quotes, and the first rejections don't count against Yahoo (they used to rest it for 30 seconds)."""
+    backend = _stale_crumb_backend()
+    y, http = yahoo_client(backend)
+    symbols = ("AAPL", "MSFT", "AAPL", "MSFT", "AAPL", "MSFT")
+
+    async def main():
+        await y.crumb()
+        return await asyncio.wait_for(asyncio.gather(*(y.quotes([s]) for s in symbols)), 5)
+
+    results = asyncio.run(main())
+    assert [{s: q.price for s, q in r.items()} for r in results] == [{"AAPL": 1.0}, {"MSFT": 2.0}] * 3
+    assert [c.query["crumb"] for c in backend.calls_to(V7)] == ["c1"] * 6 + ["c2"] * 6
+    assert len(backend.calls_to("getcrumb")) == 2 and not backend.calls_to(SPARK)
+    h = http.health["Yahoo"]
+    assert (h.failed, h.streak, h.rests) == (0, 0, 0) and not y.resting
+    assert not http.health[COOKIE].failing
+
+
+def test_a_crumb_rejected_again_after_renewal_does_count():
+    """The renewed crumb being refused too is a real failure: that one is counted."""
+    backend = (with_crumb(None, "c1").on(V7, Response(401, '{"finance":{"error":{"description":"Invalid Crumb"}}}'))
+               .on(SPARK, Response(200, '{"spark": {"result": []}}')))
+    y, http = yahoo_client(backend)
+    assert asyncio.run(y.quotes(["AAPL"])) == {}  # v7 refused twice, and the spark fallback had nothing
+    assert len(backend.calls_to(V7)) == 2  # once with the cached crumb, once after renewing it
+    assert http.health["Yahoo"].failed == 1
 
 
 def test_a_404_with_a_crumb_does_not_show_the_crumb():
@@ -1359,22 +1552,29 @@ def test_nasdaq_symbol(yahoo, nasdaq):
 
 
 @pytest.mark.parametrize("nasdaq, yahoo", [
-    ("BRK.B", "BRK-B"), ("BRK/B", "BRK-B"), ("brk.b", "BRK-B"), (" aapl ", "AAPL"), ("COMP", "^IXIC"),
-    ("NDX", "^NDX"), ("AAPL", "AAPL"), ("BF.B", "BF-B"),
+    ("BRK.B", "BRK-B"), ("BRK/B", "BRK-B"), ("brk.b", "BRK-B"), (" aapl ", "AAPL"), ("AAPL", "AAPL"),
+    ("BF.B", "BF-B"),
+    # Stocks, not indices: Nasdaq's index codes are only ever produced from Yahoo's (nasdaq_symbol).
+    ("COMP", "COMP"), ("comp", "COMP"), ("NDX", "NDX"),
 ])
 def test_from_nasdaq_symbol(nasdaq, yahoo):
     assert from_nasdaq_symbol(nasdaq) == yahoo
 
 
-@pytest.mark.parametrize("symbol", ["AAPL", "BRK-B", "BF-B", "^IXIC", "^NDX", "GOOGL"])
+@pytest.mark.parametrize("symbol", ["AAPL", "BRK-B", "BF-B", "GOOGL", "COMP"])
 def test_symbols_survive_the_round_trip(symbol):
     assert from_nasdaq_symbol(nasdaq_symbol(symbol)) == symbol
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: from_nasdaq_symbol maps the stock COMP (Compass, Inc.) to the Nasdaq "
-                                       "Composite ^IXIC, so the screener and the directory lose it")
 def test_the_stock_comp_survives_the_round_trip():
-    assert from_nasdaq_symbol(nasdaq_symbol("COMP")) == "COMP"
+    assert nasdaq_symbol("COMP") == "COMP" and from_nasdaq_symbol(nasdaq_symbol("COMP")) == "COMP"
+
+
+@pytest.mark.parametrize("index, code", [("^IXIC", "COMP"), ("^NDX", "NDX")])
+def test_indices_map_only_from_yahoo_to_nasdaq(index, code):
+    assert nasdaq_symbol(index) == code
+    assert from_nasdaq_symbol(code) == code  # Nasdaq's code read back is the stock of that name, never the index
+    assert from_nasdaq_symbol(nasdaq_symbol(index)) != index
 
 
 @pytest.mark.parametrize("raw, clean", [
@@ -1393,19 +1593,24 @@ def test_the_stock_comp_survives_the_round_trip():
     ("  Apple   Inc.   Common Stock  ", "Apple Inc."),
     ("SPDR S&P 500 ETF Trust", "SPDR S&P 500 ETF Trust"),
     ("Taiwan Semiconductor Manufacturing Company Ltd.", "Taiwan Semiconductor Manufacturing Company Ltd."),
+    ("Apple Inc. Common Stock\n", "Apple Inc."), ("Apple Inc.\tCommon Stock", "Apple Inc."),
+    ("Example Corp, Common Stock", "Example Corp"),
 ])
 def test_clean_name(raw, clean):
     assert clean_name(raw) == clean
 
 
 @pytest.mark.parametrize("raw, clean", [
-    ("ADS-TEC Energy plc Ordinary Shares", "ADS-TEC Energy plc"),  # ADSE: the shipped directory names it ""
-    ("Teads Holding Co. Common Stock", "Teads Holding Co."),  # TEAD: the shipped directory names it "Te"
+    ("ADS-TEC Energy plc Ordinary Shares", "ADS-TEC Energy plc"),  # ADSE: the shipped directory named it ""
+    ("Teads Holding Co. Common Stock", "Teads Holding Co."),  # TEAD: the shipped directory named it "Te"
     ("Crossroads Impact Corp. Common Stock", "Crossroads Impact Corp."),
-    ("Common Stock", "Common Stock"),  # nothing left: keep what Nasdaq said
+    ("Threads Inc. Common Stock", "Threads Inc."),
+    ("Roads ADS", "Roads"),  # a real trailing ADS after whitespace is still cut
+    ("BeadsCommon Stock", "BeadsCommon Stock"),  # no whitespace before the description: nothing is cut
+    ("ADS", "ADS"), ("Common Stock", "Common Stock"), ("Ordinary Shares", "Ordinary Shares"),
+    ("  Common   Stock ", "Common Stock"),  # nothing left: keep what Nasdaq said (tidied)
+    ("", ""), (None, ""),
 ])
-@pytest.mark.xfail(strict=True, reason="BUG: clean_name's ADS pattern has no leading word boundary (cuts any word "
-                                       "ending in 'ads') and its `or name` fallback returns the emptied name")
 def test_clean_name_keeps_words_that_merely_contain_ads(raw, clean):
     assert clean_name(raw) == clean
 
@@ -1513,12 +1718,87 @@ def test_quote_from_row_before_the_open_behaves_like_yahoo(status):
     assert q.change == 0.0
 
 
-@pytest.mark.parametrize("status, state", [("After Hours", "POST"), ("after-hours", "POST"), ("Closed", "CLOSED"),
-                                           ("Market Closed", "CLOSED"), ("Market Open", "REGULAR"), ("", ""),
+@pytest.mark.parametrize("status, state", [("Closed", "CLOSED"), ("Market Closed", "CLOSED"),
+                                           (" market closed ", "CLOSED"), ("Market Open", "REGULAR"), ("", ""),
                                            (None, ""), ("Halted", "")])
 def test_quote_from_row_market_states(status, state):
     q = Nasdaq.quote_from_row(nrow("AAPL", status=status), "AAPL")
-    assert q.market_state == state and q.price == 100.0
+    assert q.market_state == state and q.price == 100.0 and q.prev_close == 98.0
+    assert q.change_pct == pytest.approx((100 / 98 - 1) * 100)  # the regular close against the previous close
+    assert q.ext_price is None and q.ext_change_pct is None
+    assert q.time == pytest.approx(utc(2026, 10, 6, 16, 47, 45) + 0.05)
+
+
+@pytest.mark.parametrize("status", ["After Hours", "after-hours", " AFTER HOURS "])
+def test_quote_from_row_after_hours_splits_the_close_from_the_late_trade(status):
+    """After hours Nasdaq's last sale is the late trade and netChange is its move from today's close."""
+    row = dict(nrow("AAPL", price="$231.00", prev="$225.00", pct="+1.30%", status=status,
+                    ts="2026-10-06T17:45:12.5-04:00"), netChange="+3.00")
+    q = Nasdaq.quote_from_row(row, "AAPL")
+    assert q.market_state == "POST" and q.price == 228.0 and q.prev_close == 225.0
+    assert q.change_pct == pytest.approx((228 / 225 - 1) * 100) and q.change == pytest.approx(3.0)
+    assert q.ext_price == 231.0 and q.ext_change_pct == pytest.approx((231 / 228 - 1) * 100)
+    assert q.time == ny(2026, 10, 6, 16) == utc(2026, 10, 6, 20)  # the regular close, on the trade's day
+    assert q.source == "Nasdaq" and q.name == "AAPL Inc." and q.volume == 1234567.0
+
+
+def test_quote_from_row_after_hours_with_the_late_trade_below_the_close():
+    row = dict(nrow("AAPL", price="$95.50", prev="$97.00", status="After Hours",
+                    ts="2026-01-06T19:59:00-05:00"), netChange="-2.50")
+    q = Nasdaq.quote_from_row(row, "AAPL")
+    assert q.price == 98.0 and q.change_pct == pytest.approx((98 / 97 - 1) * 100)
+    assert q.ext_price == 95.5 and q.ext_change_pct == pytest.approx((95.5 / 98 - 1) * 100)
+    assert q.time == ny(2026, 1, 6, 16) == utc(2026, 1, 6, 21)  # winter: 16:00 EST
+
+
+def test_quote_from_row_after_hours_without_a_late_move():
+    row = dict(nrow("AAPL", price="$100.00", prev="$98.00", status="After Hours"), netChange="0.00")
+    q = Nasdaq.quote_from_row(row, "AAPL")
+    assert q.price == 100.0 and q.ext_price == 100.0 and q.ext_change_pct == 0.0
+    assert q.change_pct == pytest.approx((100 / 98 - 1) * 100) and q.time == utc(2026, 10, 6, 20)
+
+
+def test_quote_from_row_after_hours_without_a_trade_time_uses_today_in_new_york(clock):
+    clock.wall = utc(2026, 10, 7, 2, 30)  # 22:30 in New York on the 6th
+    row = dict(nrow("AAPL", status="After Hours", ts=None), netChange="+1.00")
+    q = Nasdaq.quote_from_row(row, "AAPL")
+    assert q.price == 99.0 and q.time == utc(2026, 10, 6, 20)
+
+
+def test_quote_from_row_after_hours_without_a_previous_close():
+    row = dict(nrow("NEW", price="$12.00", prev="N/A", pct="+4.00%", status="After Hours"), netChange="+2.00")
+    q = Nasdaq.quote_from_row(row, "NEW")
+    assert q.price == 10.0 and q.prev_close is None and q.change_pct is None and q.change is None
+    assert q.ext_price == 12.0 and q.ext_change_pct == pytest.approx(20.0)
+
+
+@pytest.mark.parametrize("net", [None, "N/A", "--", "", "UNCH"])
+def test_quote_from_row_after_hours_without_net_change_behaves_as_before(net):
+    row = dict(nrow("AAPL", status="After Hours"), netChange=net)
+    q = Nasdaq.quote_from_row(row, "AAPL")
+    assert q.market_state == "POST" and q.price == 100.0 and q.prev_close == 98.0
+    assert q.change_pct == pytest.approx((100 / 98 - 1) * 100)
+    assert q.ext_price is None and q.ext_change_pct is None
+    assert q.time == pytest.approx(utc(2026, 10, 6, 16, 47, 45) + 0.05)  # the trade's own time
+
+
+@pytest.mark.parametrize("net", ["+100.00", "+250.00"])
+def test_quote_from_row_after_hours_with_a_change_that_leaves_no_close(net):
+    q = Nasdaq.quote_from_row(dict(nrow("AAPL", status="After Hours"), netChange=net), "AAPL")
+    assert q.price == 100.0 and q.ext_price is None and q.change_pct == pytest.approx((100 / 98 - 1) * 100)
+
+
+def test_quote_from_row_before_the_open_ignores_net_change():
+    row = dict(nrow("AAPL", price="$230.00", prev="$225.00", status="Pre Market"), netChange="+5.00")
+    q = Nasdaq.quote_from_row(row, "AAPL")
+    assert q.price == 225.0 and q.change_pct == 0.0 and q.time == 0.0
+    assert q.ext_price == 230.0 and q.ext_change_pct == pytest.approx((230 / 225 - 1) * 100)
+
+
+def test_quote_from_row_while_open_and_closed_ignores_net_change():
+    for status in ("Market Open", "Market Closed"):
+        q = Nasdaq.quote_from_row(dict(nrow("AAPL", status=status), netChange="+7.00"), "AAPL")
+        assert q.price == 100.0 and q.ext_price is None and q.change_pct == pytest.approx((100 / 98 - 1) * 100)
 
 
 @pytest.mark.parametrize("price", ["N/A", "--", "", None, "$0.00", "-5", "abc"])
@@ -1634,20 +1914,44 @@ def test_quotes_with_nothing_nasdaq_carries_make_no_request():
     assert not backend.calls
 
 
-@pytest.mark.parametrize("answer, status", [(Response(500, ""), 500), (Response(403, "denied"), 403),
-                                            (Response(429, ""), 429), (ConnectionError("down"), None),
-                                            (Response(200, "<html>maintenance</html>"), 200)])
-def test_quote_failures_raise_and_do_not_mark_symbols_unknown(answer, status):
+@pytest.mark.parametrize("answer, error, failing", [
+    (Response(500, ""), "HTTP 500", True), (Response(403, "denied"), "Nasdaq: HTTP 403", True),
+    (Response(429, ""), "HTTP 429", True), (ConnectionError("down"), "ConnectionError: down", True),
+    (Response(200, "<html>maintenance</html>"), "not JSON (HTTP 200): '<html>maintenance</html>'", False),
+    (Response(404, "{}"), "Nasdaq: HTTP 404", False),
+])
+def test_quote_failures_are_skipped_and_do_not_mark_symbols_unknown(caplog, answer, error, failing):
+    backend = Backend().on(WATCHLIST, answer)
+    n, http = nasdaq_client(backend)
+    with caplog.at_level("INFO", logger="marketbot.backup"):
+        assert asyncio.run(n.quotes(["AAPL", "MSFT"])) == {}  # logged, not raised
+    assert f"Nasdaq quotes failed for 2 symbols: {error}" in caplog.messages
+    assert n.supports("AAPL") and n.supports("MSFT")  # nothing was learned about them
+    assert len(backend.calls) == 1  # a failed batch isn't retried as the other asset class either
+    assert http.health["Nasdaq"].failing == failing
+
+
+def test_a_failing_batch_is_skipped_and_the_others_kept():
+    symbols = [f"T{i:02d}" for i in range(25)]
+    good = watchlist({(s, "stocks"): nrow(s, price=f"${10 + i}") for i, s in enumerate(symbols) if s != "T24"})
+
+    def answer(url):
+        asked = [v for _, v in parse_qsl(urlsplit(url).query)]
+        return Response(503, "busy") if "t00|stocks" in asked else good(url)
+
     backend = Backend().on(WATCHLIST, answer)
     n, _ = nasdaq_client(backend)
-    with pytest.raises(HttpError) as e:
-        asyncio.run(n.quotes(["AAPL", "MSFT"]))
-    assert e.value.status == status
-    assert n.supports("AAPL") and n.supports("MSFT")
+    out = asyncio.run(n.quotes(symbols))
+    assert sorted(out) == symbols[20:24] and out["T23"].price == 33.0
+    assert [c.pairs for c in backend.calls] == [
+        [("symbol", f"{s.lower()}|stocks") for s in symbols[:20]],
+        [("symbol", f"{s.lower()}|stocks") for s in symbols[20:]],
+        [("symbol", "t24|etf")],  # only what the answering batch didn't know is retried
+    ]
+    assert all(n.supports(s) for s in symbols[:20])  # the failed batch: nothing learned
+    assert not n.supports("T24")  # asked as both classes and unknown to both
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: Nasdaq.quotes drops every quote it already has when a later batch or "
-                                       "the other-asset-class retry fails")
 def test_a_failing_retry_pass_keeps_the_quotes_already_found():
     good = watchlist({("AAPL", "stocks"): nrow("AAPL")})
 
@@ -1658,8 +1962,26 @@ def test_a_failing_retry_pass_keeps_the_quotes_already_found():
     backend = Backend().on(WATCHLIST, answer)
     n, _ = nasdaq_client(backend)
     out = asyncio.run(n.quotes(["AAPL", "ZZZZ"]))
-    assert list(out) == ["AAPL"]
+    assert list(out) == ["AAPL"] and out["AAPL"].price == 100.0
     assert n.supports("ZZZZ")  # the retry failed: nothing was learned about it
+    assert [c.pairs for c in backend.calls] == [[("symbol", "aapl|stocks"), ("symbol", "zzzz|stocks")],
+                                                [("symbol", "zzzz|etf")]]
+
+
+def test_a_resting_nasdaq_answers_nothing_and_learns_nothing(clock):
+    backend = Backend().on(WATCHLIST, watchlist({("AAPL", "stocks"): nrow("AAPL")}))
+    n, http = nasdaq_client(backend)
+    for _ in range(FAILS_TO_REST):
+        http.record_failure("Nasdaq", HttpError("Nasdaq", "HTTP 403", 403))
+
+    async def main():
+        assert await n.quotes(["AAPL", "ZZZZ"]) == {}
+        assert not backend.calls and n.supports("AAPL") and n.supports("ZZZZ")
+        clock.advance(REST_SECONDS[0] + 1)
+        out = await n.quotes(["AAPL", "ZZZZ"])
+        assert list(out) == ["AAPL"] and not n.supports("ZZZZ")  # answering again: ZZZZ really is unknown
+
+    asyncio.run(main())
 
 
 HISTORY_ROWS = [
@@ -1880,22 +2202,19 @@ def test_screener_errors_raise_with_the_status(status):
 
 @pytest.mark.parametrize("symbol, product", [
     ("BTC-USD", "BTC-USD"), ("ETH-USD", "ETH-USD"), ("SUI20947-USD", "SUI-USD"), ("HYPE32196-USD", "HYPE-USD"),
-    ("BFC7817-USD", "BFC-USD"), ("1INCH-USD", "1INCH-USD"),
-    ("AAPL", None), ("BTC-EUR", None), ("^BTC-USD", None), ("-USD", None), ("12345-USD", None), ("BTCUSD", None),
+    ("BFC7817-USD", "BFC-USD"), ("1INCH-USD", "1INCH-USD"), ("TON11419-USD", "TON-USD"),
+    ("UNI7083-USD", "UNI-USD"), ("PEPE24478-USD", "PEPE-USD"),
+    ("AAPL", None), ("BTC-EUR", None), ("^BTC-USD", None), ("-USD", None), ("BTCUSD", None),
+    # An all-digit base is a bare CoinMarketCap id, not a ticker Coinbase could list.
+    ("12345-USD", None), ("38590-USD", None), ("1-USD", None),
 ])
 def test_coinbase_product(symbol, product):
     assert coinbase_product(symbol) == product
 
 
-@pytest.mark.parametrize("symbol", ["API3-USD", "C98-USD"])
-@pytest.mark.xfail(strict=True, reason="BUG: coinbase_product strips digits that are part of the real ticker "
-                                       "(API3-USD -> API-USD, C98-USD -> C-USD), not only Yahoo's numeric ids")
+@pytest.mark.parametrize("symbol", ["API3-USD", "C98-USD", "X2Y2-USD", "ABC123-USD", "00X-USD"])
 def test_coinbase_product_keeps_tickers_that_end_in_digits(symbol):
-    assert coinbase_product(symbol) == symbol
-
-
-STATS = {"open": "60000.00", "high": "62000.50", "low": "59000", "last": "61000", "volume": "1234.5",
-         "volume_30day": "99999"}
+    assert coinbase_product(symbol) == symbol  # fewer than four digits after a letter belong to the ticker
 
 
 def coinbase_client(backend, retries=0):
@@ -1903,92 +2222,208 @@ def coinbase_client(backend, retries=0):
     return Coinbase(http), http
 
 
-def test_stats_become_a_24_hour_quote(clock):
-    backend = Backend().on("/stats", J(STATS))
+NOW = 1_791_300_000  # the clock fixture's wall time: 2026-10-06 15:20 UTC
+MIDNIGHT = utc(2026, 10, 6)
+# Coinbase's candles: [time, low, high, open, close, base volume], newest first.
+TODAY = [MIDNIGHT, 59000, 62000.5, 60000.0, 61000, 1234.5]
+YESTERDAY = [MIDNIGHT - DAY, 58000, 60500, 59500, 60000, 2000.0]
+
+
+def day_candles(*rows, status=200):
+    return Response(status, json.dumps([list(r) for r in rows]))
+
+
+def test_todays_utc_candle_becomes_the_quote(clock):
+    assert (NOW, MIDNIGHT) == (clock.wall, NOW - NOW % DAY)
+    backend = Backend().on("/candles", day_candles(TODAY, YESTERDAY))
     cb, http = coinbase_client(backend)
     q = asyncio.run(cb.quote("BTC-USD"))
     assert (q.symbol, q.name, q.price, q.prev_close) == ("BTC-USD", "BTC", 61000.0, 60000.0)
-    assert q.change_pct == pytest.approx((61000 / 60000 - 1) * 100) and q.change == 1000.0
-    assert q.day_high == 62000.5 and q.day_low == 59000.0 and q.volume == pytest.approx(1234.5 * 61000)
+    assert q.change_pct == pytest.approx((61000 / 60000 - 1) * 100) and q.change == 1000.0  # since midnight UTC
+    assert q.day_high == 62000.5 and q.day_low == 59000.0 and q.volume == pytest.approx(1234.5 * 61000)  # dollars
     assert q.time == clock.wall and q.quote_type == "CRYPTOCURRENCY" and q.source == "Coinbase"
-    assert q.extra == {"change_window": "24h"}
-    assert backend.calls[0].url == f"{COINBASE}/products/BTC-USD/stats" and not http.health["Coinbase"].failing
+    assert q.extra == {} and q.market_state == "" and q.currency == "USD"  # no 24-hour window any more
+    assert all(type(v) is float for v in (q.price, q.prev_close, q.day_high, q.day_low, q.volume))
+    call, = backend.calls
+    assert call.url == (f"{COINBASE}/products/BTC-USD/candles?granularity=86400"
+                        "&start=2026-10-06T00%3A00%3A00%2B00%3A00&end=2026-10-06T15%3A20%3A00%2B00%3A00")
+    assert call.query == {"granularity": "86400", "start": "2026-10-06T00:00:00+00:00",
+                          "end": "2026-10-06T15:20:00+00:00"}
+    assert not http.health["Coinbase"].failing and http.health["Coinbase"].ok == 1
 
 
-def test_yahoo_style_ids_map_to_the_coinbase_product():
-    backend = Backend().on("/stats", J(STATS))
+def test_the_candle_for_today_is_found_in_any_order(clock):
+    later = [MIDNIGHT + DAY, 1, 1, 1, 1, 1]  # a stray row from the future isn't today's either
+    cb, _ = coinbase_client(Backend().on("/candles", day_candles(YESTERDAY, later, TODAY)))
+    q = asyncio.run(cb.quote("ETH-USD"))
+    assert q.price == 61000.0 and q.prev_close == 60000.0 and q.name == "ETH"
+
+
+def test_the_utc_day_starts_at_midnight(clock):
+    clock.wall = MIDNIGHT + DAY - 1  # 23:59:59: still the same UTC day
+    backend = Backend().on("/candles", day_candles(TODAY))
+    cb, _ = coinbase_client(backend)
+    assert asyncio.run(cb.quote("BTC-USD")).price == 61000.0
+    assert backend.calls[0].query["start"] == "2026-10-06T00:00:00+00:00"
+    assert backend.calls[0].query["end"] == "2026-10-06T23:59:59+00:00"
+
+    clock.wall = MIDNIGHT + DAY + 1  # 00:00:01 the next day: yesterday's candle is no longer today's
+    backend = Backend().on("/candles", day_candles(TODAY))
+    cb, _ = coinbase_client(backend)
+    assert asyncio.run(cb.quote("BTC-USD")) is None
+    assert backend.calls[0].query == {"granularity": "86400", "start": "2026-10-07T00:00:00+00:00",
+                                      "end": "2026-10-07T00:00:01+00:00"}
+
+    tomorrow = [MIDNIGHT + DAY, 61000, 61500, 61000, 61400, 3.0]
+    cb, _ = coinbase_client(Backend().on("/candles", day_candles(tomorrow, TODAY)))
+    q = asyncio.run(cb.quote("BTC-USD"))
+    assert q.price == 61400.0 and q.prev_close == 61000.0 and q.time == MIDNIGHT + DAY + 1
+
+
+@pytest.mark.parametrize("answer", [day_candles(YESTERDAY), day_candles(), Response(200, ""),
+                                    Response(200, "null"), J({"message": "no candles"}),
+                                    day_candles(TODAY[:5], [MIDNIGHT]), J([{"time": MIDNIGHT, "close": 1.0}])])
+def test_no_candle_for_today_is_no_quote(clock, answer):
+    backend = Backend().on("/candles", answer)
+    cb, http = coinbase_client(backend)
+    assert asyncio.run(cb.quote("BTC-USD")) is None  # e.g. just after midnight, before the day's first trade
+    assert len(backend.calls) == 1 and cb.supports("BTC-USD") and not http.health["Coinbase"].failing
+
+
+def test_short_and_odd_rows_are_skipped(clock):
+    rows = [TODAY[:5], {"time": MIDNIGHT}, "x", None, TODAY]
+    cb, _ = coinbase_client(Backend().on("/candles", J(rows)))
+    assert asyncio.run(cb.quote("BTC-USD")).price == 61000.0
+
+
+def test_yahoo_style_ids_map_to_the_coinbase_product(clock):
+    backend = Backend().on("/candles", day_candles(TODAY))
     cb, _ = coinbase_client(backend)
     q = asyncio.run(cb.quote("SUI20947-USD"))
-    assert q.symbol == "SUI20947-USD" and q.name == "SUI"
-    assert backend.calls[0].path == "/products/SUI-USD/stats"
+    assert q.symbol == "SUI20947-USD" and q.name == "SUI" and q.price == 61000.0
+    assert backend.calls[0].path == "/products/SUI-USD/candles"
+
+    backend = Backend().on("/candles", day_candles(TODAY))
+    cb, _ = coinbase_client(backend)
+    q = asyncio.run(cb.quote("API3-USD"))
+    assert q.symbol == "API3-USD" and q.name == "API3" and backend.calls[0].path == "/products/API3-USD/candles"
 
 
-@pytest.mark.parametrize("stats, price, pct", [
-    ({**STATS, "last": None}, None, None), ({**STATS, "last": "0"}, None, None), ({}, None, None),
-    ({**STATS, "open": "0"}, 61000.0, None), ({**STATS, "open": None}, 61000.0, None),
+@pytest.mark.parametrize("candle, price, prev, pct", [
+    ([MIDNIGHT, 59000, 62000.5, 60000, None, 1.0], None, None, None),
+    ([MIDNIGHT, 59000, 62000.5, 60000, 0, 1.0], None, None, None),
+    ([MIDNIGHT, 59000, 62000.5, 60000, -5, 1.0], None, None, None),
+    ([MIDNIGHT, 59000, 62000.5, 60000, "abc", 1.0], None, None, None),
+    ([MIDNIGHT, 59000, 62000.5, 0, 61000, 1.0], 61000.0, 0.0, None),
+    ([MIDNIGHT, 59000, 62000.5, None, 61000, 1.0], 61000.0, None, None),
+    ([MIDNIGHT, "59000", "62000.5", "60000", "61000", "2"], 61000.0, 60000.0, (61000 / 60000 - 1) * 100),
 ])
-def test_stats_with_missing_numbers(stats, price, pct):
-    cb, _ = coinbase_client(Backend().on("/stats", J(stats)))
+def test_candles_with_missing_numbers(clock, candle, price, prev, pct):
+    cb, _ = coinbase_client(Backend().on("/candles", day_candles(candle)))
     q = asyncio.run(cb.quote("BTC-USD"))
     if price is None:
         assert q is None
     else:
-        assert q.price == price and q.change_pct is pct
+        assert q.price == price and q.prev_close == prev
+        if pct is None:
+            assert q.change_pct is None and q.change is None
+        else:
+            assert q.change_pct == pytest.approx(pct) and q.change == pytest.approx(price - prev)
 
 
-def test_stats_without_volume_and_with_an_empty_answer():
-    cb, _ = coinbase_client(Backend().on("/stats", J({**STATS, "volume": None})))
-    assert asyncio.run(cb.quote("BTC-USD")).volume == 0.0
-    cb, _ = coinbase_client(Backend().on("/stats", Response(200, "")))
-    assert asyncio.run(cb.quote("BTC-USD")) is None
+@pytest.mark.parametrize("volume", [None, 0, "--"])
+def test_a_candle_without_volume_has_zero_volume(clock, volume):
+    candle = TODAY[:5] + [volume]
+    cb, _ = coinbase_client(Backend().on("/candles", day_candles(candle)))
+    q = asyncio.run(cb.quote("BTC-USD"))
+    assert q.volume == 0.0 and q.price == 61000.0
+
+
+def test_a_candle_without_high_or_low(clock):
+    cb, _ = coinbase_client(Backend().on("/candles", day_candles([MIDNIGHT, None, None, 60000, 61000, 1.0])))
+    q = asyncio.run(cb.quote("BTC-USD"))
+    assert q.day_high is None and q.day_low is None and q.price == 61000.0
 
 
 def test_quote_of_something_coinbase_cannot_list_asks_nothing():
     backend = Backend()
     cb, _ = coinbase_client(backend)
-    assert asyncio.run(cb.quote("AAPL")) is None and not backend.calls
-    assert not cb.supports("AAPL") and not cb.supports("^GSPC") and cb.supports("BTC-USD")
+    for symbol in ("AAPL", "^GSPC", "BTC-EUR", "12345-USD"):
+        assert asyncio.run(cb.quote(symbol)) is None and not cb.supports(symbol)
+    assert not backend.calls and cb.supports("BTC-USD")
 
 
 @pytest.mark.parametrize("status", [400, 404])
 def test_unknown_products_are_remembered(clock, status):
-    backend = Backend().on("/stats", Response(status, '{"message": "NotFound"}'))
-    cb, _ = coinbase_client(backend)
+    backend = Backend().on("/candles", Response(status, '{"message": "NotFound"}'))
+    cb, http = coinbase_client(backend)
 
     async def main():
         with pytest.raises(HttpError) as e:
             await cb.quote("SUI20947-USD")
         assert e.value.status == 404 and str(e.value) == "Coinbase doesn't list SUI-USD"
+        assert e.value.source == "Coinbase"
         assert not cb.supports("SUI20947-USD") and not cb.supports("SUI-USD") and cb.supports("BTC-USD")
         assert await cb.quotes(["SUI-USD", "SUI20947-USD"]) == {}
         assert len(backend.calls) == 1
-        clock.advance(UNSUPPORTED_TTL + 1)
+        clock.advance(UNSUPPORTED_TTL - 1)
+        assert not cb.supports("SUI-USD")
+        clock.advance(2)
         assert cb.supports("SUI-USD")
 
     asyncio.run(main())
+    assert not http.health["Coinbase"].failing  # it answered
+
+
+def _by_product(answers: dict):
+    def answer(url):
+        return answers[urlsplit(url).path.split("/")[2]]
+    return answer
 
 
 def test_quotes_keep_what_answered(clock):
-    def stats(url):
-        p = urlsplit(url).path.split("/")[2]
-        return {"BTC-USD": J(STATS), "ETH-USD": Response(500, "oops"), "NOPE-USD": Response(404, ""),
-                "DOGE-USD": Response(429, ""), "XRP-USD": Response(200, "not json")}[p]
-
-    backend = Backend().on("/stats", stats)
+    backend = Backend().on("/candles", _by_product({
+        "BTC-USD": day_candles(TODAY, YESTERDAY), "ETH-USD": Response(500, "oops"), "NOPE-USD": Response(404, ""),
+        "DOGE-USD": Response(429, ""), "XRP-USD": Response(200, "not json"), "SOL-USD": day_candles(YESTERDAY),
+        "ADA-USD": Response(403, "forbidden")}))
     cb, _ = coinbase_client(backend)
-    out = asyncio.run(cb.quotes(["BTC-USD", "ETH-USD", "NOPE-USD", "DOGE-USD", "XRP-USD", "AAPL", "BTC-USD"]))
+    asked = ["BTC-USD", "ETH-USD", "NOPE-USD", "DOGE-USD", "XRP-USD", "SOL-USD", "ADA-USD", "AAPL", "BTC-USD"]
+    out = asyncio.run(cb.quotes(asked))
     assert list(out) == ["BTC-USD"] and out["BTC-USD"].price == 61000.0
-    assert sorted(c.path for c in backend.calls) == sorted(f"/products/{p}/stats" for p in
-                                                           ("BTC-USD", "ETH-USD", "NOPE-USD", "DOGE-USD", "XRP-USD"))
+    assert sorted(c.path for c in backend.calls) == sorted(
+        f"/products/{p}/candles" for p in ("BTC-USD", "ETH-USD", "NOPE-USD", "DOGE-USD", "XRP-USD", "SOL-USD",
+                                           "ADA-USD"))
     assert not cb.supports("NOPE-USD")
-    assert cb.supports("ETH-USD") and cb.supports("DOGE-USD") and cb.supports("XRP-USD")  # failures aren't "unknown"
+    for p in ("ETH-USD", "DOGE-USD", "XRP-USD", "SOL-USD", "ADA-USD"):
+        assert cb.supports(p)  # failures and a quiet day aren't "unknown"
 
 
-def test_a_coinbase_server_error_is_not_an_unknown_product():
-    cb, _ = coinbase_client(Backend().on("/stats", Response(503, "")))
+def test_quotes_of_yahoo_ids_keep_the_yahoo_symbol(clock):
+    backend = Backend().on("/candles", day_candles(TODAY))
+    cb, _ = coinbase_client(backend)
+    out = asyncio.run(cb.quotes(["SUI20947-USD", "TON11419-USD", "12345-USD"]))
+    assert sorted(out) == ["SUI20947-USD", "TON11419-USD"] and out["TON11419-USD"].name == "TON"
+    assert sorted(c.path for c in backend.calls) == ["/products/SUI-USD/candles", "/products/TON-USD/candles"]
+
+
+@pytest.mark.parametrize("answer, message, status", [
+    (Response(503, ""), "HTTP 503", 503), (Response(500, "oops"), "HTTP 500 (oops)", 500),
+    (Response(429, "slow down"), "HTTP 429 (slow down)", 429), (Response(403, "denied"), "Coinbase: HTTP 403", 403),
+    (Response(401, ""), "Coinbase: HTTP 401", 401), (Response(410, ""), "Coinbase: HTTP 410", 410),
+    (ConnectionError("down"), "ConnectionError: down", None),
+])
+def test_other_coinbase_failures_raise_and_are_not_an_unknown_product(clock, answer, message, status):
+    cb, _ = coinbase_client(Backend().on("/candles", answer))
     with pytest.raises(HttpError) as e:
         asyncio.run(cb.quote("BTC-USD"))
-    assert e.value.status == 503 and str(e.value) == "HTTP 503" and cb.supports("BTC-USD")
+    assert e.value.status == status and str(e.value) == message and cb.supports("BTC-USD")
+
+
+def test_a_non_json_candle_answer_raises(clock):
+    cb, _ = coinbase_client(Backend().on("/candles", Response(200, "<html>maintenance</html>")))
+    with pytest.raises(HttpError) as e:
+        asyncio.run(cb.quote("BTC-USD"))
+    assert e.value.status == 200 and "not JSON" in str(e.value) and cb.supports("BTC-USD")
 
 
 def candle_server(first_t, last_t, step, inclusive=False, values=None):

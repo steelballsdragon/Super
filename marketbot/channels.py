@@ -60,10 +60,12 @@ class ChannelStore:
         return self._configs.get(channel_id)
 
     def set(self, channel_id: int, kind: str, guild_id: int = 0) -> ChannelConfig:
+        """Makes a channel `kind`. Setting the kind it already has keeps everything (its board, watchlist and
+        settings); a new kind starts with a new board and that market's default list."""
         old = self._configs.get(channel_id)
-        cfg = replace(old, kind=kind, board_message_id=None) if old else ChannelConfig(kind, guild_id)
-        if old and old.kind != kind:
-            cfg = replace(cfg, watchlist=())
+        if old and old.kind == kind:
+            return old
+        cfg = replace(old, kind=kind, board_message_id=None, watchlist=()) if old else ChannelConfig(kind, guild_id)
         self._configs[channel_id] = cfg
         self._save()
         return cfg

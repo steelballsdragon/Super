@@ -144,12 +144,16 @@ def register_commands(bot) -> None:
             channel = discord.utils.get(cat.text_channels, name=name)
             if channel is None:
                 channel = await guild.create_text_channel(name, category=cat, topic=topic)
-            bot.channels.set(channel.id, kind, guild.id)
             made.append(channel)
+            existing = bot.channels.get(channel.id)
+            if existing and existing.kind == kind:
+                continue  # already set up (running /setup again adds new channels without touching these)
+            bot.channels.set(channel.id, kind, guild.id)
             await bot.send(channel.id, Post([discord.Embed(title=f"{KIND_NAMES[kind]} channel", description=INTROS[kind],
                                                            color=E.BLUE)]))
         for job in ("live", "crypto_data", "mood", "trends", "nvidia"):
             bot._last.pop(job, None)
+        bot._trends_board_at = 0.0  # a new trends channel gets its board within a minute
         await interaction.followup.send("Done: " + " ".join(c.mention for c in made) +
                                         "\nBoards appear within a minute. Pin permission (Manage Messages) keeps the "
                                         "boards pinned.", ephemeral=True)
@@ -168,6 +172,7 @@ def register_commands(bot) -> None:
         bot.channels.set(interaction.channel_id, kind.value, interaction.guild_id or 0)
         for job in ("live", "trends", "nvidia"):
             bot._last.pop(job, None)
+        bot._trends_board_at = 0.0
         await interaction.response.send_message(embed=discord.Embed(
             title=f"{KIND_NAMES[kind.value]} channel", description=INTROS[kind.value], color=E.BLUE))
 

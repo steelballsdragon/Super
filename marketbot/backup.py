@@ -127,7 +127,12 @@ class Nasdaq:
         resp = await self.http.get(f"{NASDAQ}{path}", params=params, headers=NASDAQ_HEADERS, source=self.SOURCE)
         if resp.status != 200:
             raise HttpError(self.SOURCE, f"Nasdaq: HTTP {resp.status}", resp.status)
-        return resp.json() or {}
+        data = resp.json()
+        if data is None:
+            return {}
+        if not isinstance(data, dict):
+            raise HttpError(self.SOURCE, "Nasdaq sent an unexpected answer", resp.status)
+        return data
 
     def supports(self, symbol: str) -> bool:
         return nasdaq_symbol(symbol) is not None and time.monotonic() - self._unknown.get(symbol, -1e9) > UNSUPPORTED_TTL
@@ -166,10 +171,23 @@ class Nasdaq:
                 log.info("Nasdaq quotes failed for %d symbols: %s", len(batch), exc)
                 failed.update(s for s, _ in batch)
                 continue
-            by_symbol = {nasdaq_symbol(s): s for s, _ in batch}
-            for row in data.get("data") or []:
-                sym = by_symbol.get(str(row.get("symbol", "")).upper())
-                q = self.quote_from_row(row, sym) if sym else None
+            # Matched by symbol and asset class: the stock COMP and the Nasdaq Composite (COMP|index) can share a
+            # batch.
+            by_key = {(nasdaq_symbol(s), c.upper()): s for s, c in batch}
+            rows = data.get("data") if isinstance(data.get("data"), list) else []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                key = (str(row.get("symbol", "")).upper(), str(row.get("assetClass") or "").upper())
+                sym = by_key.get(key)
+                if sym is None:  # no asset class in the answer: match by symbol when that's unambiguous
+                    matches = [s for (ns, _), s in by_key.items() if ns == key[0]]
+                    sym = matches[0] if len(matches) == 1 else None
+                try:
+                    q = self.quote_from_row(row, sym) if sym else None
+                except (TypeError, ValueError, AttributeError):
+                    log.info("Odd Nasdaq quote row for %s skipped", sym)
+                    q = None
                 if q:
                     out[sym] = q
         return failed

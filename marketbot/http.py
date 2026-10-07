@@ -91,9 +91,13 @@ class Health:
         return "not used yet" if not self.failed else f"⚠️ {self.last_error}"
 
 
-def _quiet(text: str) -> str:
-    """Error text without anything that looks like a key (some APIs echo the request URL)."""
-    return re.sub(r"(?i)(api[_-]?key|token|crumb|key)=[^&\s]+", r"\1=…", text).replace("\n", " ")
+def _quiet(text: str, secrets=()) -> str:
+    """Error text without anything that looks like a key (some APIs echo the request URL) or any of `secrets`."""
+    text = re.sub(r"(?i)(api[_-]?key|token|crumb|key)=[^&\s]+", r"\1=…", text).replace("\n", " ")
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "…")
+    return text
 
 
 def ca_bundle():
@@ -191,7 +195,9 @@ class Http:
         tries = 1 + (self.retries if retries is None else retries)
         gate = self._gates.setdefault(source, asyncio.Semaphore(self._limits.get(source, 6)))
         error: HttpError | None = None
-        proxy = self.proxies.get(source)
+        proxy = self.proxies.get(source) or self.proxies.get(source.split()[0])  # "Yahoo cookie" uses Yahoo's
+        # Credentials sent in headers never appear in error text (some APIs echo them back).
+        secrets = [v.split()[-1] for k, v in (headers or {}).items() if k.lower() == "authorization" and v.split()]
         for attempt in range(tries):
             try:
                 async with gate:
@@ -204,12 +210,12 @@ class Http:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # network errors, timeouts, TLS problems
-                error = HttpError(source, f"{type(exc).__name__}: {_quiet(str(exc))[:160]}")
+                error = HttpError(source, f"{type(exc).__name__}: {_quiet(str(exc), secrets)[:160]}")
             else:
                 if resp.status in answered or (resp.status not in FAILING and resp.status < 500):
                     self.record_ok(source, resp.status)
                     return resp
-                body = _quiet(resp.text.strip())[:60]
+                body = _quiet(resp.text.strip(), secrets)[:60]
                 error = HttpError(source, f"HTTP {resp.status}" + (f" ({body})" if body and "<" not in body else ""),
                                   resp.status)
                 if resp.status in FAILING:

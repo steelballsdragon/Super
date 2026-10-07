@@ -20,6 +20,8 @@ log = logging.getLogger(__name__)
 INTRADAY_DAYS = {"1d": 1, "5d": 5}
 SCREENS = {"day_gainers", "day_losers", "most_actives"}
 MIN_CAP = 2e9  # movers lists skip companies smaller than this (as Yahoo's do)
+COINGECKO_WAIT = 8.0  # seconds the last-resort crypto prices may take
+COINGECKO_MAX_AGE = 900.0  # older CoinGecko prices (a cached answer while it's down) aren't passed off as live
 
 
 class DataUnavailable(YahooError):
@@ -117,20 +119,23 @@ class MarketData:
         left = [s for s in coins if s not in out]
         if left and self.coins:
             try:
-                top = await self.coins()
+                # The last resort mustn't hold up the live boards: a few seconds, then go without.
+                top = await asyncio.wait_for(self.coins(), COINGECKO_WAIT)
             except Exception as exc:
                 log.info("CoinGecko prices failed: %s", exc)
                 top = []
+            now = time.time()
             by_ticker = {}
             for c in top:  # largest first, so a ticker means the biggest coin using it
                 by_ticker.setdefault(c.symbol.upper(), c)
             for s in left:
                 c = by_ticker.get(coin_base(s))
-                if c and c.price:
+                age = now - (getattr(c, "at", 0) or 0) if c else None
+                if c and c.price and age is not None and age < COINGECKO_MAX_AGE:
                     pct = c.change_24h
                     out[s] = Quote(symbol=s, name=c.name, price=c.price,
                                    prev_close=c.price / (1 + pct / 100) if pct not in (None, -100) else None,
-                                   change_pct=pct, time=time.time(), quote_type="CRYPTOCURRENCY", source="CoinGecko",
+                                   change_pct=pct, time=c.at, quote_type="CRYPTOCURRENCY", source="CoinGecko",
                                    extra={"change_window": "24h", "volume24h": c.volume})
         for s, q in out.items():
             listing = self.directory.get(s)
