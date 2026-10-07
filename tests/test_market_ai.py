@@ -623,3 +623,60 @@ def test_real_client_posts_json_and_lowercases_headers(monkeypatch):
     assert status == 200 and headers["retry-after"] == "3" and seen["auth"] == "Bearer k1"
     assert seen["body"]["response_format"]["type"] == "json_schema"
     assert items[0]["id"] == "0" and r._session is None
+
+
+# ----- any feature can ask a short structured question -----
+
+WHY_SCHEMA = {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"],
+              "additionalProperties": False}
+
+
+def test_complete_returns_the_first_readers_answer_with_the_callers_schema():
+    clock = Clock()
+    service = Service(answer(0, content=json.dumps({"summary": "Chips fell with the sector."})))
+    r = reader(service=service, clock=clock)
+    out = asyncio.run(desk(r, clock=clock).complete("You explain moves.", "NVDA -4%", WHY_SCHEMA, "why"))
+    assert out == {"summary": "Chips fell with the sector."}
+    body = service.posts()[0][3]
+    assert body["messages"][0]["content"] == "You explain moves."
+    assert body["response_format"]["json_schema"] == {"name": "why", "strict": True, "schema": WHY_SCHEMA}
+    assert r.status.calls_today == 1 and r.status.last_error is None
+
+
+def test_complete_fails_over_and_then_gives_up_quietly():
+    clock = Clock()
+    groq = Service((503, {}, "down"))
+    gemini = Service(answer(0, content='```json\n{"summary": "ok"}\n```'))
+    g, m = reader(ai.GROQ, groq, clock), reader(ai.GEMINI, gemini, clock, key="AIza")
+    assert asyncio.run(desk(g, m, clock=clock).complete("s", "p", WHY_SCHEMA)) == {"summary": "ok"}
+    assert g.status.last_error == "HTTP 503 (down)"
+    nothing = Service((200, {}, json.dumps({"choices": [{"message": {"content": "[1, 2]"}, "finish_reason": "stop"}]})))
+    r = reader(service=nothing, clock=clock)
+    assert asyncio.run(desk(r, clock=clock).complete("s", "p", WHY_SCHEMA)) is None
+    assert r.status.last_error == "unreadable answer"
+    assert asyncio.run(ai.NewsAI(readers=[]).complete("s", "p", WHY_SCHEMA)) is None
+
+
+def test_complete_doesnt_wait_long_for_a_paused_reader():
+    clock = Clock()
+    r = reader(service=Service(answer(0, content='{"summary": "x"}')), clock=clock)
+    r.pause(30)
+    assert asyncio.run(desk(r, clock=clock).complete("s", "p", WHY_SCHEMA, wait=5)) is None
+    assert asyncio.run(desk(r, clock=clock).complete("s", "p", WHY_SCHEMA, wait=40)) == {"summary": "x"}
+    assert clock.slept == [pytest.approx(30)]
+
+
+def test_plain_json_fallback_describes_the_callers_schema():
+    clock = Clock()
+    service = Service((400, {}, json.dumps({"error": {"message": "json_schema not supported"}})),
+                      answer(0, content='{"summary": "plain"}'))
+    r = reader(service=service, clock=clock)
+    assert asyncio.run(desk(r, clock=clock).complete("s", "p", WHY_SCHEMA)) == {"summary": "plain"}
+    assert '"summary"' in service.posts()[1][3]["messages"][1]["content"]
+
+
+def test_parse_object():
+    assert ai.parse_object('Sure: {"a": 1} done') == {"a": 1}
+    for bad in ("[1]", "", "nope", "null"):
+        with pytest.raises(ValueError):
+            ai.parse_object(bad)

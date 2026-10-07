@@ -1,0 +1,5 @@
+"""The add-on features the bot loads, in /help order. Each batch appends its features here."""
+
+from __future__ import annotations
+
+FEATURES: list[type] = []

@@ -153,6 +153,16 @@ MAX_PAUSE = 6 * 3600.0
 MAX_CALLS_PER_RUN = 40
 
 
+@dataclass(frozen=True)
+class Ask:
+    """One kind of question for the readers: its instructions, the JSON shape of the answer, and how to read it."""
+    system: str
+    schema: dict
+    name: str
+    plain: str  # appended to the prompt when the service only does plain JSON
+    parse: object  # answer text -> result (raises ValueError)
+
+
 class ReaderError(Exception):
     def __init__(self, message: str, pause: float = 0.0, again: bool = False):
         super().__init__(message)
@@ -262,7 +272,7 @@ class Reader:
     def pause(self, seconds: float) -> None:
         self.paused_until = max(self.paused_until, self.clock() + min(seconds, MAX_PAUSE))
 
-    async def read(self, prompt: str) -> list:
+    async def read(self, prompt: str, ask: Ask | None = None):
         raise NotImplementedError
 
     async def close(self) -> None:
@@ -277,18 +287,19 @@ class ClaudeReader(Reader):
             client = anthropic.AsyncAnthropic(api_key=key, max_retries=2, timeout=TIMEOUT)
         self.client = client
 
-    async def read(self, prompt: str) -> list:
+    async def read(self, prompt: str, ask: Ask | None = None):
         import anthropic
 
+        ask = ask or HEADLINES
         self.calls_today()
         self.status.calls_today += 1
         try:
             response = await self.client.beta.messages.create(
                 model=self.model,
                 max_tokens=16000,
-                system=SYSTEM,
+                system=ask.system,
                 messages=[{"role": "user", "content": prompt}],
-                output_config={"effort": "low", "format": {"type": "json_schema", "schema": SCHEMA}},
+                output_config={"effort": "low", "format": {"type": "json_schema", "schema": ask.schema}},
                 betas=["server-side-fallback-2026-07-01"],
                 fallbacks="default",
             )
@@ -303,7 +314,7 @@ class ClaudeReader(Reader):
             raise ReaderError("declined")
         text = next((b.text for b in response.content if b.type == "text"), "")
         try:
-            return json.loads(text)["items"]
+            return ask.parse(text)
         except (ValueError, KeyError, TypeError):
             raise ReaderError("unreadable answer")
 
@@ -333,23 +344,24 @@ class OpenAIReader(Reader):
         paced = self.pacer.wait(self.pacer.typical or self.plan.estimate)
         return None if paced is None else max(super().wait(), paced)
 
-    async def read(self, prompt: str) -> list:
+    async def read(self, prompt: str, ask: Ask | None = None):
+        ask = ask or HEADLINES
         for _ in range(3):  # a refused format or a retired model gets another try straight away
             try:
-                return await self._ask(prompt)
+                return await self._ask(prompt, ask)
             except _Retry:
                 continue
         raise ReaderError("the service keeps refusing the request", pause=600)
 
-    async def _ask(self, prompt: str) -> list:
+    async def _ask(self, prompt: str, ask: Ask):
         body = {"model": self.model, "max_completion_tokens": self.plan.max_tokens,
-                "messages": [{"role": "system", "content": SYSTEM},
-                             {"role": "user", "content": prompt + (PLAIN_JSON if self.plain else "")}]}
+                "messages": [{"role": "system", "content": ask.system},
+                             {"role": "user", "content": prompt + (ask.plain if self.plain else "")}]}
         if self.plain:
             body["response_format"] = {"type": "json_object"}
         else:
             body["response_format"] = {"type": "json_schema",
-                                       "json_schema": {"name": "headline_reads", "strict": True, "schema": SCHEMA}}
+                                       "json_schema": {"name": ask.name, "strict": True, "schema": ask.schema}}
             body.update(dict(self.plan.extra))
         entry = self.pacer.start(self.pacer.typical or self.plan.estimate)
         self.status.calls_today = self.pacer.calls_today
@@ -363,7 +375,7 @@ class OpenAIReader(Reader):
         if status == 200:
             self.limited = 0
             self.searched = False
-            return self._answer(entry, text)
+            return self._answer(entry, text, ask)
         self.pacer.finish(entry, 0)
         code, detail = self._error(text)
         if status == 429:
@@ -392,7 +404,7 @@ class OpenAIReader(Reader):
         raise ReaderError(f"HTTP {status}" + (f" ({detail})" if detail else ""),
                           pause=60 if status >= 500 or status == 413 else 600)
 
-    def _answer(self, entry: list[float], text: str) -> list:
+    def _answer(self, entry: list[float], text: str, ask: Ask):
         try:
             data = json.loads(text)
             choice = data["choices"][0]
@@ -409,8 +421,8 @@ class OpenAIReader(Reader):
         if choice.get("finish_reason") == "length":
             raise ReaderError("answer cut off")
         try:
-            return parse_items(content)
-        except ValueError:
+            return ask.parse(content)
+        except (ValueError, KeyError, TypeError):
             raise ReaderError("unreadable answer")
 
     def _headers(self) -> dict:
@@ -551,6 +563,39 @@ class NewsAI:
             log.info("%d headlines keep the rules' read (no reader free in time)", len(todo))
         return changed
 
+    async def complete(self, system: str, prompt: str, schema: dict, name: str = "answer",
+                       wait: float = 5.0) -> dict | None:
+        """One structured answer (a JSON object matching `schema`) from the first reader free within `wait`
+        seconds, the others taking over if it fails; None when none can answer (callers then use a template).
+        Shares the readers' pacing and daily caps with the news."""
+        ask = Ask(system, schema, name, "\n\nAnswer with JSON only, matching this JSON schema:\n" + json.dumps(schema),
+                  parse_object)
+        done: set[int] = set()
+        for _ in range(len(self.readers) + 2):
+            pick = self._pick(done, REVIEW_SECONDS - wait)
+            if pick is None:
+                return None
+            reader, delay = pick
+            if delay > 0:
+                await self.sleep(delay)
+            try:
+                result = await reader.read(prompt, ask)
+            except ReaderError as exc:
+                reader.status.last_error = str(exc)
+                if exc.pause:
+                    reader.pause(exc.pause)
+                done.add(id(reader))
+                continue
+            except Exception as exc:
+                log.warning("%s failed answering", reader.name, exc_info=True)
+                reader.status.last_error = f"unexpected error ({type(exc).__name__})"
+                reader.pause(600)
+                done.add(id(reader))
+                continue
+            reader.status.last_error, reader.status.last_ok = None, time.time()
+            return result
+        return None
+
     def _pick(self, done: set[int], elapsed: float) -> tuple[Reader, float] | None:
         """The reader to use next: the first one (in order of preference) that's free now, else the one free
         soonest, among those that still have calls today and can start before the run's time is up."""
@@ -595,6 +640,24 @@ def parse_items(text: str) -> list:
         data = data.get("items")
     if not isinstance(data, list):
         raise ValueError("no items in the answer")
+    return data
+
+
+def parse_object(text: str) -> dict:
+    """A JSON object answer, also when a model wraps it in a code block or a sentence."""
+    text = (text or "").strip()
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
+    if fenced:
+        text = fenced.group(1).strip()
+    try:
+        data = json.loads(text)
+    except ValueError:
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        data = json.loads(text[start:end + 1])
+    if not isinstance(data, dict):
+        raise ValueError("the answer isn't a JSON object")
     return data
 
 
@@ -738,3 +801,6 @@ def apply(a: Analysis, item: dict) -> None:
             impacts.append(Impact(asset, symbol, name, direction, round(low, 2), round(high, 2), unit,
                                   (low + high) / 2))
     a.impacts = impacts[:7]
+
+
+HEADLINES = Ask(SYSTEM, SCHEMA, "headline_reads", PLAIN_JSON, parse_items)

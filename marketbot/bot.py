@@ -148,6 +148,8 @@ class MarketBot(discord.Client):
         self._jobs: dict[str, asyncio.Task] = {}
         self._last: dict[str, float] = {}
         self._first_news = not self.state.items("news_seen")
+        from .addons import load as load_addons
+        self.features = load_addons(self)
 
     # ----- lifecycle -----
 
@@ -184,6 +186,11 @@ class MarketBot(discord.Client):
             task.cancel()
         await self.news.close()
         await self.ai.close()
+        for feature in self.features:
+            try:
+                await feature.close()
+            except Exception:
+                log.warning("Closing %s failed", feature.name, exc_info=True)
         await self.engine.close()
         await super().close()
 
@@ -211,7 +218,7 @@ class MarketBot(discord.Client):
             ("trends", 60, self.job_trends),
             ("nvidia", TICK_SECONDS, self.job_nvidia),
             ("directory", 6 * 3600, self.job_directory),
-        ]
+        ] + [job for f in self.features for job in f.jobs()]
 
     @tasks.loop(seconds=TICK_SECONDS)
     async def tick(self) -> None:

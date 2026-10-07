@@ -17,6 +17,7 @@ from . import briefs, charts, embeds as E, stats
 from .briefs import Post, chart_post
 from .channels import KIND_NAMES, KINDS, MAX_WATCHLIST, ChannelConfig
 from .engine import Resolved, SourcesDown, UnknownSymbol
+from .apis import ApiError
 from .http import HttpError
 from .limits import MESSAGE, clip, fit_embed
 from .news import analyse
@@ -800,6 +801,14 @@ def register_commands(bot) -> None:
         src.append(f"Symbol list: {d.count(STOCKS):,} US stocks & ETFs, {d.count(CRYPTO):,} coins"
                    + (f" · updated {E.ts(d.updated)}" if d.updated else ""))
         e.add_field(name="Data sources", value=clip("\n".join(src), 1024), inline=False)
+        extra = []
+        for feature in getattr(bot, "features", []):
+            try:
+                extra += feature.status()
+            except Exception:
+                log.warning("Status of %s failed", feature.name, exc_info=True)
+        if extra:
+            e.add_field(name="Add-on data", value=clip("\n".join(extra), 1024), inline=False)
         spot = bot.spotlight
         if bot.massive:
             lines = [f"{spot.plan()} · {bot.massive_used()}/5 calls in the last minute · {bot.massive.limiter.total:,} "
@@ -858,9 +867,14 @@ def register_commands(bot) -> None:
             "Live stocks and crypto, alerts, breakout radar, forecasts built on a century of prices, and a news desk "
             "that estimates each story's market impact. Tap a command to use it. Any symbol works by ticker or "
             "name: `nvidia`, `brk.b`, `BTC`, `gold`, `s&p`."))
-        for title, rows in HELP_GUIDE:
-            e.add_field(name=title, value="\n".join(f"{mention(ids, name)} {what}" for name, what in rows),
-                        inline=False)
+        groups: dict[str, list[tuple[str, str]]] = {}
+        for feature in getattr(bot, "features", []):
+            if feature.help_group:
+                groups.setdefault(feature.help_group, []).extend(feature.help())
+        for title, rows in list(HELP_GUIDE) + [(t, tuple(r)) for t, r in groups.items()]:
+            if rows:
+                e.add_field(name=title, value=clip("\n".join(f"{mention(ids, name)} {what}" for name, what in rows),
+                                                   1024), inline=False)
         e.add_field(name="About the predictions", value=(
             "Breakout odds and price ranges are the strong suit: tested on years the model never saw, breakout calls "
             f"score an AUC around 0.8. Plain up/down direction is close to a coin flip for every method, so those "
@@ -872,7 +886,7 @@ def register_commands(bot) -> None:
     async def on_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
         name = interaction.command.qualified_name if interaction.command else "?"
         cause = getattr(error, "original", error)
-        if isinstance(cause, (YahooError, HttpError, SourcesDown)):
+        if isinstance(cause, (YahooError, HttpError, SourcesDown, ApiError)):
             log.warning("/%s: data unavailable: %s", name, cause)
             msg = (f"⚠️ I couldn't get the data for that right now ({clip(str(cause), 160)}). I keep retrying by "
                    "myself: try again in a minute, and `/status` shows each source's state.")
@@ -886,3 +900,9 @@ def register_commands(bot) -> None:
                 await interaction.response.send_message(msg, ephemeral=True)
         except discord.HTTPException:
             pass
+
+    for feature in getattr(bot, "features", []):
+        try:
+            feature.register(tree)
+        except Exception:
+            log.exception("The commands of %s failed to register", feature.name)
