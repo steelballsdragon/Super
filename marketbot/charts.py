@@ -306,3 +306,36 @@ def equity_chart(t: np.ndarray, strategy: np.ndarray, hold: np.ndarray, title: s
     _date_ticks(ax, t, span_days=(t[-1] - t[0]) / 86400)
     _title(fig, title, subtitle)
     return _png(fig)
+
+
+@serialized
+def fear_greed_chart(stocks: list[tuple[float, float]], crypto: list[tuple[float, float]], title: str,
+                     subtitle: str) -> bytes:
+    """Fear & Greed over time (0-100) for stocks and crypto, over the zones."""
+    import matplotlib.dates as mdates
+
+    fig, axes = _fig([1], size=(10, 4.6))
+    ax = axes[0]
+    for low, high, colour, alpha in ((0, 25, DOWN, 0.16), (25, 45, DOWN, 0.07), (55, 75, UP, 0.07),
+                                     (75, 100, UP, 0.16)):
+        ax.axhspan(low, high, color=colour, alpha=alpha, linewidth=0)
+    for y, name in ((12.5, "Extreme fear"), (35, "Fear"), (50, "Neutral"), (65, "Greed"), (87.5, "Extreme greed")):
+        ax.text(0.005, y, name, transform=ax.get_yaxis_transform(), color=MUTED, fontsize=7.5, va="center")
+    for points, colour, name in ((stocks, SERIES[0], "US stocks (CNN)"), (crypto, SERIES[1], "Crypto (alternative.me)")):
+        if len(points) < 2:
+            continue
+        t = np.array([p[0] for p in points], dtype=float).astype("int64").astype("datetime64[s]")
+        y = np.array([p[1] for p in points])
+        ax.plot(t, y, color=colour, linewidth=1.6, label=name)
+        ax.annotate(f"{y[-1]:.0f}", (t[-1], y[-1]), xytext=(5, 0), textcoords="offset points", color=colour,
+                    fontsize=9, fontweight="bold", va="center")
+    ax.set_ylim(0, 100)
+    ax.set_yticks([0, 25, 45, 55, 75, 100])
+    ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b '%y"))
+    if ax.get_legend_handles_labels()[0]:
+        leg = ax.legend(loc="upper left", bbox_to_anchor=(0.09, 1.0), fontsize=8, frameon=False, ncol=2)
+        for text in leg.get_texts():
+            text.set_color(INK_2)
+    _title(fig, title, subtitle)
+    return _png(fig)

@@ -18,7 +18,9 @@ from . import forecast, indicators as ind, setups as st, stats
 from .cache import HistoryCache
 from .data import MarketData
 from .directory import Directory
+from .feargreed import CNNFearGreed, Gauge, crypto_gauge, estimate_gauge
 from .features import FEATURES, build
+from .http import Http
 from .model import Backtest, MarketModel, Skill, backtest, train
 from .sources import LongRun, Sources, fear_greed_label
 from .storage import write_json
@@ -135,6 +137,8 @@ class Macro:
     crypto_fng_prev_week: float | None
     fng_history: dict | None  # what BTC did after similar readings
     crypto_global: object | None
+    stock_fg: Gauge | None = None  # CNN's Fear & Greed, or the mood above when CNN isn't answering
+    crypto_fg: Gauge | None = None
 
 
 class Engine:
@@ -152,6 +156,8 @@ class Engine:
         self.training_error: str | None = None
         self._resolved: dict[str, Resolved] = {}
         self._suggested: dict[str, tuple[float, list]] = {}
+        http = getattr(self.data, "http", None)
+        self.cnn = CNNFearGreed(http) if isinstance(http, Http) else None
         self._load_models()
 
     async def close(self) -> None:
@@ -371,6 +377,7 @@ class Engine:
     async def macro(self) -> Macro:
         syms = ["^GSPC", "^VIX", "^TNX", "^IRX", "DX-Y.NYB", "GC=F", "CL=F", "HG=F", "BTC-USD", "ETH-USD", "^MOVE"]
         quotes_task = asyncio.ensure_future(self.data.quotes(syms))
+        cnn_task = asyncio.ensure_future(self.cnn.get()) if self.cnn else None
         hist = await asyncio.gather(*(self.cache.daily(s) for s in ("^GSPC", "^VIX", "HYG", "IEF", "BTC-USD")),
                                     return_exceptions=True)
         fng = cg = None
@@ -387,7 +394,17 @@ class Engine:
         except YahooError:
             quotes = {}
         h = {s: b for s, b in zip(("^GSPC", "^VIX", "HYG", "IEF", "BTC-USD"), hist) if isinstance(b, Bars)}
-        return await self.run(build_macro, quotes, h, fng, cg)
+        m = await self.run(build_macro, quotes, h, fng, cg)
+        cnn = None
+        if cnn_task is not None:
+            try:
+                cnn = await cnn_task
+            except Exception:
+                log.warning("CNN Fear & Greed unavailable", exc_info=True)
+        m.stock_fg = cnn or estimate_gauge(m.mood, m.mood_parts, time.time())
+        if fng is not None:
+            m.crypto_fg = crypto_gauge(*fng)
+        return m
 
     async def long_run(self) -> LongRun | None:
         try:

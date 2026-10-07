@@ -516,6 +516,26 @@ def register_commands(bot) -> None:
             cape = stats.cape_view(lr, m.quotes["^GSPC"].price, now.year + (now.timetuple().tm_yday - 1) / 365.25)
         await interaction.followup.send(embed=E.macro_embed(m, cape))
 
+    @tree.command(name="feargreed", description="Fear & Greed for US stocks (CNN) and crypto: now, a week, month and year ago")
+    async def feargreed(interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True)
+        m = await bot.engine.macro()
+        bot.macro_cache = m
+        embed = E.fear_greed_embed(m.stock_fg, m.crypto_fg, m.fng_history)
+        stocks = m.stock_fg.history if m.stock_fg else []
+        crypto = m.crypto_fg.history if m.crypto_fg else []
+        if len(stocks) > 1 or len(crypto) > 1:
+            try:
+                png = await bot.engine.run(charts.fear_greed_chart, stocks, crypto, "Fear & Greed · the past year",
+                                           "0 extreme fear · 100 extreme greed · shaded: the fear and greed zones")
+            except Exception:
+                log.warning("Fear & Greed chart failed", exc_info=True)
+            else:
+                embed.set_image(url="attachment://feargreed.png")
+                await interaction.followup.send(embed=embed, file=_png_file("feargreed.png", png))
+                return
+        await interaction.followup.send(embed=embed)
+
     @tree.command(name="trends", description="Biggest gainers and losers: today, this week or month, 3 months, YTD, a year")
     @app_commands.describe(period="Over what time", market="Stocks, sectors & ETFs, or crypto")
     @app_commands.choices(period=[app_commands.Choice(name=n, value=v) for v, n in (
@@ -761,10 +781,13 @@ def register_commands(bot) -> None:
         if bot.engine.training_error:
             models.append(f"⚠️ {bot.engine.training_error}")
         e.add_field(name="Models", value="\n".join(models) or "Not trained yet", inline=False)
-        ai = bot.ai.status
-        e.add_field(name="News reader", value=(f"Claude ({ai.model}) · {ai.calls_today} calls today"
-                                               + (f" · ⚠️ {ai.last_error}" if ai.last_error else ""))
-                    if ai.enabled else "Keyword model (set ANTHROPIC_API_KEY to add Claude)", inline=False)
+        readers = [f"{r.name}{' (free plan)' if r.free else ''} · {r.model} · {r.calls_today} call{'' if r.calls_today == 1 else 's'} today"
+                   + (f" · ⏸️ {r.resting}" if r.resting else "")
+                   + (f" · ⚠️ {r.last_error}" if r.last_error else "") for r in bot.ai.statuses()]
+        readers += [f"⚠️ {p}" for p in bot.ai.problems]
+        e.add_field(name="News reader", value="\n".join(readers) or (
+            "Keyword model. For an AI read of the news, set GROQ_API_KEY or GEMINI_API_KEY (free plans) or "
+            "ANTHROPIC_API_KEY (Claude)"), inline=False)
         if bot.news.failures:
             e.add_field(name="Feeds failing", value="\n".join(clip(u, 80) for u in list(bot.news.failures)[:6]),
                         inline=False)
@@ -794,7 +817,7 @@ def register_commands(bot) -> None:
                                            "🟩 NVIDIA channels · `/channel` sets up an existing one · `/settings` · "
                                            "`/watchlist`", inline=False)
         e.add_field(name="Look things up", value="`/price` · `/chart` · `/forecast` · `/research` · `/breakouts` · "
-                                                 "`/trends` · `/nvidia` · `/news` · `/history` · `/macro` · `/movers` · "
+                                                 "`/trends` · `/feargreed` · `/nvidia` · `/news` · `/history` · `/macro` · `/movers` · "
                                                  "`/compare` · `/backtest`", inline=False)
         e.add_field(name="Any symbol", value="Every US stock and ETF and the top 1,000 coins, by ticker or name "
                                              "(`nvidia`, `brk.b`, `hyperliquid`)", inline=False)

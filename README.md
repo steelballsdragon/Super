@@ -4,12 +4,13 @@ A Discord bot for live **stock and crypto** updates, alerts, a breakout radar, f
 estimates **which markets each headline should move, which way, and by roughly how much**.
 
 It uses free public data, so you don't need any API keys: Yahoo Finance (prices, fundamentals, options, news),
-Robert Shiller's S&P 500 data back to 1871, CoinGecko, the Crypto Fear & Greed index, and RSS feeds from
+Robert Shiller's S&P 500 data back to 1871, CoinGecko, CNN's Fear & Greed index for stocks and the Crypto Fear & Greed index, and RSS feeds from
 MarketWatch, WSJ, Nasdaq, Investing.com, Seeking Alpha, the Federal Reserve, the SEC, CoinDesk, Cointelegraph,
 The Block, Decrypt and Google News. When Yahoo doesn't answer, Nasdaq (US stocks and ETFs), Coinbase and CoinGecko
 (crypto) stand in. It knows **every US-listed stock and ETF and the top 1,000 coins** by ticker and name.
 
-Two keys are optional: with an Anthropic key, Claude also reads the headlines; with a
+Keys are optional: with a free Groq or Gemini key, or an Anthropic key for Claude, an AI also reads the
+headlines; with a
 [Massive](https://massive.com) (formerly Polygon.io) key, the NVIDIA channel adds Massive's data, using it for
 NVIDIA only and never more than 5 calls a minute (the free plan's limit).
 
@@ -19,11 +20,11 @@ Run **`/setup`** once and the bot creates a **📊 Markets** category with six c
 
 | Channel | What it gets |
 |---|---|
-| **📈-stocks** | A **live board** (pinned, edited every minute): S&P 500, Nasdaq, Dow, Russell 2000, VIX, futures outside market hours, the 10-year yield, dollar, gold, oil, and the watchlist with pre-market and after-hours moves. **Alerts** for big moves (indices ±1/2/3%…, stocks ±3/5/7.5/10%…), VIX spikes, new 52-week highs and lows, and fresh **breakout setups** during market hours. A **pre-market brief** at 9:00 ET and a **closing recap** at 4:10 ET on trading days (NYSE holidays are skipped). |
+| **📈-stocks** | A **live board** (pinned, edited every minute): S&P 500, Nasdaq, Dow, Russell 2000, VIX, futures outside market hours, the 10-year yield, dollar, gold, oil, CNN's Fear & Greed, and the watchlist with pre-market and after-hours moves. **Alerts** for big moves (indices ±1/2/3%…, stocks ±3/5/7.5/10%…), VIX spikes, new 52-week highs and lows, and fresh **breakout setups** during market hours. A **pre-market brief** at 9:00 ET and a **closing recap** at 4:10 ET on trading days (NYSE holidays are skipped). |
 | **🪙-crypto** | A **live board**, 24/7: total market cap, BTC dominance, Fear & Greed, and the watchlist with 1-hour, 24-hour and 7-day changes. Alerts for big daily moves (±5/10/15%… since midnight UTC), **fast moves** (BTC ±2%, ETH ±3%, others ±4% within an hour) and breakout setups. A **daily crypto brief** (8:00 by default; `/settings brief_hour: timezone:`). |
 | **📰-market-news** | Market-moving headlines, each with its **expected impact**: e.g. *🔴 ▼ S&P 500 −0.5–1.4% · 🟢 ▲ 10-yr yield +4–12 bp · 🔴 ▼ Gold −0.3–1.1%*. A morning headline digest at 7:30 ET. The biggest stories (importance 80+) are also posted in the stocks or crypto channel. |
 | **🔬-research** | A **research digest** after every US close (the strongest setups across both watchlists and the sector ETFs, with deep dives and charts on the top two) and a **week-ahead outlook** every Sunday at 6 PM ET (macro dashboard, valuation, seasonality, presidential cycle, outlooks for the S&P 500, Nasdaq, Bitcoin and Ether). |
-| **🔥-trends** | A **live trends board** (pinned, every 5 minutes while the market is open): today's top gainers, losers and most traded US stocks worth $2B+, S&P 500 and Nasdaq-100 breadth, the sectors, the week's leaders and the top crypto movers. A **daily recap** at 4:20 ET, a **weekly recap** on the week's last trading day, a **monthly recap** on the month's last trading day (with year-to-date leaders), and a **crypto recap** just after midnight UTC. Week, month, quarter, year-to-date and 1-year moves cover the S&P 500, the Nasdaq-100, the sectors and 30 major ETFs; crypto covers the top 250 coins (no stablecoins or wrapped coins). |
+| **🔥-trends** | A **live trends board** (pinned, every 5 minutes while the market is open): today's top gainers, losers and most traded US stocks worth $2B+, S&P 500 and Nasdaq-100 breadth, the sectors, the week's leaders, the top crypto movers and both Fear & Greed readings. A post whenever CNN's or the crypto Fear & Greed index moves into another zone (extreme fear, fear, neutral, greed, extreme greed; two points past the edge, so a reading wobbling on an edge doesn't post again and again). A **daily recap** at 4:20 ET, a **weekly recap** on the week's last trading day, a **monthly recap** on the month's last trading day (with year-to-date leaders), and a **crypto recap** just after midnight UTC. Week, month, quarter, year-to-date and 1-year moves cover the S&P 500, the Nasdaq-100, the sectors and 30 major ETFs; crypto covers the top 250 coins (no stablecoins or wrapped coins). |
 | **🟩-nvidia** | Everything on **NVIDIA**: a live board (price from Yahoo, plus Massive's last-session bar and VWAP, 50/200-day averages, 20-day EMA, RSI, MACD, 52-week range, market cap, dividends and news sentiment), alerts at ±2/3/4/5/7.5/10%, Massive's NVIDIA news with its sentiment as it comes, a **pre-market brief** at 9:05 ET with the forecast and chart, and a **closing recap** at 4:15 ET. |
 
 Already have channels? Run `/channel kind:` in each instead. `/settings` turns alerts or briefs off, sets how
@@ -41,8 +42,9 @@ time zone. `/watchlist` changes a stocks or crypto channel's list (up to 30; nam
 | `/breakouts market:` | Scans 60–80 symbols (watchlist, mega caps, sector ETFs and today's most active stocks; or the top 40 coins) for fresh breakouts, coils, flags and squeezes, ranked by breakout pressure, with a chart of the top one |
 | `/news [symbol] [market]` | The last day's most important stories with impact estimates, or one symbol's news |
 | `/history symbol:` | The long view: growth since the first price, decades, the biggest crashes and recoveries, best and worst years, the average month, the US presidential cycle. The S&P 500 goes back to **1871** (Shiller's monthly data joined to daily data from 1927) |
-| `/macro` | VIX (and its percentile since 1990), yields and the yield curve, the dollar, gold, oil, copper, crypto Fear & Greed with what Bitcoin did after similar readings, a stock-market fear & greed gauge, and the S&P 500's **Shiller CAPE** with the 10-year return history implies at today's valuation |
+| `/macro` | VIX (and its percentile since 1990), yields and the yield curve, the dollar, gold, oil, copper, CNN's Fear & Greed with its seven gauges, crypto Fear & Greed with what Bitcoin did after similar readings, and the S&P 500's **Shiller CAPE** with the 10-year return history implies at today's valuation |
 | `/movers market:` | Today's biggest US gainers and losers, or the top-100 coins' |
+| `/feargreed` | **Fear & Greed** for US stocks (CNN) and crypto (alternative.me): now, the previous close, a week, a month and a year ago, CNN's seven gauges, what Bitcoin did after similar crypto readings, and a chart of the past year. If CNN doesn't answer, the bot's own estimate (momentum, price strength, VIX and junk-bond demand) stands in, labelled as such |
 | `/trends period: market:` | Biggest gainers and losers today, this week, this month, over 3 months, year to date or a year, for stocks, sectors & ETFs, or crypto |
 | `/nvidia` | NVIDIA's board (live price and Massive's data) with the forecast and chart |
 | `/compare first: second:` | Returns side by side, volatility, worst falls, correlation and beta, and a growth chart |
@@ -104,12 +106,24 @@ stablecoins, adoption, network upgrades…). Then:
 4. **Learning:** every call on a posted story is checked against what the market did over the next day. The
    hit rate shows in `/record`, and each event type's sizes are re-scaled toward what markets actually did.
 
-**Optional: Claude reads the news too.** Set `ANTHROPIC_API_KEY` and the important headlines (importance 40+)
-are sent to Claude in batches of 10; its read (event, one-line takeaway, which markets, direction, size,
-confidence) replaces the keyword model's for those stories. It uses `claude-opus-5-5` by default
-(`NEWS_AI_MODEL` changes it) and is capped at 150 calls a day (`NEWS_AI_DAILY_CALLS`); a busy news day is
-typically 50–100 calls, roughly a few dollars a day at Opus pricing. The news footer says which reader scored
-each story.
+**Optional: an AI reads the news too.** With a key for any of the services below, the important headlines
+(importance 40+) are sent to it in batches, most important first; its read (event, one-line takeaway, which
+markets, direction, size, confidence) replaces the keyword model's for those stories. The news footer says which
+reader scored each story.
+
+| Key | Service | Cost | Notes |
+|---|---|---|---|
+| `GROQ_API_KEY` | Groq (`openai/gpt-oss-120b`) | free plan | Sign up at console.groq.com (no card), API Keys → Create. The free plan allows 8,000 tokens a minute and 200,000 a day, so calls are paced to about two a minute (5 headlines each) |
+| `GEMINI_API_KEY` | Google Gemini (`gemini-3.5-flash-lite`) | free plan | Get a key at aistudio.google.com. Google may use free-plan requests to improve its products (the headlines are public) |
+| `ANTHROPIC_API_KEY` | Claude (`claude-opus-5-5`) | paid | The sharpest read; batches of 10 |
+
+Set more than one and they back each other up: each batch goes to the first one (Claude, then Groq, then Gemini)
+that's free to answer, and the others take over while it's rate limited, out of calls for the day or down.
+Calls to the free plans are paced to stay under their per-minute and per-day limits, and a "slow down" (HTTP 429)
+pauses that service for as long as it asks. Headlines no reader gets to within about 100 seconds keep the keyword
+model's read, so the news is never held up. `/status` shows each reader, its calls today and any problem.
+Every reader is capped at 150 calls a day (`NEWS_AI_DAILY_CALLS`); `NEWS_AI_MODEL`, `GROQ_MODEL` and
+`GEMINI_MODEL` change the models (if a free model is retired, the bot switches to the service's closest one).
 
 ## Setup
 
@@ -164,8 +178,8 @@ registers its own (it can take up to an hour to show everywhere). Give the bot's
 
 1. **New Project → Deploy from GitHub repo →** this repository. Railway detects Python, installs
    `requirements.txt` and runs `python main.py` by itself; no start command or config file is needed.
-2. In the service's **Variables** tab, add `MARKET_DISCORD_TOKEN` (and optionally `ANTHROPIC_API_KEY` and
-   `MASSIVE_API_KEY`), then apply the changes.
+2. In the service's **Variables** tab, add `MARKET_DISCORD_TOKEN` (and optionally `GROQ_API_KEY`, `ANTHROPIC_API_KEY`
+   and `MASSIVE_API_KEY`), then apply the changes.
 3. **Attach a volume** to the service (right-click it on the canvas, or ⌘K → *Add volume*) with mount path
    `/data`. The bot finds it on its own (Railway sets `RAILWAY_VOLUME_MOUNT_PATH`), and keeps its price history,
    channels, alerts and track record there across redeploys. With a volume, Railway also never runs two copies at
@@ -201,11 +215,15 @@ A service first set up for ScoreBot keeps working: its `DISCORD_TOKEN` is used, 
 | `MARKET_DISCORD_TOKEN` | (required) | Bot token (`DISCORD_TOKEN` also works) |
 | `MARKET_DATA_DIR` | the Railway volume if one is attached, else `market-data` | Where price history, models, channel settings (`channels.json`), state and the track record (`record.json`) are kept |
 | `LIVE_INTERVAL` | `60` | Seconds between live board and alert updates (minimum 30) |
+| `GROQ_API_KEY` | (none) | Turns on Groq's free plan as a news reader |
+| `GEMINI_API_KEY` | (none) | Turns on Google Gemini's free plan as a news reader |
 | `ANTHROPIC_API_KEY` | (none) | Turns on Claude as a second news reader |
 | `MASSIVE_API_KEY` | (none) | Massive (Polygon.io) key for the NVIDIA channel; at most 5 calls a minute, NVIDIA only (`POLYGON_API_KEY` also works). Massive's free and individual plans are licensed for personal use |
 | `YAHOO_PROXY` | (none) | Proxy URL for Yahoo Finance requests only, if Yahoo blocks the host's IP address |
 | `NEWS_AI_MODEL` | `claude-opus-5-5` | Claude model for the news reader |
-| `NEWS_AI_DAILY_CALLS` | `150` | Cap on news-reader calls per day |
+| `GROQ_MODEL` | `openai/gpt-oss-120b` | Groq model for the news reader |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Gemini model for the news reader |
+| `NEWS_AI_DAILY_CALLS` | `150` | Cap on calls per day, for each news reader |
 | `DEV_GUILD_ID` | (none) | Sync slash commands to one server instantly while developing |
 
 ## Built to run unattended

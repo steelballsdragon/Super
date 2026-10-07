@@ -86,6 +86,11 @@ async def premarket(bot, watchlist: list[str]) -> list[Post]:
           getattr(quotes.get(a.symbol), "change_pct", None), "") for a in MACRO]
         + [("Bitcoin", getattr(quotes.get("BTC-USD"), "price", None), getattr(quotes.get("BTC-USD"), "change_pct", None), "")], 10),
         inline=False)
+    fg = bot.macro_cache.stock_fg if bot.macro_cache else None
+    if fg is not None:
+        then = [f"{name} {v:.0f}" for name, v in (("prev close", fg.close), ("week ago", fg.week)) if v is not None]
+        e.add_field(name="Fear & Greed", value=E.fear_greed_text(fg) + f" ({fg.source}"
+                    + (f" · {' · '.join(then)})" if then else ")"), inline=False)
     movers = [(s, q) for s, q in ((s, quotes.get(s)) for s in watchlist) if q and q.ext_change_pct is not None]
     movers.sort(key=lambda x: -abs(x[1].ext_change_pct))
     if movers:
@@ -177,7 +182,7 @@ async def crypto_daily(bot, watchlist: list[str]) -> list[Post]:
         pass
     m = bot.macro_cache
     if m and m.crypto_fng is not None:
-        txt = f"**{m.crypto_fng:.0f} {E.fear_greed_label(m.crypto_fng)}**"
+        txt = f"**{m.crypto_fng:.0f} {E.fear_greed_label(m.crypto_fng, crypto=True)}**"
         if m.fng_history:
             txt += (f" · after similar readings BTC was higher 30 days later {m.fng_history['up']:.0%} of the time "
                     f"(median {E.pct(m.fng_history['median'], 1)})")

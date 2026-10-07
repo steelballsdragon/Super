@@ -87,7 +87,13 @@ def parse_shiller(text: str) -> LongRun:
                    col("Long Interest Rate"), col("Real Price"), col("Real Earnings"), col("PE10"))
 
 
-def fear_greed_label(value: float) -> str:
+def fear_greed_label(value: float, crypto: bool = False) -> str:
+    """CNN's zones for stocks; alternative.me's own (25 / 46 / 54 / 75, inclusive) for crypto."""
+    if crypto:
+        for edge, name in ((25, "Extreme Fear"), (46, "Fear"), (54, "Neutral"), (75, "Greed")):
+            if value <= edge:
+                return name
+        return "Extreme Greed"
     if value < 25:
         return "Extreme Fear"
     if value < 45:

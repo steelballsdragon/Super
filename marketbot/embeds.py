@@ -10,6 +10,7 @@ import numpy as np
 
 from . import stats
 from .engine import Macro, OptionsView, Outlook, ScanHit, mood_label
+from .feargreed import ZONES, Gauge
 from .features import FEATURE_LABELS
 from .limits import clip, fit_embed
 from .model import Backtest, MarketModel
@@ -94,13 +95,19 @@ def ansi_rows(rows: list[tuple[str, float | None, float | None, str]], width: in
 # ----- live boards -----
 
 def stocks_board(quotes: dict[str, Quote], indices, futures, macro, watchlist: list[str], mood: float | None,
-                 updated: float) -> discord.Embed:
+                 updated: float, fg: Gauge | None = None) -> discord.Embed:
     lead = quotes.get("^GSPC")
     state = state_label(lead)
     chg = lead.change_pct if lead else None
+    if fg is not None and fg.official:
+        mood_line = f"\nFear & Greed: **{fg.score:.0f} {fg.label}** {fg.emoji} ({fg.source}" + (
+            f" · prev close {fg.close:.0f})" if fg.close is not None else ")")
+    elif mood is not None:
+        mood_line = f"\nMarket mood: **{mood:.0f}/100 {mood_label(mood)}** (bot's estimate)"
+    else:
+        mood_line = ""
     e = discord.Embed(title="📈 US Stock Market · Live", color=GREEN if (chg or 0) >= 0 else RED,
-                      description=f"{state} · updated {ts(updated)}" + (
-                          f"\nMarket mood: **{mood:.0f}/100 {mood_label(mood)}**" if mood is not None else ""))
+                      description=f"{state} · updated {ts(updated)}" + mood_line)
     def rows_for(assets):
         return [(BOARD_LABELS.get(a.symbol, a.name)[:10], getattr(quotes.get(a.symbol), "price", None),
                  getattr(quotes.get(a.symbol), "change_pct", None), "") for a in assets]
@@ -134,7 +141,7 @@ def crypto_board(quotes: dict[str, Quote], watchlist: list[str], cg: CryptoGloba
                     f"BTC dominance **{cg.btc_dominance:.1f}%** · ETH {cg.eth_dominance:.1f}% · "
                     f"stablecoins {cg.stable_dominance:.1f}%")
     if fng is not None:
-        desc.append(f"Fear & Greed: **{fng:.0f} {fear_greed_label(fng)}**")
+        desc.append(f"Fear & Greed: **{fng:.0f} {fear_greed_label(fng, crypto=True)}**")
     e = discord.Embed(title="🪙 Crypto Market · Live", color=GREEN if (chg or 0) >= 0 else RED,
                       description="\n".join(desc))
     rows = []
@@ -498,11 +505,16 @@ def news_digest(items: list[Analysis], title: str) -> discord.Embed:
 def macro_embed(m: Macro, cape) -> discord.Embed:
     q = m.quotes
     e = discord.Embed(title="🌐 Macro dashboard", color=BLUE)
-    if m.mood is not None:
+    cnn = m.stock_fg if m.stock_fg is not None and m.stock_fg.official else None
+    if cnn is not None:
+        txt = f"**{cnn.score:.0f} · {cnn.label}** {cnn.emoji}" + (f" (week ago {cnn.week:.0f})" if cnn.week is not None else "")
+        txt += "".join(f"\n-# {name}: {v:.0f}" for name, _, v in cnn.parts)
+        e.add_field(name="Stock market Fear & Greed (CNN)", value=txt, inline=True)
+    elif m.mood is not None:
         parts = "\n".join(f"-# {k}: {v * 100:.0f}" for k, v in m.mood_parts.items())
         e.add_field(name="Stock market mood", value=f"**{m.mood:.0f}/100 · {mood_label(m.mood)}**\n{parts}", inline=True)
     if m.crypto_fng is not None:
-        txt = f"**{m.crypto_fng:.0f} · {fear_greed_label(m.crypto_fng)}**"
+        txt = f"**{m.crypto_fng:.0f} · {fear_greed_label(m.crypto_fng, crypto=True)}**"
         if m.crypto_fng_prev_week is not None:
             txt += f" (week ago {m.crypto_fng_prev_week:.0f})"
         if m.fng_history:
@@ -541,7 +553,82 @@ def macro_embed(m: Macro, cape) -> discord.Embed:
                           f"**{cape.expected_10y_real:+.1%}/yr** after inflation (range {cape.band[0]:+.1%} to {cape.band[1]:+.1%})"
                           + (f"\n-# Similar valuations: {', '.join(str(y) for y in cape.similar_years[:8])}" if cape.similar_years else ""),
                     inline=False)
-    e.set_footer(text="Mood: momentum, price strength, VIX and junk-bond demand vs the last 2 years (0 fear · 100 greed)")
+    e.set_footer(text="Fear & Greed: 0 extreme fear · 100 extreme greed · /feargreed for the history" if cnn is not None
+                 else "Mood: momentum, price strength, VIX and junk-bond demand vs the last 2 years (0 fear · 100 greed)")
+    return fit_embed(e)
+
+
+def fear_greed_text(fg: Gauge) -> str:
+    """A compact reading: '44 Fear 😟'."""
+    return f"**{fg.score:.0f} {fg.label}** {fg.emoji}"
+
+
+def fear_greed_line(stocks: Gauge | None, crypto: Gauge | None) -> str:
+    """One line for the boards: both readings."""
+    parts = []
+    if stocks is not None:
+        parts.append(f"stocks {fear_greed_text(stocks)}" + ("" if stocks.official else " (estimate)"))
+    if crypto is not None:
+        parts.append(f"crypto {fear_greed_text(crypto)}")
+    return ("Fear & Greed: " + " · ".join(parts)) if parts else ""
+
+
+def _meter(value: float, width: int = 10) -> str:
+    filled = int(round(max(0.0, min(100.0, value)) / 100 * width))
+    return "█" * filled + "░" * (width - filled)
+
+
+def _then(fg: Gauge, close_name: str) -> str:
+    rows = [(close_name, fg.close), ("1 week ago", fg.week), ("1 month ago", fg.month), ("1 year ago", fg.year)]
+    return " · ".join(f"{name} **{v:.0f}**" for name, v in rows if v is not None)
+
+
+def fear_greed_embed(stocks: Gauge | None, crypto: Gauge | None, fng_history: dict | None = None) -> discord.Embed:
+    lead = stocks or crypto
+    e = discord.Embed(title=f"{lead.emoji if lead else '😐'} Fear & Greed", color=_fg_color(lead))
+    if stocks is not None:
+        txt = f"`{_meter(stocks.score)}` {fear_greed_text(stocks)}"
+        if stocks.official:
+            then = _then(stocks, "Previous close")
+            txt += (f"\n{then}" if then else "") + f"\n-# Updated {ts(stocks.at)}"
+            lines = [f"`{_meter(v, 8)}` {v:>3.0f} · **{name}** ({what})" for name, what, v in stocks.parts]
+        else:
+            txt += "\n-# CNN isn't answering; this is the bot's estimate from the gauges below"
+            lines = [f"`{_meter(v, 8)}` {v:>3.0f} · {name}" for name, _, v in stocks.parts]
+        e.add_field(name=f"📈 US stocks · {stocks.source}", value=txt, inline=False)
+        if lines:
+            e.add_field(name="What's driving it", value="\n".join(lines), inline=False)
+    if crypto is not None:
+        txt = f"`{_meter(crypto.score)}` {fear_greed_text(crypto)}"
+        then = _then(crypto, "Yesterday")
+        txt += f"\n{then}" if then else ""
+        if fng_history:
+            fh = fng_history
+            txt += (f"\n-# After similar readings Bitcoin was higher 30 days later {fh['up']:.0%} of {fh['n']} days, "
+                    f"median {pct(fh['median'], 1)} (all days: {fh['all_up']:.0%})")
+        e.add_field(name="🪙 Crypto · alternative.me", value=txt, inline=False)
+    if not e.fields:
+        e.description = "Neither index is answering right now; try again in a few minutes."
+    e.set_footer(text="0 extreme fear · 25 fear · 45–55 neutral · 75 greed · 100 extreme greed · a mood gauge, "
+                      "not a timing signal")
+    return fit_embed(e)
+
+
+def _fg_color(fg: Gauge | None) -> int:
+    if fg is None:
+        return GREY
+    return {0: RED, 1: RED, 2: GREY, 3: GREEN, 4: GREEN}[fg.zone]
+
+
+def fear_greed_alert(fg: Gauge, before: int) -> discord.Embed:
+    """An index has moved into another zone."""
+    up = fg.zone > before
+    e = discord.Embed(title=f"{fg.emoji} {fg.market} Fear & Greed is now {fg.label}",
+                      color=_fg_color(fg),
+                      description=f"`{_meter(fg.score)}` **{fg.score:.0f}** {'▲' if up else '▼'} from {ZONES[before]}"
+                                  + (f"\n{_then(fg, 'Previous close' if fg.market == 'Stocks' else 'Yesterday')}"
+                                     if fg.close is not None or fg.week is not None else ""))
+    e.set_footer(text=f"{fg.source} · 0 extreme fear · 100 extreme greed · /feargreed for the history")
     return fit_embed(e)
 
 
@@ -699,13 +786,16 @@ def _sector_rows(snap, period: str) -> str:
     return ansi_rows(rows, 12)
 
 
-def trends_board(snap, sp500: list[str], ndx: list[str], market_state: str = "") -> discord.Embed:
+def trends_board(snap, sp500: list[str], ndx: list[str], market_state: str = "",
+                 fear_greed: str = "") -> discord.Embed:
     """The live trends board: today's movers across the US market, sectors, the week's leaders and crypto."""
     up, down = snap.breadth(sp500)
     nup, ndown = snap.breadth(ndx)
     desc = [f"{market_state + ' · ' if market_state else ''}updated {ts(snap.at)}"]
     if up + down:
         desc.append(f"S&P 500 today: **{up}** up · **{down}** down · Nasdaq-100: **{nup}** up · **{ndown}** down")
+    if fear_greed:
+        desc.append(fear_greed)
     e = discord.Embed(title="🔥 Market Trends · Live", color=GREEN if up >= down else RED, description="\n".join(desc))
     when = "last session" if snap.day_source.startswith("Nasdaq") else "today"
     if snap.day_gainers:

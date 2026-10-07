@@ -24,6 +24,7 @@ from .ai import NewsAI
 from .briefs import Post
 from .channels import NEWS_LEVELS, ChannelStore
 from .engine import Engine, Macro, ScanHit
+from .feargreed import ZONES, moved_zone
 from .feeds import NewsFetcher
 from .hours import NEW_YORK, is_trading_day, market_open
 from .massive import Massive, Spotlight, find_key
@@ -182,6 +183,7 @@ class MarketBot(discord.Client):
         for task in self._jobs.values():
             task.cancel()
         await self.news.close()
+        await self.ai.close()
         await self.engine.close()
         await super().close()
 
@@ -310,7 +312,8 @@ class MarketBot(discord.Client):
     async def _refresh_board(self, cid: int, cfg) -> None:
         if cfg.kind == STOCKS:
             embed = E.stocks_board(self.quotes, INDICES, FUTURES, MACRO, cfg.symbols(),
-                                   self.macro_cache.mood if self.macro_cache else None, self.quotes_at)
+                                   self.macro_cache.mood if self.macro_cache else None, self.quotes_at,
+                                   self.macro_cache.stock_fg if self.macro_cache else None)
         elif cfg.kind == CRYPTO:
             embed = E.crypto_board(self.quotes, cfg.symbols(), self.crypto_global, self.fng, self.coins,
                                    self.quotes_at)
@@ -479,6 +482,27 @@ class MarketBot(discord.Client):
     async def job_mood(self) -> None:
         if self.channels.all():
             self.macro_cache = await self.engine.macro()
+            await self.fear_greed_alerts()
+
+    async def fear_greed_alerts(self) -> None:
+        """Posts in the trends channels when CNN's or the crypto Fear & Greed index moves into another zone (by
+        a couple of points, so a reading wobbling on an edge doesn't post again and again)."""
+        m = self.macro_cache
+        for fg in (m.stock_fg, m.crypto_fg) if m else ():
+            if fg is None or not fg.official:
+                continue  # the bot's own estimate doesn't post alerts
+            key = fg.market.lower()
+            before = self.state.get("fear_greed_zone", key)
+            if not isinstance(before, int) or isinstance(before, bool) or not 0 <= before < len(ZONES):
+                self.state.set("fear_greed_zone", key, fg.zone)  # first reading: nothing to compare yet
+                continue
+            moved = moved_zone(before, fg.score, fg.market)
+            if moved is None:
+                continue
+            self.state.set("fear_greed_zone", key, moved)
+            for cid, cfg in self.channels.of_kind("trends"):
+                if cfg.alerts:
+                    await self.send(cid, Post([E.fear_greed_alert(fg, before)]))
 
     async def job_volatility(self) -> None:
         """Each news-impact market's volatility vs normal, to scale impact estimates."""
@@ -509,8 +533,10 @@ class MarketBot(discord.Client):
         snap = await self.trends.refresh(max_age=min(every - 5, 120))
         self._trends_board_at = time.time()
         lead = self.quotes.get("^GSPC")
+        m = self.macro_cache
         embed = E.trends_board(snap, self.trends.index_members("sp500"), self.trends.index_members("ndx100"),
-                               E.state_label(lead) if lead else "")
+                               E.state_label(lead) if lead else "",
+                               E.fear_greed_line(m.stock_fg, m.crypto_fg) if m else "")
         for cid, _ in channels:
             await self.show_board(cid, embed)
 
