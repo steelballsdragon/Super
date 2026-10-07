@@ -429,3 +429,44 @@ def test_the_yahoo_cookie_visit_uses_the_yahoo_proxy():
     assert asyncio.run(YahooClient(http).crumb()) == "abc123"
     assert seen == [("https://fc.yahoo.com", "http://proxy:8080"),
                     ("https://query1.finance.yahoo.com/v1/test/getcrumb", "http://proxy:8080")]
+
+
+def test_help_lists_every_command_as_a_tappable_mention(tmp_path):
+    from marketbot.commands import HELP_GUIDE, register_commands
+    from tests.live_rehearsal import Interaction
+    bot = make_bot(tmp_path)
+    register_commands(bot)
+    names = {c.name for c in bot.tree.get_commands()}
+    listed = [n for _, rows in HELP_GUIDE for n, _ in rows]
+    assert set(listed) == names - {"update"} and len(listed) == len(set(listed))
+
+    async def fetch_commands():
+        return [SimpleNamespace(name=n, id=1000 + i) for i, n in enumerate(sorted(names))]
+
+    bot.tree.fetch_commands = fetch_commands
+    help_cmd = next(c for c in bot.tree.get_commands() if c.name == "help")
+    for post in (False, True):
+        it = Interaction(1)
+        asyncio.run(help_cmd.callback(it, post=post))
+        _, kw = it.out[0]
+        e = kw["embed"]
+        assert kw["ephemeral"] is (not post) and len(e) <= 6000
+        text = "\n".join(f.value for f in e.fields)
+        assert f"</feargreed:{1000 + sorted(names).index('feargreed')}>" in text and "`/" not in text
+        assert all(len(f.value) <= 1024 for f in e.fields)
+
+
+def test_help_falls_back_to_plain_names_when_discord_has_no_ids(tmp_path):
+    from marketbot.commands import mention, register_commands
+    from tests.live_rehearsal import Interaction
+    bot = make_bot(tmp_path)
+    register_commands(bot)
+
+    async def broken():
+        raise RuntimeError("no")
+
+    bot.tree.fetch_commands = broken
+    it = Interaction(1)
+    asyncio.run(next(c for c in bot.tree.get_commands() if c.name == "help").callback(it))
+    assert "`/price`" in "\n".join(f.value for f in it.out[0][1]["embed"].fields)
+    assert mention({"price": 7}, "price") == "</price:7>" and mention({}, "price") == "`/price`"
