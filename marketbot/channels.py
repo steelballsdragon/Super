@@ -8,10 +8,10 @@ from pathlib import Path
 from .storage import read_json, write_json
 from .universe import CRYPTO, DEFAULT_CRYPTO, DEFAULT_STOCKS, STOCKS
 
-KINDS = ("stocks", "crypto", "news", "research", "trends", "nvidia", "congress", "calendar")
+KINDS = ("stocks", "crypto", "news", "research", "trends", "nvidia", "congress", "calendar", "league")
 KIND_NAMES = {"stocks": "📈 Stocks", "crypto": "🪙 Crypto", "news": "📰 News", "research": "🔬 Research",
               "trends": "🔥 Trends", "nvidia": "🟩 NVIDIA", "congress": "🏛️ Smart money",
-              "calendar": "📅 Calendar"}
+              "calendar": "📅 Calendar", "league": "🏆 League"}
 NEWS_LEVELS = {"major": 75, "important": 55, "all": 35}
 MAX_WATCHLIST = 30
 

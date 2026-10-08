@@ -1,0 +1,42 @@
+{
+ "fees": {
+  "fastestFee": 3,
+  "halfHourFee": 1,
+  "hourFee": 1,
+  "economyFee": 1,
+  "minimumFee": 1
+ },
+ "hashrate": {
+  "hashrates": [
+   {
+    "timestamp": 1791158400,
+    "avgHashrate": 946469596056900200000
+   },
+   {
+    "timestamp": 1791244800,
+    "avgHashrate": 1.177190509506562e+21
+   },
+   {
+    "timestamp": 1791331200,
+    "avgHashrate": 1.024561211479552e+21
+   }
+  ],
+  "difficulty": [],
+  "currentHashrate": 986181669702271200000,
+  "currentDifficulty": 132716002350731.3
+ },
+ "adjust": {
+  "progressPercent": 34.62301587301587,
+  "difficultyChange": 5.659350625793569,
+  "estimatedRetargetDate": 1792158246968,
+  "remainingBlocks": 1318,
+  "remainingTime": 749514968,
+  "previousRetarget": -0.03093703234718248,
+  "previousTime": 1791011796,
+  "nextRetargetHeight": 971712,
+  "timeAvg": 568676,
+  "adjustedTimeAvg": 568676,
+  "timeOffset": 0,
+  "expectedBlocks": 661.56
+ }
+}

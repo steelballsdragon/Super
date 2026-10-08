@@ -39,7 +39,8 @@ SETUP_CHANNELS = (("stocks", "📈-stocks", "Live US market board, big-move aler
                   ("trends", "🔥-trends", "Top gainers, losers and most traded: today, this week, this month, sectors and crypto."),
                   ("nvidia", "🟩-nvidia", "NVIDIA all day: live price, Massive data, technicals, news with sentiment, briefs."),
                   ("congress", "🏛️-smart-money", "Congress members' trades, insider buying and big funds' moves."),
-                  ("calendar", "📅-calendar", "Economic releases and earnings: what usually happens before, what happened after."))
+                  ("calendar", "📅-calendar", "Economic releases and earnings: what usually happens before, what happened after."),
+                  ("league", "🏆-league", "Paper trading and predictions: graded calls and the weekly leaderboard."))
 INTROS = {
     "stocks": "This channel gets a **live stock board** (pinned, updated every minute), alerts for big moves, new "
               "52-week highs and breakout setups on the watchlist, a **pre-market brief** at 9:00 ET and a "
@@ -68,6 +69,10 @@ INTROS = {
                 "those days; big earnings with the options market's expected move and the last 4 reactions), "
                 "**results** as releases come out (actual vs forecast), and **earnings reactions** after the open "
                 "and the close. `/calendar` and `/earnings` any time.",
+    "league": "This channel is the **league**: everyone gets **$100,000 of pretend money** to trade stocks, ETFs and "
+              "coins at live prices (`/paper buy`, `/paper sell`, `/paper portfolio`), and can **predict** a stock or "
+              "coin up or down over a day, a week or a month (`/call`). Calls are graded here when time's up, and "
+              "the **standings** are posted after each week's last close. `/league` shows them any time.",
 }
 
 
@@ -128,7 +133,8 @@ async def command_ids(bot) -> dict[str, int]:
 
 def mention(ids: dict[str, int], name: str) -> str:
     """A command as Discord shows it (blue and tappable) when its ID is known, else as /name."""
-    return f"</{name}:{ids[name]}>" if name in ids else f"`/{name}`"
+    top = name.split(" ")[0]  # a subcommand ("paper buy") is mentioned with its group's ID
+    return f"</{name}:{ids[top]}>" if top in ids else f"`/{name}`"
 
 
 def register_commands(bot) -> None:
