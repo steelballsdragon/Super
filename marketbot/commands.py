@@ -162,6 +162,8 @@ def register_commands(bot) -> None:
             choices.append(app_commands.Choice(name=label[:100], value=value[:100]))
         return choices[:25]
 
+    bot.resolve_symbol = resolve  # for the add-ons' commands
+    bot.symbol_suggestions = symbol_suggestions
     def channel_market(interaction: discord.Interaction) -> str | None:
         cfg = bot.channels.get(interaction.channel_id)
         return cfg.market if cfg else None
@@ -797,6 +799,9 @@ def register_commands(bot) -> None:
         src = [f"Connection: {data.http.transport}"]
         for name, h in sorted(data.health.items()):
             src.append(f"**{name}** {h.line()}")
+        cg = getattr(bot.engine, "sources", None)
+        if cg is not None and hasattr(cg, "coingecko_line"):
+            src.append(f"**CoinGecko** {cg.coingecko_line()}")
         d = bot.engine.directory
         src.append(f"Symbol list: {d.count(STOCKS):,} US stocks & ETFs, {d.count(CRYPTO):,} coins"
                    + (f" · updated {E.ts(d.updated)}" if d.updated else ""))

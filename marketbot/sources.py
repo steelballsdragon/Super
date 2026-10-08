@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -105,9 +106,25 @@ def fear_greed_label(value: float, crypto: bool = False) -> str:
     return "Extreme Greed"
 
 
+CG_HEADER = "x-cg-demo-api-key"
+CG_DAILY = 320  # the Demo key allows 10,000 calls a month: about 320 a day keeps well inside it
+CG_PLAN_ERRORS = (10005, 10012)  # "not in your plan" and "too far back": the key itself is fine
+
+
 class Sources:
-    def __init__(self, session: aiohttp.ClientSession | None = None):
+    def __init__(self, session: aiohttp.ClientSession | None = None, cg_key: str | None = None,
+                 state_file=None):
+        from .apis import env_key
+        from .massive import RateLimiter
         self._session = session
+        self.cg_key = env_key("COINGECKO_API_KEY", "COINGECKO_DEMO_API_KEY", "CG_API_KEY") if cg_key is None \
+            else cg_key
+        self.cg_key_rejected = False
+        self.cg_budget = RateLimiter(CG_DAILY, 86400.0)
+        self._state_file = state_file
+        if state_file:
+            from .storage import read_json
+            self.cg_budget.restore(read_json(state_file, {}).get("CoinGecko key", {}).get("86400", []))
         self._cache: dict[str, tuple[float, object]] = {}
         self._failed: dict[str, tuple[float, BaseException]] = {}  # a recent failure, to fail fast for a minute
         self._locks: dict[str, asyncio.Lock] = {}
@@ -146,11 +163,47 @@ class Sources:
             self._cache[key] = (time.monotonic(), value)
             return value
 
+    def coingecko_line(self) -> str:
+        if not self.cg_key:
+            return "no key (keyless, shared limit)"
+        if self.cg_key_rejected:
+            return "⚠️ key rejected; using keyless calls"
+        return f"key: {self.cg_budget.used()}/{CG_DAILY} calls in 24h (keyless after that)"
+
+    def _cg_headers(self, url: str) -> dict:
+        """The Demo key's header while the key works and today's share of the month's calls lasts."""
+        if not url.startswith(COINGECKO) or not self.cg_key or self.cg_key_rejected:
+            return {}
+        if self.cg_budget.try_slot() is None:
+            return {}
+        if self._state_file:
+            try:
+                from .storage import read_json, write_json
+                data = read_json(self._state_file, {})
+                data["CoinGecko key"] = {"86400": self.cg_budget.recent()}
+                write_json(self._state_file, data)
+            except OSError:
+                log.warning("Couldn't save the CoinGecko key's call count", exc_info=True)
+        return {CG_HEADER: self.cg_key}
+
     async def _get(self, url: str, params: dict | None = None, as_text: bool = False):
         session = await self.session()
         for attempt in range(3):
+            headers = self._cg_headers(url)
             try:
-                async with session.get(url, params=params) as resp:
+                async with session.get(url, params=params, headers=headers or None) as resp:
+                    if headers and resp.status in (401, 403):
+                        body = await resp.text()
+                        code = None
+                        try:
+                            status = (json.loads(body) or {}).get("status") or {}
+                            code = status.get("error_code") if isinstance(status, dict) else None
+                        except (ValueError, AttributeError):
+                            pass
+                        if code not in CG_PLAN_ERRORS:
+                            self.cg_key_rejected = True
+                            log.warning("CoinGecko refused the key (HTTP %s); carrying on without it", resp.status)
+                            break  # the same request again, keyless (below)
                     if resp.status == 429 or resp.status >= 500:
                         raise aiohttp.ClientResponseError(resp.request_info, (), status=resp.status)
                     resp.raise_for_status()
@@ -159,6 +212,7 @@ class Sources:
                 if attempt == 2:
                     raise
                 await asyncio.sleep(2 * 2 ** attempt)
+        return await self._get(url, params, as_text)  # only reached when the key was just refused
 
     async def crypto_global(self) -> CryptoGlobal:
         async def fetch():
@@ -168,7 +222,7 @@ class Sources:
             return CryptoGlobal(d["total_market_cap"]["usd"], d["total_volume"]["usd"],
                                 d.get("market_cap_change_percentage_24h_usd") or 0.0, pct.get("btc", 0.0),
                                 pct.get("eth", 0.0), stables)
-        return await self._cached("global", 300, fetch)
+        return await self._cached("global", 870, fetch)
 
     async def top_coins(self, count: int = 250) -> list[Coin]:
         """The biggest coins by market cap (one call for up to 250), with their 1-hour to 1-year changes."""
@@ -186,7 +240,7 @@ class Sources:
                          c.get("total_volume") or 0.0, c.get("price_change_percentage_30d_in_currency"),
                          c.get("price_change_percentage_1y_in_currency"), now)
                     for c in data if c.get("current_price")]
-        return (await self._cached("coins", 300, fetch))[:count]
+        return (await self._cached("coins", 570, fetch))[:count]
 
     async def fear_greed(self) -> tuple[np.ndarray, np.ndarray]:
         """(day timestamps, values 0-100), oldest first, back to February 2018."""

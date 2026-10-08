@@ -144,7 +144,7 @@ class Macro:
 class Engine:
     def __init__(self, data_dir: str | Path, data: MarketData | None = None, sources: Sources | None = None):
         self.data_dir = Path(data_dir)
-        self.sources = sources or Sources()
+        self.sources = sources or Sources(state_file=self.data_dir / "apis.json")
         self.data = data or MarketData(directory=Directory.load(self.data_dir),
                                        coins=lambda: self.sources.top_coins(250))
         self.directory = self.data.directory

@@ -2,4 +2,6 @@
 
 from __future__ import annotations
 
-FEATURES: list[type] = []
+from .why import WhyDesk
+
+FEATURES: list[type] = [WhyDesk]
