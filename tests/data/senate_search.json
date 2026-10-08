@@ -1,0 +1,44 @@
+{
+ "draw": 1,
+ "recordsTotal": 128,
+ "recordsFiltered": 128,
+ "data": [
+  [
+   "Sheldon",
+   "Whitehouse",
+   "Whitehouse, Sheldon (Senator)",
+   "<a href=\"/search/view/ptr/6bf3b6f7-9e1b-499a-bd5a-990292ce2e72/\" target=\"_blank\">Periodic Transaction Report for 10/01/2026</a>",
+   "10/01/2026"
+  ],
+  [
+   "James Conley",
+   "Justice, II",
+   "Justice II,  James Conley (Senator)",
+   "<a href=\"/search/view/ptr/0a93a20c-2a0f-4979-80ca-cc2f61297527/\" target=\"_blank\">Periodic Transaction Report for 09/28/2026</a>",
+   "09/28/2026"
+  ],
+  [
+   "Richard",
+   "Blumenthal",
+   "Blumenthal, Richard (Senator)",
+   "<a href=\"/search/view/ptr/9e2ff733-aeac-4ce8-872c-3d6b7913da88/\" target=\"_blank\">Periodic Transaction Report for 09/28/2026</a>",
+   "09/28/2026"
+  ],
+  [
+   "RICHARD ",
+   "BLUMENTHAL",
+   "Senator",
+   "<a href=\"/search/view/paper/929216d5-5dbd-429c-858c-1e9332924627/\" target=\"_blank\">Periodic Transaction Report for 08/31/2026</a>",
+   "08/31/2026"
+  ],
+  [
+   "John",
+   "Boozman",
+   "Boozman, John (Senator)",
+   "<a href=\"/search/view/ptr/51455bcd-4966-4e77-b481-09897ada81ae/\" target=\"_blank\">Periodic Transaction Report for 12/08/2025 (Amendment 1)</a>",
+   "08/24/2026"
+  ]
+ ],
+ "result": "ok",
+ "_note": "POST https://efdsearch.senate.gov/search/report/data/ (report_types=[11], filer_types=[1], submitted_start_date=01/01/2026 00:00:00, order[0][column]=4 desc, start=0, length=100). recordsTotal=128 on 2026-10-07. Trimmed to 5 rows."
+}

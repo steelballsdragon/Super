@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- trimmed from https://disclosures-clerk.house.gov/public_disc/financial-pdfs/2026FD.zip (2026FD.xml, fetched 2026-10-07, Last-Modified Wed, 07 Oct 2026 13:00:42 GMT); full file has 1746 <Member> rows -->
+<FinancialDisclosure>
+  <Member>
+    <Prefix />
+    <Last>Aaron</Last>
+    <First>Richard</First>
+    <Suffix />
+    <FilingType>W</FilingType>
+    <StateDst>MI04</StateDst>
+    <Year>2026</Year>
+    <FilingDate>4/15/2026</FilingDate>
+    <DocID>8068</DocID>
+  </Member>
+  <Member>
+    <Prefix />
+    <Last>Abdulle</Last>
+    <First>Abdisallam</First>
+    <Suffix />
+    <FilingType>C</FilingType>
+    <StateDst>MN02</StateDst>
+    <Year>2026</Year>
+    <FilingDate>6/11/2026</FilingDate>
+    <DocID>10078673</DocID>
+  </Member>
+  <Member>
+    <Prefix>Hon.</Prefix>
+    <Last>Doggett</Last>
+    <First>Lloyd</First>
+    <Suffix />
+    <FilingType>P</FilingType>
+    <StateDst>TX37</StateDst>
+    <Year>2026</Year>
+    <FilingDate>10/5/2026</FilingDate>
+    <DocID>20035580</DocID>
+  </Member>
+  <Member>
+    <Prefix>Hon.</Prefix>
+    <Last>Pelosi</Last>
+    <First>Nancy</First>
+    <Suffix />
+    <FilingType>P</FilingType>
+    <StateDst>CA11</StateDst>
+    <Year>2026</Year>
+    <FilingDate>10/2/2026</FilingDate>
+    <DocID>20035553</DocID>
+  </Member>
+  <Member>
+    <Prefix />
+    <Last>Wied</Last>
+    <First>Tony</First>
+    <Suffix />
+    <FilingType>P</FilingType>
+    <StateDst>WI08</StateDst>
+    <Year>2026</Year>
+    <FilingDate>10/2/2026</FilingDate>
+    <DocID>9116361</DocID>
+  </Member>
+</FinancialDisclosure>

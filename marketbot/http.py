@@ -16,7 +16,7 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlencode
 
 log = logging.getLogger(__name__)
@@ -48,6 +48,8 @@ class Response:
     status: int
     text: str
     url: str = ""
+    content: bytes = field(default=b"", compare=False)  # the raw body (for binary files such as ZIPs and PDFs)
+    headers: dict | None = field(default=None, compare=False)  # lower-cased names
 
     def json(self):
         if not self.text.strip():
@@ -120,7 +122,10 @@ class _Curl:
             self._session = AsyncSession(impersonate="chrome", timeout=timeout, verify=ca_bundle(), max_clients=16)
         extra = {"proxy": proxy} if proxy else {}
         r = await self._session.get(url, headers=headers, timeout=timeout, allow_redirects=True, **extra)
-        return Response(r.status_code, r.text or "", str(r.url))
+        content = getattr(r, "content", None) or b""
+        binary = content[:4] in (b"PK\x03\x04", b"%PDF")
+        return Response(r.status_code, "" if binary else (r.text or ""), str(r.url), content,
+                        {k.lower(): v for k, v in (getattr(r, "headers", None) or {}).items()})
 
     async def close(self) -> None:
         if self._session is not None:
@@ -140,7 +145,14 @@ class _Aiohttp:
             self._session = aiohttp.ClientSession(headers={"User-Agent": BROWSER_UA}, cookie_jar=aiohttp.CookieJar())
         async with self._session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout),
                                      proxy=proxy) as resp:
-            return Response(resp.status, await resp.text(errors="replace"), str(resp.url))
+            if hasattr(resp, "read"):
+                content = await resp.read()
+                binary = content[:4] in (b"PK\x03\x04", b"%PDF")
+                text = "" if binary else content.decode(getattr(resp, "charset", None) or "utf-8", errors="replace")
+            else:
+                content, text = b"", await resp.text(errors="replace")
+            headers = getattr(resp, "headers", None) or {}
+            return Response(resp.status, text, str(resp.url), content, {k.lower(): v for k, v in headers.items()})
 
     async def close(self) -> None:
         if self._session is not None and not self._session.closed:

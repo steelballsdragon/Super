@@ -37,7 +37,8 @@ SETUP_CHANNELS = (("stocks", "📈-stocks", "Live US market board, big-move aler
                   ("news", "📰-market-news", "Market-moving headlines with the expected impact on each market."),
                   ("research", "🔬-research", "Daily research digest, weekly outlook, and room for /research deep dives."),
                   ("trends", "🔥-trends", "Top gainers, losers and most traded: today, this week, this month, sectors and crypto."),
-                  ("nvidia", "🟩-nvidia", "NVIDIA all day: live price, Massive data, technicals, news with sentiment, briefs."))
+                  ("nvidia", "🟩-nvidia", "NVIDIA all day: live price, Massive data, technicals, news with sentiment, briefs."),
+                  ("congress", "🏛️-congress-trades", "What members of Congress disclose buying and selling, and who picks best."))
 INTROS = {
     "stocks": "This channel gets a **live stock board** (pinned, updated every minute), alerts for big moves, new "
               "52-week highs and breakout setups on the watchlist, a **pre-market brief** at 9:00 ET and a "
@@ -56,6 +57,10 @@ INTROS = {
               "data, technicals, company facts and news sentiment), alerts at ±2%, 3%, 4%, 5%…, Massive's NVIDIA "
               "news as it comes, a **pre-market brief** at 9:05 ET and a **closing recap** at 4:15 ET. Massive is "
               "used for NVIDIA only, at most 5 calls a minute.",
+    "congress": "This channel follows **what members of Congress buy and sell**, from the official House and Senate "
+                "disclosures: a pinned board with the latest filings, the best stock pickers (estimated) and the most "
+                "bought and sold stocks, plus a post for **every new filing**. Trades are disclosed up to 45 days "
+                "late. `/congress member:` shows anyone's record; `/congress ticker:` who traded a stock.",
 }
 
 
