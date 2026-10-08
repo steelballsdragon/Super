@@ -38,7 +38,7 @@ SETUP_CHANNELS = (("stocks", "📈-stocks", "Live US market board, big-move aler
                   ("research", "🔬-research", "Daily research digest, weekly outlook, and room for /research deep dives."),
                   ("trends", "🔥-trends", "Top gainers, losers and most traded: today, this week, this month, sectors and crypto."),
                   ("nvidia", "🟩-nvidia", "NVIDIA all day: live price, Massive data, technicals, news with sentiment, briefs."),
-                  ("congress", "🏛️-congress-trades", "What members of Congress disclose buying and selling, and who picks best."),
+                  ("congress", "🏛️-smart-money", "Congress members' trades, insider buying and big funds' moves."),
                   ("calendar", "📅-calendar", "Economic releases and earnings: what usually happens before, what happened after."))
 INTROS = {
     "stocks": "This channel gets a **live stock board** (pinned, updated every minute), alerts for big moves, new "
@@ -58,10 +58,11 @@ INTROS = {
               "data, technicals, company facts and news sentiment), alerts at ±2%, 3%, 4%, 5%…, Massive's NVIDIA "
               "news as it comes, a **pre-market brief** at 9:05 ET and a **closing recap** at 4:15 ET. Massive is "
               "used for NVIDIA only, at most 5 calls a minute.",
-    "congress": "This channel follows **what members of Congress buy and sell**, from the official House and Senate "
-                "disclosures: a pinned board with the latest filings, the best stock pickers (estimated) and the most "
-                "bought and sold stocks, plus a post for **every new filing**. Trades are disclosed up to 45 days "
-                "late. `/congress member:` shows anyone's record; `/congress ticker:` who traded a stock.",
+    "congress": "This channel follows the **smart money**: what **members of Congress** buy and sell (official House "
+                "and Senate disclosures, a pinned board with the latest filings, the best stock pickers and the most "
+                "bought stocks, and a post for every new filing), **insiders buying** their own company's stock "
+                "(SEC Form 4, $100K+), and **big funds' quarterly moves** (13F: Buffett, Burry, Ackman, Dalio…). "
+                "`/congress`, `/insiders` and `/fund` any time. Disclosures come days to weeks after the trades.",
     "calendar": "This channel gets the **market calendar**: a **week-ahead preview** on Sunday evening, each trading "
                 "day's **agenda** at 7:45 ET (economic releases with forecasts and what the S&P 500 usually did on "
                 "those days; big earnings with the options market's expected move and the last 4 reactions), "

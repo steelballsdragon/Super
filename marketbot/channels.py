@@ -10,7 +10,7 @@ from .universe import CRYPTO, DEFAULT_CRYPTO, DEFAULT_STOCKS, STOCKS
 
 KINDS = ("stocks", "crypto", "news", "research", "trends", "nvidia", "congress", "calendar")
 KIND_NAMES = {"stocks": "📈 Stocks", "crypto": "🪙 Crypto", "news": "📰 News", "research": "🔬 Research",
-              "trends": "🔥 Trends", "nvidia": "🟩 NVIDIA", "congress": "🏛️ Congress trades",
+              "trends": "🔥 Trends", "nvidia": "🟩 NVIDIA", "congress": "🏛️ Smart money",
               "calendar": "📅 Calendar"}
 NEWS_LEVELS = {"major": 75, "important": 55, "all": 35}
 MAX_WATCHLIST = 30

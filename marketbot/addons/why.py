@@ -17,6 +17,7 @@ import math
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 
 import discord
 import numpy as np
@@ -24,6 +25,7 @@ from discord import app_commands
 
 from .. import embeds as E, stats
 from ..apis.finnhub import Finnhub
+from ..hours import NEW_YORK, is_trading_day
 from ..limits import clip, fit_embed
 from ..universe import CRYPTO, SECTORS, short, title_of
 from . import Feature
@@ -44,6 +46,21 @@ FINNHUB_ETF = {"Semiconductors": "SMH", "Technology": "XLK", "Banking": "XLF", "
                "Aerospace & Defense": "XLI", "Machinery": "XLI", "Airlines": "XLI", "Logistics & Transportation": "XLI",
                "Beverages": "XLP", "Food Products": "XLP", "Tobacco": "XLP"}
 MARKET = "^GSPC"
+# Tickers that are everyday words: matched only as a $cashtag (or through the news reader's own ticker tags).
+WORD_TICKERS = {"A", "ALL", "ARE", "BE", "CAN", "CAR", "CAT", "DO", "EAT", "FAST", "FOR", "FUN", "GEN", "GO", "HAS",
+                "HE", "HUM", "IT", "KEY", "LOW", "MAN", "NEAR", "NEW", "NOW", "ON", "ONE", "OPEN", "OUT", "PLAY",
+                "REAL", "RUN", "SEE", "SHOP", "SO", "TECH", "TRUMP", "TWO", "UP", "WELL", "WOLF", "YOU", "AI", "AN",
+                "AT", "BIG", "BOX", "DIS", "EARN", "EVER", "FLY", "GOOD", "HOME", "LIFE", "LOVE", "MAIN", "MOVE",
+                "NICE", "PEAK", "POST", "RACE", "ROCK", "SAFE", "SAVE", "STAR", "SUN", "TEAM", "TRUE", "VERY", "WEST"}
+# Name words too common to stand for one company: such names must match as a phrase.
+GENERIC = {"the", "bank", "news", "american", "america", "general", "united", "international", "first", "dollar",
+           "public", "texas", "target", "national", "global", "energy", "financial", "advanced", "strategy", "new",
+           "digital", "capital", "health", "realty", "trust", "royal", "southern", "northern", "western", "eastern",
+           "pacific", "atlantic", "central", "federal", "world", "us", "u.s.", "graph", "home", "data", "group",
+           "trade", "block", "snap", "gap", "shell", "delta", "square", "match", "near", "official", "sun", "smart",
+           "live", "open", "general", "super", "best", "dollar", "pure", "core", "summit", "liberty", "unity"}
+NAME_NOISE = re.compile(r"\b(inc|incorporated|corp|corporation|company|co|ltd|limited|plc|holdings?|group|n\.?v|s\.?a|"
+                        r"ag|se|lp|llc|class [a-c]|common stock|ordinary shares|adr|the)\b\.?|[(),]", re.I)
 MIN_DAYS = 60  # fewer common days than this: no betas (the market part assumes a beta of 1)
 NEWS_HOURS = 36
 SYSTEM = """You explain in two or three plain sentences why a stock, ETF, index or coin moved, for a Discord \
@@ -94,6 +111,31 @@ class Why:
     summary: str = ""
     driver: str = ""
     by: str = ""  # which AI wrote the summary ("" for the template)
+
+
+def name_pattern(name: str) -> re.Pattern | None:
+    """How a company's name shows up in a headline: its first word when that's distinctive ("Nvidia",
+    "Microsoft"), else the first words as a phrase ("Bank of America", "Advanced Micro Devices"); None for a
+    name that is one everyday word ("Target"), which only its ticker can stand for."""
+    words = [w.strip(".'’") for w in NAME_NOISE.sub(" ", name or "").split()]
+    words = [w for w in words if w]
+    if not words:
+        return None
+    if len(words[0]) >= 4 and words[0].lower() not in GENERIC:
+        return re.compile(rf"\b{re.escape(words[0])}\b", re.I)
+    if len(words) < 2:
+        return None
+    phrase = words[:3] if words[1].lower() in ("of", "&", "and", "for") else words[:2]
+    return re.compile(r"\b" + r"\s+".join(re.escape(w) for w in phrase) + r"\b", re.I)
+
+
+def ticker_hit(title: str, tick: str) -> bool:
+    """The ticker in a headline: as a $cashtag, or written in capitals unless it's an everyday word."""
+    if re.search(rf"\${re.escape(tick)}\b", title):
+        return True
+    if tick in WORD_TICKERS or len(tick) < 2:
+        return False
+    return re.search(rf"(?<![A-Za-z$]){re.escape(tick)}\b", title) is not None
 
 
 def _returns(bars) -> tuple[np.ndarray, np.ndarray]:
@@ -157,33 +199,50 @@ def template_summary(w: Why) -> tuple[str, str]:
         return text, "market"
     p = w.parts
     own = p.get("own", w.move)
-    market = p.get("market", 0.0)
-    sector = p.get("sector", 0.0)
+    market = p.get("market", 0.0) + 0.0
+    sector = p.get("sector", 0.0) + 0.0
     bench = "Bitcoin" if w.benchmark == "BTC-USD" else "the S&P 500"
     bits = []
     if "market" in p and w.benchmark_move is not None:
-        bits.append(f"{bench} ({w.benchmark_move:+.1f}%) accounts for about {market:+.1f} points")
+        bits.append(f"{bench} ({w.benchmark_move:+.1f}%) accounts for about {round(market, 1) + 0.0:+.1f} points")
     if "sector" in p and abs(sector) >= 0.1:
-        bits.append(f"its sector ({SECTORS.get(w.sector, w.sector)}, {w.sector_move:+.1f}%) about {sector:+.1f} more")
+        bits.append(f"its sector ({SECTORS.get(w.sector, w.sector)}, {w.sector_move:+.1f}%) about "
+                    f"{round(sector, 1) + 0.0:+.1f} more")
     text = f"{name} is {way} {abs(w.move):.1f}% {w.session}."
     if bits:
         joined = "; ".join(bits)
         text += " " + joined[:1].upper() + joined[1:] + "."
-    if abs(own) < max(0.5, abs(w.move) * 0.35) and bits:
-        driver = "sector" if abs(sector) > abs(market) else "market"
+    explained = market + sector
+    due = next((e for e in w.events if e.startswith("Earnings due")), None)
+    small = abs(own) < max(0.5, abs(w.move) * 0.35)
+    if bits and small and explained * w.move > 0 and abs(explained) >= abs(own):
+        driver = "sector" if abs(sector) > abs(market) and sector * w.move > 0 else "market"
         text += " So it's mostly moving with the " + ("sector." if driver == "sector" else "market.")
-        return text, driver
+        return text + (f" {due}." if due else ""), driver
+    if abs(w.move) < 0.5 or (bits and small):
+        return text + " A small move that the market doesn't explain." + (f" {due}." if due else ""), "unclear"
     if bits:
-        text += f" The remaining {own:+.1f} points are its own."
-    earnings = next((e for e in w.events if e.startswith("Earnings")), None)
+        text += f" The remaining {own + 0.0:+.1f} points are its own."
+    earnings = next((e for e in w.events if e.startswith("Earnings reported")), None)
     if earnings:
-        text += f" {earnings}."
-        return text, "earnings"
+        return text + f" {earnings}.", "earnings"
     if w.headlines:
         text += f" The likely reason in the news: \"{clip(w.headlines[0].title, 120)}\" ({w.headlines[0].source})."
-        return text, "company news"
+        return text + (f" {due}." if due else ""), "company news"
     text += " No headline in the news explains it yet."
-    return text, "unclear"
+    return text + (f" {due}." if due else ""), "unclear"
+
+
+def session_window(quote_time: float, now: float, session: str) -> tuple[float, float]:
+    """The span whose news and earnings explain the session: from the previous trading day's close (4 PM ET)
+    to now when it's today's session, or to that session's close when it's the last one."""
+    day = datetime.fromtimestamp(quote_time or now, NEW_YORK).date()
+    prev = day - timedelta(days=1)
+    while not is_trading_day(prev):
+        prev -= timedelta(days=1)
+    start = datetime(prev.year, prev.month, prev.day, 16, 0, tzinfo=NEW_YORK).timestamp() - 3600
+    end = now if session == "today" else datetime(day.year, day.month, day.day, 16, 0, tzinfo=NEW_YORK).timestamp()
+    return start, end
 
 
 def why_embed(w: Why) -> discord.Embed:
@@ -297,29 +356,34 @@ class WhyDesk(Feature):
             w.events.append("At a 52-week high")
         elif q.low52 and q.price <= q.low52 * 1.005:
             w.events.append("At a 52-week low")
-        w.headlines = await self.headlines(symbol, name, market, is_index)
+        session_end = None if crypto or session == "today" else session_window(q.time or time.time(), time.time(),
+                                                                                session)[1]
+        w.headlines = await self.headlines(symbol, name, market, is_index, session_end)
         if not crypto and not is_index:
-            w.events = await self.company_events(symbol, q) + w.events
+            w.events = await self.company_events(symbol, q, session) + w.events
         await self.summarise(w)
         return w
 
     async def sector_of(self, symbol: str) -> str:
         hit = self._sector.get(symbol)
-        if hit and time.monotonic() - hit[0] < 7 * 86400:
+        if hit and time.monotonic() < hit[0]:
             return hit[1]
-        etf = ""
+        etf, answered = "", False
         try:
             prof = (await asyncio.wait_for(self.bot.engine.data.summary(symbol, ("assetProfile",)), 8)
                     ).get("assetProfile") or {}
+            answered = True
             etf = INDUSTRY_ETF.get(prof.get("industry") or "") or SECTOR_ETF.get(prof.get("sector") or "", "")
         except Exception:
             log.debug("No Yahoo profile for %s", symbol, exc_info=True)
         if not etf and self.finnhub and self.finnhub.enabled:
             try:
                 etf = FINNHUB_ETF.get((await self.finnhub.profile(symbol)).get("finnhubIndustry") or "", "")
+                answered = True
             except Exception:
                 log.debug("No Finnhub profile for %s", symbol, exc_info=True)
-        self._sector[symbol] = (time.monotonic(), etf)
+        # An answer is kept a week; a failed lookup only a quarter of an hour.
+        self._sector[symbol] = (time.monotonic() + (7 * 86400 if etf or answered else 900), etf)
         return etf
 
     async def betas(self, symbol: str, bench: str, sector: str | None) -> tuple[float | None, float | None]:
@@ -335,27 +399,30 @@ class WhyDesk(Feature):
             log.warning("Betas for %s failed", symbol, exc_info=True)
             return None, None
 
-    async def headlines(self, symbol: str, name: str, market: str, is_index: bool) -> list[Headline]:
+    async def headlines(self, symbol: str, name: str, market: str, is_index: bool,
+                        session_end: float | None = None) -> list[Headline]:
         now = time.time()
+        since = min(now, session_end or now) - NEWS_HOURS * 3600  # the session being explained, not just today
         tick = short(symbol).upper()
-        words = {tick} | ({(name or "").split()[0].lower()} if name else set())
+        named = name_pattern(name)
         out: list[Headline] = []
         for a in reversed(getattr(self.bot, "recent_news", [])):
             h = a.headline
-            if now - h.published > NEWS_HOURS * 3600:
+            if h.published < since:
                 continue
             if is_index:
                 hit = a.market in ("stocks", "macro") and a.importance >= 55
             else:
-                hit = symbol in a.tickers or tick in a.tickers or any(
-                    re.search(rf"\b{re.escape(wd)}\b", h.title, re.I) for wd in words if len(wd) >= 3)
+                hit = (symbol in a.tickers or tick in a.tickers or ticker_hit(h.title, tick)
+                       or (named is not None and named.search(h.title) is not None))
             if hit:
                 out.append(Headline(h.title, h.source, h.published, h.link))
         if self.finnhub and self.finnhub.enabled and market != CRYPTO and not is_index:
             try:
-                for n in await self.finnhub.company_news(tick, days=2):
+                days = max(2, int((now - since) // 86400) + 1)
+                for n in await self.finnhub.company_news(tick, days=days):
                     t = float(n.get("datetime") or 0)
-                    if now - t <= NEWS_HOURS * 3600:
+                    if t >= since:
                         out.append(Headline(str(n["headline"]), str(n.get("source") or "Finnhub"), t,
                                             str(n.get("url") or "")))
             except Exception as exc:
@@ -368,22 +435,21 @@ class WhyDesk(Feature):
                 unique.append(h)
         return unique[:6]
 
-    async def company_events(self, symbol: str, q) -> list[str]:
+    async def company_events(self, symbol: str, q, session: str = "today") -> list[str]:
         events = []
         now = time.time()
         t = q.extra.get("earningsTimestamp") or q.extra.get("earningsTimestampStart")
-        if isinstance(t, (int, float)) and -3 * 86400 <= t - now <= 2 * 86400:
-            when = "reported" if t <= now else "due"
-            text = f"Earnings {when} {E.ts(t)}"
-            if when == "reported" and self.finnhub and self.finnhub.enabled:
-                try:
-                    last = (await self.finnhub.earnings(short(symbol)))[:1]
-                    if last and last[0].get("surprisePercent") is not None:
-                        s = float(last[0]["surprisePercent"])
-                        text += f": EPS {'beat' if s >= 0 else 'missed'} estimates by {abs(s):.1f}%"
-                except Exception as exc:
-                    log.info("Finnhub earnings for %s unavailable: %s", symbol, exc)
-            events.append(text)
+        estimated = bool(q.extra.get("isEarningsDateEstimate"))
+        if isinstance(t, (int, float)) and t > 0:
+            start, end = session_window(q.time or now, now, session)
+            if start <= t <= end and t <= now and not estimated:
+                text = f"Earnings reported {E.ts(t)}"
+                surprise = await self.report_surprise(symbol, t)
+                if surprise is not None:
+                    text += f": EPS {'beat' if surprise >= 0 else 'missed'} estimates by {abs(surprise):.1f}%"
+                events.append(text)
+            elif now < t <= now + 2 * 86400:
+                events.append(f"Earnings due {E.ts(t)}")
         if self.finnhub and self.finnhub.enabled:
             try:
                 rec = await self.finnhub.recommendation(short(symbol))
@@ -399,6 +465,24 @@ class WhyDesk(Feature):
             except Exception as exc:
                 log.info("Finnhub ratings for %s unavailable: %s", symbol, exc)
         return events
+
+    async def report_surprise(self, symbol: str, t: float) -> float | None:
+        """The EPS surprise of the report at `t` (from the earnings calendar row of that date, once it has the
+        actual), or None: an older quarter's surprise is never passed off as this one's."""
+        if not (self.finnhub and self.finnhub.enabled):
+            return None
+        day = datetime.fromtimestamp(t, NEW_YORK).date()
+        try:
+            rows = await self.finnhub.earnings_calendar(day - timedelta(days=1), day + timedelta(days=1), short(symbol))
+        except Exception as exc:
+            log.info("Finnhub earnings for %s unavailable: %s", symbol, exc)
+            return None
+        for r in rows:
+            actual, est = r.get("epsActual"), r.get("epsEstimate")
+            if r.get("symbol") == short(symbol) and isinstance(actual, (int, float)) and isinstance(est, (int, float)) \
+                    and est and abs((date.fromisoformat(str(r.get("date"))) - day).days) <= 1:
+                return (actual - est) / abs(est) * 100
+        return None
 
     async def summarise(self, w: Why) -> None:
         w.summary, w.driver = template_summary(w)

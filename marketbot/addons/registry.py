@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .calendar import CalendarDesk
 from .congress import CongressDesk
+from .insiders import InsiderDesk
 from .why import WhyDesk
 
-FEATURES: list[type] = [WhyDesk, CongressDesk, CalendarDesk]
+FEATURES: list[type] = [WhyDesk, CongressDesk, InsiderDesk, CalendarDesk]

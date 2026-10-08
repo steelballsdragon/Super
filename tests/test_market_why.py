@@ -384,3 +384,118 @@ def test_no_coingecko_key_is_fine():
     src = S.Sources(FakeSession(FakeResp(200, "{}")), cg_key="")
     asyncio.run(src._get(f"{S.COINGECKO}/global"))
     assert "no key" in src.coingecko_line()
+
+
+# ----- review fixes: real mentions only, honest earnings, the right news window -----
+
+@pytest.mark.parametrize("name, title, hit", [
+    ("Bank of America Corporation", "Bank of Japan raises rates for the first time in a year", False),
+    ("Bank of America Corporation", "Bank of America beats on trading revenue", True),
+    ("Advanced Micro Devices, Inc.", "Advanced Energy lifts guidance", False),
+    ("Advanced Micro Devices, Inc.", "Advanced Micro Devices unveils new chips", True),
+    ("Target Corporation", "Goldman raises Nvidia price target to $250", False),
+    ("Strategy Inc Class A", "Investors rethink their strategy as yields climb", False),
+    ("The Graph", "Ether slips as the dollar firms", False),
+    ("NVIDIA Corporation", "Nvidia falls after US widens chip export curbs", True),
+    ("Apple Inc.", "Apple's iPhone sales top estimates", True),
+    ("The Trade Desk, Inc.", "Trade war fears hit stocks", False),
+    ("The Trade Desk, Inc.", "The Trade Desk slumps on weak guidance", True),
+    ("Meta Platforms, Inc.", "Meta to cut 5% of staff", True),
+    ("NEAR Protocol", "Bitcoin trades near $120,000", False),
+])
+def test_company_names_match_only_real_mentions(name, title, hit):
+    pat = W.name_pattern(name)
+    assert (pat is not None and pat.search(title) is not None) is hit
+
+
+@pytest.mark.parametrize("tick, title, hit", [
+    ("LOW", "Treasury yields fall to a three-month low", False), ("LOW", "Lowe's ($LOW) cuts forecast", True),
+    ("ALL", "Stocks hit an all-time high", False), ("NOW", "Traders now see two cuts", False),
+    ("NVDA", "NVDA slides as export curbs widen", True), ("NVDA", "nvda", False), ("TRUMP", "Trump says tariffs", False),
+    ("BAC", "BAC upgraded at Barclays", True),
+])
+def test_tickers_match_in_capitals_or_as_cashtags(tick, title, hit):
+    assert W.ticker_hit(title, tick) is hit
+
+
+def test_bank_of_america_is_not_blamed_on_the_bank_of_japan(tmp_path):
+    stock, market, _ = market_sector_stock()
+    quotes = {"BAC": quote("BAC", 40, -5.0), "^GSPC": quote("^GSPC", 6000, -0.2)}
+    news = [analyse(Headline("n1", "Bank of Japan raises rates for the first time in a year", "", "u", "Reuters",
+                             time.time() - 600, "macro", 1.0, ()))]
+    desk, _ = make_desk(tmp_path, quotes, {"BAC": stock, "^GSPC": market}, summary={}, news=news)
+    w = asyncio.run(desk.explain("BAC", "Bank of America Corporation", "stocks"))
+    assert not w.headlines and "Bank of Japan" not in w.summary and w.driver == "unclear"
+
+
+def test_upcoming_earnings_are_context_not_the_cause(tmp_path):
+    stock, market, _ = market_sector_stock()
+    q = quote("NVDA", 180, -8.0)
+    q.extra["earningsTimestamp"] = time.time() + 36 * 3600
+    news = [analyse(Headline("n1", "Nvidia falls after US widens chip export curbs", "", "u", "Reuters",
+                             time.time() - 1800, "stocks", 1.0, ("NVDA",)))]
+    desk, _ = make_desk(tmp_path, {"NVDA": q, "^GSPC": quote("^GSPC", 6000, -0.5)},
+                        {"NVDA": stock, "^GSPC": market}, summary={}, news=news)
+    w = asyncio.run(desk.explain("NVDA", "NVIDIA", "stocks"))
+    assert w.driver == "company news" and "export curbs" in w.summary and "Earnings due" in w.summary
+    assert w.summary.index("export curbs") < w.summary.index("Earnings due")
+
+
+def test_an_old_report_isnt_todays_reason(tmp_path):
+    stock, market, _ = market_sector_stock()
+    q = quote("NVDA", 180, -8.0)
+    q.extra["earningsTimestamp"] = time.time() - 6 * 86400
+    desk, _ = make_desk(tmp_path, {"NVDA": q, "^GSPC": quote("^GSPC", 6000, -0.5)},
+                        {"NVDA": stock, "^GSPC": market}, summary={})
+    w = asyncio.run(desk.explain("NVDA", "NVIDIA", "stocks"))
+    assert not any(e.startswith("Earnings") for e in w.events) and w.driver == "unclear"
+
+
+def test_the_surprise_comes_from_that_reports_row(tmp_path):
+    desk, _ = make_desk(tmp_path, {}, {})
+    t = time.time() - 3600
+    from datetime import datetime
+    day = datetime.fromtimestamp(t, W.NEW_YORK).date().isoformat()
+
+    class FH:
+        enabled = True
+
+        async def earnings_calendar(self, start, end, symbol=""):
+            return [{"symbol": "NVDA", "date": day, "epsActual": 2.2, "epsEstimate": 2.0}]
+
+    desk.finnhub = FH()
+    assert asyncio.run(desk.report_surprise("NVDA", t)) == pytest.approx(10.0)
+
+    class NotYet(FH):
+        async def earnings_calendar(self, start, end, symbol=""):
+            return [{"symbol": "NVDA", "date": day, "epsActual": None, "epsEstimate": 2.0}]
+
+    desk.finnhub = NotYet()
+    assert asyncio.run(desk.report_surprise("NVDA", t)) is None
+
+
+def test_weekend_view_keeps_fridays_headlines(tmp_path):
+    friday_close = time.time() - 40 * 3600
+    news = [analyse(Headline("n1", "Nvidia falls after US widens chip export curbs", "", "u", "Reuters",
+                             friday_close - 5 * 3600, "stocks", 1.0, ("NVDA",)))]
+    desk, _ = make_desk(tmp_path, {}, {}, news=news)
+    found = asyncio.run(desk.headlines("NVDA", "NVIDIA", "stocks", False, session_end=friday_close))
+    assert found and found[0].title.startswith("Nvidia falls")
+    assert not asyncio.run(desk.headlines("NVDA", "NVIDIA", "stocks", False))  # measured from now: too old
+
+
+def test_a_failed_profile_lookup_is_retried_soon(tmp_path):
+    desk, bot = make_desk(tmp_path, {}, {}, summary=RuntimeError("yahoo down"))
+    assert asyncio.run(desk.sector_of("NVDA")) == ""
+    expires = desk._sector["NVDA"][0]
+    assert expires - time.monotonic() < 1000  # a quarter of an hour, not a week
+    bot.engine.data._summary = {"assetProfile": {"sector": "Technology", "industry": "Semiconductors"}}
+    desk._sector["NVDA"] = (time.monotonic() - 1, "")
+    assert asyncio.run(desk.sector_of("NVDA")) == "SMH"
+
+
+def test_a_move_against_the_market_isnt_called_the_markets():
+    w = why(move=0.1, sector_move=None, sector="", parts=None)
+    w.parts = W.decompose(0.1, -0.3, None, 1.0, None)
+    text, driver = W.template_summary(w)
+    assert "mostly moving with the market" not in text and driver == "unclear" and "-0.0" not in text

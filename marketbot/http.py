@@ -127,6 +127,14 @@ class _Curl:
         return Response(r.status_code, "" if binary else (r.text or ""), str(r.url), content,
                         {k.lower(): v for k, v in (getattr(r, "headers", None) or {}).items()})
 
+    async def post(self, url: str, body, headers: dict, timeout: float) -> Response:
+        if self._session is None:
+            from curl_cffi.requests import AsyncSession
+            self._session = AsyncSession(impersonate="chrome", timeout=timeout, verify=ca_bundle(), max_clients=16)
+        r = await self._session.post(url, json=body, headers=headers, timeout=timeout)
+        return Response(r.status_code, r.text or "", str(r.url), getattr(r, "content", None) or b"",
+                        {k.lower(): v for k, v in (getattr(r, "headers", None) or {}).items()})
+
     async def close(self) -> None:
         if self._session is not None:
             session, self._session = self._session, None
@@ -153,6 +161,14 @@ class _Aiohttp:
                 content, text = b"", await resp.text(errors="replace")
             headers = getattr(resp, "headers", None) or {}
             return Response(resp.status, text, str(resp.url), content, {k.lower(): v for k, v in headers.items()})
+
+    async def post(self, url: str, body, headers: dict, timeout: float) -> Response:
+        import aiohttp
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(headers={"User-Agent": BROWSER_UA}, cookie_jar=aiohttp.CookieJar())
+        async with self._session.post(url, json=body, headers=headers,
+                                      timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+            return Response(resp.status, await resp.text(errors="replace"), str(resp.url))
 
     async def close(self) -> None:
         if self._session is not None and not self._session.closed:
@@ -240,6 +256,30 @@ class Http:
                 await self._sleep(1.5 * 2 ** attempt)
         self.record_failure(source, error)
         raise error
+
+    async def post_json(self, url: str, body, *, source: str = "web", headers: dict | None = None,
+                        timeout: float = TIMEOUT):
+        """POSTs JSON and returns the parsed answer; raises HttpError (no retries: POSTs aren't repeated)."""
+        h = self.source(source)
+        if h.resting():
+            raise HttpError(source, f"{source} is resting after {h.streak} failures ({h.last_error})", h.status)
+        poster = getattr(self.backend, "post", None)
+        if poster is None:
+            raise HttpError(source, "this connection can't POST")
+        try:
+            resp = await poster(url, body, {"Content-Type": "application/json", **(headers or {})}, timeout)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            error = HttpError(source, f"{type(exc).__name__}: {_quiet(str(exc))[:160]}")
+            self.record_failure(source, error)
+            raise error
+        if resp.status != 200:
+            error = HttpError(source, f"HTTP {resp.status}", resp.status)
+            self.record_failure(source, error)
+            raise error
+        self.record_ok(source, resp.status)
+        return resp.json()
 
     def record_ok(self, source: str, status: int | None = None) -> None:
         h = self.source(source)
