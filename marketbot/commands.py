@@ -72,7 +72,9 @@ INTROS = {
     "league": "This channel is the **league**: everyone gets **$100,000 of pretend money** to trade stocks, ETFs and "
               "coins at live prices (`/paper buy`, `/paper sell`, `/paper portfolio`), and can **predict** a stock or "
               "coin up or down over a day, a week or a month (`/call`). Calls are graded here when time's up, and "
-              "the **standings** are posted after each week's last close. `/league` shows them any time.",
+              "the **standings** are posted after each week's last close. `/league` shows them any time. An admin can also give "
+              "**🤖 MarketBot** pretend money (`/botplayer start`): it trades the breakout model by itself, posts its "
+              "trades here and shows up in the standings.",
 }
 
 

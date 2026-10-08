@@ -106,6 +106,7 @@ class ScanHit:
     hi20: float
     lo20: float
     pressure: float  # how strongly a breakout looks set up (for ranking)
+    atr: float | None = None  # 14-day average true range, in price units
 
 
 @dataclass
@@ -543,9 +544,10 @@ def scan_all(jobs: list[tuple[str, Bars, Quote | None]], models: dict[str, Marke
             lo20 = float(bars.low[-21:-1].min())
             pressure = max((p_up or 0) - base_up, (p_down or 0) - base_down, 0) * 2
             pressure += sum(1.0 if a.kind == "breakout" else 0.7 if a.kind == "pre-breakout" else 0.3 for a in active)
+            atr = float(ind.atr(bars.high, bars.low, bars.close, 14)[-1])
             hits.append(ScanHit(sym, display_name(sym, q.name if q else None), market, float(bars.close[-1]),
                                 q.change_pct if q else None, active, p_up, p_down, base_up, base_down, hi20, lo20,
-                                pressure))
+                                pressure, atr if np.isfinite(atr) else None))
         except Exception:
             log.warning("Scanning %s failed", sym, exc_info=True)
     hits.sort(key=lambda h: -h.pressure)

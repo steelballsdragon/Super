@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from datetime import datetime
@@ -109,10 +110,11 @@ def standings(players: dict, prices: dict[str, float], bench_now: float | None) 
     rows = []
     for uid, p in players.items():
         total = value(p, prices)
-        ret = total / START_CASH - 1
+        funded = p.get("funded", START_CASH)
+        ret = total / funded - 1
         bench = (bench_now / p["bench"] - 1) if bench_now and p.get("bench") else None
         rows.append({"uid": uid, "name": p["name"], "value": total, "ret": ret, "bench": bench,
-                     "positions": len(p["positions"])})
+                     "positions": len(p["positions"]), "bot": "auto" in p, "funded": funded})
     return sorted(rows, key=lambda r: -r["ret"])
 
 
@@ -142,8 +144,9 @@ def medal(i: int) -> str:
 def league_embed(rows: list[dict], calls: list[dict], title: str = "🏆 League standings") -> discord.Embed:
     e = discord.Embed(title=title, color=E.GOLD)
     if rows:
-        e.add_field(name="💼 Paper portfolios (started with $100K)", value=clip("\n".join(
-            f"{medal(i)} **{clip(r['name'], 24)}** {r['ret']:+.2%} ({money(r['value'])})"
+        e.add_field(name="💼 Paper portfolios (return since joining)", value=clip("\n".join(
+            f"{medal(i)} **{clip(r['name'], 24)}** {r['ret']:+.2%} ({money(r['value'])}"
+            + (f" from {money(r['funded'])})" if r.get("bot") else ")")
             + (f" · S&P {r['bench']:+.2%} since joining" if r["bench"] is not None else "")
             for i, r in enumerate(rows[:15])), 1024), inline=False)
     board = callers(calls)
@@ -159,7 +162,7 @@ def league_embed(rows: list[dict], calls: list[dict], title: str = "🏆 League 
 
 def portfolio_embed(player: dict, prices: dict[str, float], bench_now: float | None) -> discord.Embed:
     total = value(player, prices)
-    ret = total / START_CASH - 1
+    ret = total / player.get("funded", START_CASH) - 1
     e = discord.Embed(title=f"💼 {clip(player['name'], 40)}'s paper portfolio", color=E.GREEN if ret >= 0 else E.RED)
     lines = [f"Worth **{money(total)}** ({ret:+.2%}) · cash {money(player['cash'])}"]
     if bench_now and player.get("bench"):
@@ -207,6 +210,9 @@ class League(Feature):
         self.players: dict[str, dict] = data.get("players") or {}
         self.calls: list[dict] = data.get("calls") or []
         self.next_id = max((c["id"] for c in self.calls), default=0) + 1
+        self.bot_seasons: list[dict] = data.get("bot_seasons") or []
+        from .botplayer import Auto  # it builds on this module
+        self.auto = Auto(self)
 
     def jobs(self):
         return [("league", 300, self.job)]
@@ -216,16 +222,29 @@ class League(Feature):
                 ("paper sell", "sell some or all of a holding"),
                 ("paper portfolio", "your (or someone's) paper portfolio and return"),
                 ("call", "predict up or down over a day, week or month; graded automatically"),
-                ("league", "the leaderboard: best portfolios and best callers")]
+                ("league", "the leaderboard: best portfolios and best callers"),
+                ("paper bot", "MarketBot's own paper portfolio: what it holds, why, and its record"),
+                ("botplayer start", "admins: give MarketBot pretend money (even $10) to trade by itself"),
+                ("botplayer stop", "admins: end its season; the result stays on record")]
 
     def status(self):
         open_calls = sum(c.get("result") is None for c in self.calls)
-        return [f"**League** {len(self.players)} players · {open_calls} open calls"]
+        humans = sum("auto" not in p for p in self.players.values())
+        line = f"**League** {humans} players · {open_calls} open calls"
+        bot = self.auto.player()
+        if bot is not None:
+            last = bot["auto"].get("last")
+            line += f" · 🤖 MarketBot {len(bot['positions'])} holdings" + (
+                f", last decision <t:{int(last['at'])}:R>" if last else "")
+        return [line]
 
     def save(self) -> None:
         cutoff = time.time() - 365 * 86400
         self.calls = [c for c in self.calls if c.get("result") is None or c["at"] >= cutoff]
-        write_json(self.path, {"players": self.players, "calls": self.calls})
+        data = {"players": self.players, "calls": self.calls}
+        if self.bot_seasons:
+            data["bot_seasons"] = self.bot_seasons
+        write_json(self.path, data)
 
     async def prices(self, symbols) -> dict[str, float]:
         symbols = list(dict.fromkeys(symbols))
@@ -240,9 +259,9 @@ class League(Feature):
     def channels(self):
         return self.bot.channels.of_kind(KIND)
 
-    async def post(self, embed: discord.Embed) -> None:
+    async def post(self, embed: discord.Embed, skip: int | None = None) -> None:
         for cid, cfg in self.channels():
-            if cfg.alerts:
+            if cfg.alerts and cid != skip:
                 await self.bot.send(cid, Post([embed]))
 
     # ----- the job: fill orders at the open, grade calls, the weekly standings -----
@@ -253,6 +272,11 @@ class League(Feature):
         if changed:
             self.save()
         ny = datetime.now(NEW_YORK)
+        if self.auto.player() is not None:
+            try:
+                await asyncio.wait_for(self.auto.step(ny), 120)
+            except Exception:
+                log.exception("MarketBot's turn failed")
         d = ny.date()
         if is_trading_day(d) and next_trading_day(d).isocalendar()[1] != d.isocalendar()[1]:
             for cid, cfg in self.channels():
@@ -380,6 +404,7 @@ class League(Feature):
         if suggest is not None:
             buy.autocomplete("symbol")(suggest)
             sell.autocomplete("symbol")(suggest)
+        self.auto.register(tree, paper)
         tree.add_command(paper)
 
         @tree.command(name="call", description="Predict a stock or coin goes up or down; graded when time's up")
