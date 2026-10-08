@@ -17,6 +17,7 @@ from . import briefs, charts, embeds as E, stats
 from .briefs import Post, chart_post
 from .channels import KIND_NAMES, KINDS, MAX_WATCHLIST, ChannelConfig
 from .engine import Resolved, SourcesDown, UnknownSymbol
+from .apis import ApiError
 from .http import HttpError
 from .limits import MESSAGE, clip, fit_embed
 from .news import analyse
@@ -36,7 +37,9 @@ SETUP_CHANNELS = (("stocks", "📈-stocks", "Live US market board, big-move aler
                   ("news", "📰-market-news", "Market-moving headlines with the expected impact on each market."),
                   ("research", "🔬-research", "Daily research digest, weekly outlook, and room for /research deep dives."),
                   ("trends", "🔥-trends", "Top gainers, losers and most traded: today, this week, this month, sectors and crypto."),
-                  ("nvidia", "🟩-nvidia", "NVIDIA all day: live price, Massive data, technicals, news with sentiment, briefs."))
+                  ("nvidia", "🟩-nvidia", "NVIDIA all day: live price, Massive data, technicals, news with sentiment, briefs."),
+                  ("congress", "🏛️-smart-money", "Congress members' trades, insider buying and big funds' moves."),
+                  ("calendar", "📅-calendar", "Economic releases and earnings: what usually happens before, what happened after."))
 INTROS = {
     "stocks": "This channel gets a **live stock board** (pinned, updated every minute), alerts for big moves, new "
               "52-week highs and breakout setups on the watchlist, a **pre-market brief** at 9:00 ET and a "
@@ -55,6 +58,16 @@ INTROS = {
               "data, technicals, company facts and news sentiment), alerts at ±2%, 3%, 4%, 5%…, Massive's NVIDIA "
               "news as it comes, a **pre-market brief** at 9:05 ET and a **closing recap** at 4:15 ET. Massive is "
               "used for NVIDIA only, at most 5 calls a minute.",
+    "congress": "This channel follows the **smart money**: what **members of Congress** buy and sell (official House "
+                "and Senate disclosures, a pinned board with the latest filings, the best stock pickers and the most "
+                "bought stocks, and a post for every new filing), **insiders buying** their own company's stock "
+                "(SEC Form 4, $100K+), and **big funds' quarterly moves** (13F: Buffett, Burry, Ackman, Dalio…). "
+                "`/congress`, `/insiders` and `/fund` any time. Disclosures come days to weeks after the trades.",
+    "calendar": "This channel gets the **market calendar**: a **week-ahead preview** on Sunday evening, each trading "
+                "day's **agenda** at 7:45 ET (economic releases with forecasts and what the S&P 500 usually did on "
+                "those days; big earnings with the options market's expected move and the last 4 reactions), "
+                "**results** as releases come out (actual vs forecast), and **earnings reactions** after the open "
+                "and the close. `/calendar` and `/earnings` any time.",
 }
 
 
@@ -161,6 +174,8 @@ def register_commands(bot) -> None:
             choices.append(app_commands.Choice(name=label[:100], value=value[:100]))
         return choices[:25]
 
+    bot.resolve_symbol = resolve  # for the add-ons' commands
+    bot.symbol_suggestions = symbol_suggestions
     def channel_market(interaction: discord.Interaction) -> str | None:
         cfg = bot.channels.get(interaction.channel_id)
         return cfg.market if cfg else None
@@ -796,10 +811,21 @@ def register_commands(bot) -> None:
         src = [f"Connection: {data.http.transport}"]
         for name, h in sorted(data.health.items()):
             src.append(f"**{name}** {h.line()}")
+        cg = getattr(bot.engine, "sources", None)
+        if cg is not None and hasattr(cg, "coingecko_line"):
+            src.append(f"**CoinGecko** {cg.coingecko_line()}")
         d = bot.engine.directory
         src.append(f"Symbol list: {d.count(STOCKS):,} US stocks & ETFs, {d.count(CRYPTO):,} coins"
                    + (f" · updated {E.ts(d.updated)}" if d.updated else ""))
         e.add_field(name="Data sources", value=clip("\n".join(src), 1024), inline=False)
+        extra = []
+        for feature in getattr(bot, "features", []):
+            try:
+                extra += feature.status()
+            except Exception:
+                log.warning("Status of %s failed", feature.name, exc_info=True)
+        if extra:
+            e.add_field(name="Add-on data", value=clip("\n".join(extra), 1024), inline=False)
         spot = bot.spotlight
         if bot.massive:
             lines = [f"{spot.plan()} · {bot.massive_used()}/5 calls in the last minute · {bot.massive.limiter.total:,} "
@@ -858,9 +884,14 @@ def register_commands(bot) -> None:
             "Live stocks and crypto, alerts, breakout radar, forecasts built on a century of prices, and a news desk "
             "that estimates each story's market impact. Tap a command to use it. Any symbol works by ticker or "
             "name: `nvidia`, `brk.b`, `BTC`, `gold`, `s&p`."))
-        for title, rows in HELP_GUIDE:
-            e.add_field(name=title, value="\n".join(f"{mention(ids, name)} {what}" for name, what in rows),
-                        inline=False)
+        groups: dict[str, list[tuple[str, str]]] = {}
+        for feature in getattr(bot, "features", []):
+            if feature.help_group:
+                groups.setdefault(feature.help_group, []).extend(feature.help())
+        for title, rows in list(HELP_GUIDE) + [(t, tuple(r)) for t, r in groups.items()]:
+            if rows:
+                e.add_field(name=title, value=clip("\n".join(f"{mention(ids, name)} {what}" for name, what in rows),
+                                                   1024), inline=False)
         e.add_field(name="About the predictions", value=(
             "Breakout odds and price ranges are the strong suit: tested on years the model never saw, breakout calls "
             f"score an AUC around 0.8. Plain up/down direction is close to a coin flip for every method, so those "
@@ -872,7 +903,7 @@ def register_commands(bot) -> None:
     async def on_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
         name = interaction.command.qualified_name if interaction.command else "?"
         cause = getattr(error, "original", error)
-        if isinstance(cause, (YahooError, HttpError, SourcesDown)):
+        if isinstance(cause, (YahooError, HttpError, SourcesDown, ApiError)):
             log.warning("/%s: data unavailable: %s", name, cause)
             msg = (f"⚠️ I couldn't get the data for that right now ({clip(str(cause), 160)}). I keep retrying by "
                    "myself: try again in a minute, and `/status` shows each source's state.")
@@ -886,3 +917,9 @@ def register_commands(bot) -> None:
                 await interaction.response.send_message(msg, ephemeral=True)
         except discord.HTTPException:
             pass
+
+    for feature in getattr(bot, "features", []):
+        try:
+            feature.register(tree)
+        except Exception:
+            log.exception("The commands of %s failed to register", feature.name)

@@ -2195,15 +2195,15 @@ def test_channel_store_drops_unknown_kinds_and_settings(tmp_path):
     store = ChannelStore(path)
     assert sorted(c for c, _ in store.all()) == [4, 5]
     assert store.get(4).kind == "trends" and store.get(5).alerts is False
-    assert set(KINDS) == {"stocks", "crypto", "news", "research", "trends", "nvidia"}
+    assert set(KINDS) == {"stocks", "crypto", "news", "research", "trends", "nvidia", "congress", "calendar"}
     assert KIND_NAMES["trends"] == "🔥 Trends" and KIND_NAMES["nvidia"] == "🟩 NVIDIA"
 
 
 def test_setup_channel_list():
-    assert len(SETUP_CHANNELS) == 6
+    assert len(SETUP_CHANNELS) == 8
     assert [k for k, _, _ in SETUP_CHANNELS] == list(KINDS)
     names = [n for _, n, _ in SETUP_CHANNELS]
-    assert len(set(names)) == 6 and all(1 <= len(n) <= 100 and " " not in n for n in names)
+    assert len(set(names)) == 8 and all(1 <= len(n) <= 100 and " " not in n for n in names)
     assert all(len(topic) <= 1024 for _, _, topic in SETUP_CHANNELS)  # Discord's channel topic limit
     assert set(INTROS) == set(KINDS) == set(KIND_NAMES)
     assert all(len(text) <= DESCRIPTION for text in INTROS.values())
@@ -2370,7 +2370,7 @@ def test_setup_makes_the_six_channels_once(tmp_path):
     assert "trends" not in bot._last and "nvidia" not in bot._last and bot._last == {"news": 1.0}
     assert it.followup.messages[0][0].startswith("Done: <#1001> <#1002>")
     asyncio.run(setup(interaction(guild=guild)))  # again: the same channels, no copies
-    assert len(guild.categories) == 1 and len(cat.text_channels) == 6 and len(bot.channels.all()) == 6
+    assert len(guild.categories) == 1 and len(cat.text_channels) == 8 and len(bot.channels.all()) == 8
 
 
 def test_setup_without_manage_channels_asks_for_it(tmp_path):
