@@ -38,7 +38,8 @@ SETUP_CHANNELS = (("stocks", "📈-stocks", "Live US market board, big-move aler
                   ("research", "🔬-research", "Daily research digest, weekly outlook, and room for /research deep dives."),
                   ("trends", "🔥-trends", "Top gainers, losers and most traded: today, this week, this month, sectors and crypto."),
                   ("nvidia", "🟩-nvidia", "NVIDIA all day: live price, Massive data, technicals, news with sentiment, briefs."),
-                  ("congress", "🏛️-congress-trades", "What members of Congress disclose buying and selling, and who picks best."))
+                  ("congress", "🏛️-congress-trades", "What members of Congress disclose buying and selling, and who picks best."),
+                  ("calendar", "📅-calendar", "Economic releases and earnings: what usually happens before, what happened after."))
 INTROS = {
     "stocks": "This channel gets a **live stock board** (pinned, updated every minute), alerts for big moves, new "
               "52-week highs and breakout setups on the watchlist, a **pre-market brief** at 9:00 ET and a "
@@ -61,6 +62,11 @@ INTROS = {
                 "disclosures: a pinned board with the latest filings, the best stock pickers (estimated) and the most "
                 "bought and sold stocks, plus a post for **every new filing**. Trades are disclosed up to 45 days "
                 "late. `/congress member:` shows anyone's record; `/congress ticker:` who traded a stock.",
+    "calendar": "This channel gets the **market calendar**: a **week-ahead preview** on Sunday evening, each trading "
+                "day's **agenda** at 7:45 ET (economic releases with forecasts and what the S&P 500 usually did on "
+                "those days; big earnings with the options market's expected move and the last 4 reactions), "
+                "**results** as releases come out (actual vs forecast), and **earnings reactions** after the open "
+                "and the close. `/calendar` and `/earnings` any time.",
 }
 
 
