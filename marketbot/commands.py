@@ -894,7 +894,8 @@ def register_commands(bot) -> None:
         for feature in getattr(bot, "features", []):
             if feature.help_group:
                 groups.setdefault(feature.help_group, []).extend(feature.help())
-        for title, rows in list(HELP_GUIDE) + [(t, tuple(r)) for t, r in groups.items()]:
+        merged = [(t, tuple(r) + tuple(groups.pop(t, ()))) for t, r in HELP_GUIDE]  # same heading: one list
+        for title, rows in merged + [(t, tuple(r)) for t, r in groups.items()]:
             if rows:
                 e.add_field(name=title, value=clip("\n".join(f"{mention(ids, name)} {what}" for name, what in rows),
                                                    1024), inline=False)
