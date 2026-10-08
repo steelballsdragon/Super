@@ -438,7 +438,7 @@ def test_help_lists_every_command_as_a_tappable_mention(tmp_path):
     register_commands(bot)
     names = {c.name for c in bot.tree.get_commands()}
     listed = [n for _, rows in HELP_GUIDE for n, _ in rows] + [n for f in bot.features for n, _ in f.help()]
-    assert set(listed) == names - {"update"} and len(listed) == len(set(listed))
+    assert {n.split()[0] for n in listed} == names - {"update"} and len(listed) == len(set(listed))
 
     async def fetch_commands():
         return [SimpleNamespace(name=n, id=1000 + i) for i, n in enumerate(sorted(names))]
