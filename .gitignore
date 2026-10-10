@@ -219,5 +219,6 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Bot data (price history, models, state)
-market-data/
+# Bot runtime data
+subscriptions.json
+
