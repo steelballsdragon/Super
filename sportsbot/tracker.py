@@ -47,6 +47,11 @@ class Update:
     play: ScoringPlay | None = None  # NFL/MLB/NHL scoring play details, when known
     count: int = 1  # wickets that fell, or the over count reached (OVERS)
     edit: bool = False  # a correction to a scoring play already posted (e.g. ESPN named the scorer): edit that post
+    # The score posted the moment it changed, before ESPN described the play: the key its posts are kept under, so
+    # they're edited into the play when it shows up (edit=True), or removed if it was part of a play already posted
+    # (drop=True).
+    provisional: str = ""
+    drop: bool = False
 
 
 def _batting(game: Game) -> str | None:

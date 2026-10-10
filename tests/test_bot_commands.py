@@ -46,8 +46,8 @@ def test_unfollow_suggests_only_followed_teams():
 
 
 def test_poll_interval_setting():
-    assert poll_seconds(None) == 10
-    assert poll_seconds("30") == 10  # written by older installers
+    assert poll_seconds(None) == 5
+    assert poll_seconds("30") == 5  # written by older installers
     assert poll_seconds("20") == 20
     assert poll_seconds("1") == 5  # don't hammer ESPN
 

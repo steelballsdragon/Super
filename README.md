@@ -360,7 +360,7 @@ For example, on [Railway](https://railway.app), which you can set up from a phon
 | Variable | Default | Description |
 |---|---|---|
 | `DISCORD_TOKEN` | (required) | Bot token |
-| `POLL_INTERVAL` | `10` | Seconds between score checks (minimum 5). ESPN refreshes about every 5–8 seconds. |
+| `POLL_INTERVAL` | `5` | Seconds between score checks for leagues with a game on or starting within 15 minutes (minimum 5); other followed leagues are checked every 30 seconds. ESPN refreshes about every 5–8 seconds. |
 | `DATA_FILE` | `subscriptions.json` (on the Railway volume if one is attached) | Where channel subscriptions are saved. Channel settings (`settings.json`), bot state (`state.json`), the betting record for `/record` (`record.json`), ball-by-ball positions (`balls.json`) and recorded cricket scorecards (`cricket.json`) are kept next to it. |
 | `DEV_GUILD_ID` | (none) | Sync slash commands to one server instantly. Global sync can take up to an hour to appear. |
 
@@ -368,7 +368,7 @@ By default, only members with **Manage Channels** can use `/follow` and `/unfoll
 
 ## How it works
 
-Every `POLL_INTERVAL` seconds, the bot fetches the scoreboard for each league that some channel follows. It compares that scoreboard with the previous one and posts whatever changed. It only polls leagues that are followed. The first fetch after startup is recorded without posting anything, so restarting the bot doesn't repost old results. When ESPN is still showing an earlier day (it can lag well into a game day), today's games are fetched too, so no game's start is missed.
+Every `POLL_INTERVAL` seconds, the bot fetches the scoreboard for each followed league with a game on (others every 30 seconds). A score is posted the moment the scoreboard changes; for the NFL, MLB and NHL that post is edited into the scoring play (who scored, how, assists) as soon as ESPN publishes it, usually 30 seconds to 2 minutes later. It compares that scoreboard with the previous one and posts whatever changed. It only polls leagues that are followed. The first fetch after startup is recorded without posting anything, so restarting the bot doesn't repost old results. When ESPN is still showing an earlier day (it can lag well into a game day), today's games are fetched too, so no game's start is missed.
 
 It's built to keep running unattended:
 

@@ -8,13 +8,18 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 
 from .espn import Game, Goal, GoalDetail, ScoringPlay
+from dataclasses import replace
+
 from .tracker import FINAL, SCORE, Update
 
 log = logging.getLogger(__name__)
 
-# How long to wait for ESPN to publish a scoring play before falling back to a
-# plain score update.
+# How long to keep looking for ESPN's description of a scoring play. The score itself is posted the moment it
+# changes and edited into the play once ESPN publishes it.
 PLAY_WAIT_SECONDS = 120
+# A 1- or 2-point change this soon after a posted play (an extra point or two-point try) is waited for instead,
+# so it updates the touchdown's post rather than getting a post of its own.
+CONVERSION_SECONDS = 300
 # Once the game is over, hold the final result at most this long for the
 # winning play (e.g. a walk-off home run) so the play is posted first.
 FINAL_HOLD_SECONDS = 60
@@ -34,15 +39,17 @@ class _Pending:
     base_total: int
     since: float
     held: list[Update] = field(default_factory=list)  # e.g. the final, posted after the play
+    key: str = ""  # the provisional post that went out at once, if any
 
 
 class PlayResolver:
     """Replaces NFL score updates with one update per new scoring play.
 
-    ESPN's play-by-play can lag the scoreboard, so a score change stays
-    pending until its play shows up (or we give up and post the bare score).
-    Plays are remembered by ID so a touchdown isn't posted again when its
-    extra point is added a moment later.
+    ESPN's play-by-play can lag the scoreboard by a minute or more, so a score
+    change is posted at once as the bare score and edited into the play when it
+    shows up. Plays are remembered by ID so a touchdown isn't posted again when
+    its extra point is added a moment later (a 1- or 2-point change right after
+    a play waits for its play instead of posting at once).
     """
 
     def __init__(self, fetch: FetchPlays, clock: Clock = time.monotonic) -> None:
@@ -52,26 +59,35 @@ class PlayResolver:
         self._pending: dict[str, _Pending] = {}
         self._watching: dict[str, dict[str, tuple[ScoringPlay, float]]] = {}  # game -> play -> (as posted, when)
         self._checked: dict[str, float] = {}  # game -> when its posted plays were last re-checked
+        self._last_play: dict[str, float] = {}  # game -> when a play was last posted
+        self._seq = 0
 
     async def resolve(self, games: list[Game], updates: list[Update]) -> list[Update]:
         resolved: list[Update] = []
         others: list[Update] = []
+        now_posts: list[Update] = []
+        fresh: dict[str, Update] = {}  # new score changes to post at once if ESPN has no play for them yet
         for u in updates:
             if u.kind == SCORE and not u.score_decreased:
                 pending = self._pending.get(u.game.id)
                 if pending is None:
                     self._pending[u.game.id] = _Pending(u.prev_total, self._clock())
+                    if self._post_now(u):
+                        fresh[u.game.id] = u
                 else:
                     pending.base_total = min(pending.base_total, u.prev_total)
+                    if pending.key:  # scored again before ESPN described the first: show the new score
+                        now_posts.append(Update(SCORE, u.game, prev_total=pending.base_total,
+                                                provisional=pending.key, edit=True))
             else:
                 others.append(u)
 
-        # Anything else about a game with a score still pending (like the final
-        # whistle after a walk-off) waits so it's posted after the scoring play.
+        # Anything else about a game whose score change wasn't posted yet (like the final whistle right after an
+        # extra point) waits so it's posted after the scoring play. Once the score is out, nothing waits.
         ready = []
         for u in others:
             pending = self._pending.get(u.game.id)
-            (pending.held if pending else ready).append(u)
+            (pending.held if pending and not pending.key else ready).append(u)
 
         by_id = {g.id: g for g in games}
         edits = await self._recheck(by_id)
@@ -80,14 +96,27 @@ class PlayResolver:
             if game is None:
                 resolved.extend(self._pending.pop(game_id).held)
                 continue
-            resolved.extend(await self._check(game, self._pending[game_id]))
+            out = await self._check(game, self._pending[game_id])
+            pending = self._pending.get(game_id)
+            if game_id in fresh and pending is not None and not pending.key:  # no play yet: the score goes out now
+                self._seq += 1
+                pending.key = f"pending:{game_id}:{self._seq}"
+                out = [replace(fresh[game_id], provisional=pending.key)] + out + pending.held
+                pending.held = []
+            resolved.extend(out)
 
         # Forget games that dropped off the scoreboard.
         for game_id in list(self._posted):
             if game_id not in by_id:
                 del self._posted[game_id]
                 self._watching.pop(game_id, None)
-        return edits + resolved + ready
+        return now_posts + edits + resolved + ready
+
+    def _post_now(self, u: Update) -> bool:
+        if u.game.league.sport != "football":
+            return True
+        points = u.game.home.score + u.game.away.score - u.prev_total
+        return points > 2 or self._clock() - self._last_play.get(u.game.id, -1e9) > CONVERSION_SECONDS
 
     async def _recheck(self, by_id: dict[str, Game]) -> list[Update]:
         """Edits for posted plays that ESPN has since filled in or corrected."""
@@ -130,16 +159,23 @@ class PlayResolver:
             now = self._clock()
             self._watching.setdefault(game.id, {}).update((p.id, (p, now)) for p in new)
             self._checked[game.id] = now
+            self._last_play[game.id] = now
             del self._pending[game.id]
+            if pending.key:  # the score already went out: it becomes the first play, the rest are new posts
+                return ([Update(SCORE, game, play=new[0], provisional=pending.key, edit=True)]
+                        + [Update(SCORE, game, play=p) for p in new[1:]] + pending.held)
             return [Update(SCORE, game, play=p) for p in new] + pending.held
         if any(p.total == current_total and p.id in posted for p in plays):
-            # The change was e.g. an extra point added to a touchdown already posted.
+            # The change was e.g. an extra point added to a touchdown already posted (whose post is edited).
             del self._pending[game.id]
-            return pending.held
+            drop = [Update(SCORE, game, provisional=pending.key, edit=True, drop=True)] if pending.key else []
+            return drop + pending.held
         final_held = any(u.kind == FINAL for u in pending.held)
         waited = self._clock() - pending.since
         if waited >= PLAY_WAIT_SECONDS or (final_held and waited >= FINAL_HOLD_SECONDS):
             del self._pending[game.id]
+            if pending.key:  # the score is out already; ESPN never described the play
+                return pending.held
             # The final already shows the score, so a bare score update would only repeat it.
             return pending.held if final_held else [Update(SCORE, game)] + pending.held
         return []

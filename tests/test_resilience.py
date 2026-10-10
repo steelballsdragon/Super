@@ -26,7 +26,9 @@ async def run_for(bot, seconds):
     return running
 
 
-def test_one_broken_league_does_not_stop_the_others(caplog):
+def test_one_broken_league_does_not_stop_the_others(caplog, monkeypatch):
+    import sportsbot.bot
+    monkeypatch.setattr(sportsbot.bot, "IDLE_POLL_SECONDS", 0)  # check even idle leagues every cycle here
     caplog.set_level(logging.CRITICAL)
     bot = make_bot()
     bot.store.add(1, "nfl")
