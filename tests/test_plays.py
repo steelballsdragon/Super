@@ -63,13 +63,26 @@ def test_touchdown_posts_the_scoring_play():
     assert e.footer.text == "NFL · Q1 2:59"
 
 
-def test_waits_for_a_late_play_then_posts_it():
+def test_a_late_play_posts_the_score_at_once_then_edits_it_in():
     feed, tracker, resolver = setup()
-    assert step(tracker, resolver, board(away=3)) == []  # ESPN hasn't published the play yet
+    [now] = step(tracker, resolver, board(away=3))  # ESPN hasn't published the play yet: the score goes out now
+    assert now.kind == SCORE and now.play is None and now.provisional and not now.edit
     feed.plays = [play("fg", 3, 0, "Chris Boswell 48 Yd Field Goal", "Field Goal Good", "Field Goal")]
     [u] = step(tracker, resolver, board(away=3))
+    assert u.edit and u.provisional == now.provisional  # that post becomes the play
     assert update_embed(u).title == "🏈 FIELD GOAL — Pittsburgh Steelers"
     assert step(tracker, resolver, board(away=3)) == []  # not posted twice
+
+
+def test_scoring_again_before_the_play_updates_the_score_post():
+    feed, tracker, resolver = setup()
+    [first] = step(tracker, resolver, board(away=3))
+    [again] = step(tracker, resolver, board(away=6))
+    assert again.edit and again.provisional == first.provisional and again.play is None
+    feed.plays = [play("fg1", 3, 0, "Chris Boswell 48 Yd Field Goal", "Field Goal Good", "Field Goal"),
+                  play("fg2", 6, 0, "Chris Boswell 51 Yd Field Goal", "Field Goal Good", "Field Goal")]
+    a, b = step(tracker, resolver, board(away=6))
+    assert (a.play.id, a.edit, a.provisional) == ("fg1", True, first.provisional) and (b.play.id, b.edit) == ("fg2", False)
 
 
 def test_extra_point_after_touchdown_is_not_reposted():
@@ -77,7 +90,22 @@ def test_extra_point_after_touchdown_is_not_reposted():
     feed.plays = [play("p1", 6, 0, "Roman Wilson 12 Yd pass from Aaron Rodgers (kick pending)")]
     assert len(step(tracker, resolver, board(away=6))) == 1
     feed.plays = [play("p1", 7, 0)]  # same play, now with the kick
-    assert step(tracker, resolver, board(away=7)) == []
+    assert step(tracker, resolver, board(away=7)) == []  # the kick waits for its play rather than posting
+
+
+def test_a_score_posted_at_once_that_was_part_of_a_posted_play_is_removed():
+    now = [0.0]
+    feed, tracker = Feed(), Tracker()
+    resolver = PlayResolver(feed, clock=lambda: now[0])
+    step(tracker, resolver, board())
+    feed.plays = [play("p1", 6, 0, "Roman Wilson 12 Yd pass from Aaron Rodgers (kick pending)")]
+    step(tracker, resolver, board(away=6))
+    now[0] = 400  # long after the touchdown, so a 1-point change posts at once
+    [extra] = step(tracker, resolver, board(away=7))
+    assert extra.provisional and extra.play is None
+    feed.plays = [play("p1", 7, 0)]  # ...but it was the same play's kick
+    out = step(tracker, resolver, board(away=7))
+    assert [(u.drop, u.provisional) for u in out if u.provisional] == [(True, extra.provisional)]
 
 
 def test_falls_back_to_plain_score_when_play_never_appears():
@@ -85,12 +113,12 @@ def test_falls_back_to_plain_score_when_play_never_appears():
     feed, tracker = Feed(), Tracker()
     resolver = PlayResolver(feed, clock=lambda: now[0])
     step(tracker, resolver, board())
-    assert step(tracker, resolver, board(away=2)) == []
-    now[0] = PLAY_WAIT_SECONDS - 1
-    assert step(tracker, resolver, board(away=2)) == []  # still waiting
-    now[0] = PLAY_WAIT_SECONDS
-    [u] = step(tracker, resolver, board(away=2))
+    [u] = step(tracker, resolver, board(away=2))  # posted at once
     assert u.kind == SCORE and u.play is None
+    now[0] = PLAY_WAIT_SECONDS - 1
+    assert step(tracker, resolver, board(away=2)) == []  # still looking for the play
+    now[0] = PLAY_WAIT_SECONDS
+    assert step(tracker, resolver, board(away=2)) == []  # never found: the score post stays as it is
 
 
 def test_old_plays_are_not_reposted_after_restart():
@@ -221,4 +249,68 @@ def test_bot_edits_the_posts_of_a_corrected_play(tmp_path):
     asyncio.run(bot._poll_league("nhl"))
     assert len(posts) == 1  # edited, not posted again
     assert "Brayden Schenn Goal (1) Snap Shot\n🅰️ Assists: Victor Eklund (1)" in post.embed.description
+    asyncio.run(bot.espn.close())
+
+
+def test_bot_posts_the_score_at_once_then_edits_it_into_the_play(tmp_path):
+    from sportsbot.bot import SportsBot
+    from sportsbot.storage import SubscriptionStore
+    bot = SportsBot(SubscriptionStore(tmp_path / "s.json"), 10, None)
+    bot.store.add(5, "nhl")
+    plays = []
+
+    async def feed(event_id):
+        return parse_scoring_plays({"plays": plays}, "hockey")
+    bot.play_resolvers["nhl"] = PlayResolver(feed)
+    boards = [nhl_board()]
+
+    async def scoreboard(league, date=None):
+        return boards[0]
+    bot.espn.scoreboard = scoreboard
+
+    class Message:
+        def __init__(self, embed):
+            self.embed, self.deleted = embed, False
+
+        async def edit(self, embed=None):
+            self.embed = embed
+
+        async def delete(self):
+            self.deleted = True
+    posts = []
+
+    async def send(channel_id, embed=None, content=None, view=None):
+        posts.append(Message(embed))
+        return posts[-1]
+    bot._send = send
+    asyncio.run(bot._poll_league("nhl"))
+    boards[0] = nhl_board(home=1)
+    asyncio.run(bot._poll_league("nhl"))  # ESPN has no play yet: the score goes out now
+    [post] = posts
+    assert "New Jersey Devils 0 - 1 New York Islanders" in post.embed.description or "1" in post.embed.description
+    plays.append(nhl_goal("Brayden Schenn Goal (1) Snap Shot, assists: Victor Eklund (1)"))
+    asyncio.run(bot._poll_league("nhl"))
+    assert len(posts) == 1 and "Brayden Schenn Goal (1) Snap Shot" in post.embed.description  # edited, not reposted
+    assert [k for _, k in bot.play_posts] == ["play:g1"]  # later corrections find it under the play
+    asyncio.run(bot.espn.close())
+
+
+def test_busy_leagues_are_checked_every_cycle_and_idle_ones_every_30_seconds(tmp_path):
+    from sportsbot.bot import IDLE_POLL_SECONDS, SportsBot
+    from sportsbot.storage import SubscriptionStore
+    bot = SportsBot(SubscriptionStore(tmp_path / "s.json"), 10, None)
+    bot.store.add(5, "nhl")
+    bot.store.add(5, "nfl")
+    polled = []
+
+    async def poll(key):
+        polled.append(key)
+    bot._poll_league = poll
+    bot.latest = {"nhl": nhl_board(), "nfl": board(state="post")}
+    asyncio.run(bot._poll_cycle())
+    asyncio.run(bot._poll_cycle())
+    assert polled.count("nhl") == 2 and polled.count("nfl") == 1
+    bot._polled["nfl"] -= IDLE_POLL_SECONDS
+    asyncio.run(bot._poll_cycle())
+    assert polled.count("nfl") == 2
     asyncio.run(bot.espn.close())

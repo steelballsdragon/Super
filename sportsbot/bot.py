@@ -44,7 +44,9 @@ PLAY_BY_PLAY_SPORTS = ("football", "baseball", "hockey")
 
 # ESPN refreshes its data every 5-8 seconds, so checking more often than this
 # wouldn't make updates any faster.
-DEFAULT_POLL_SECONDS = 10
+DEFAULT_POLL_SECONDS = 5  # leagues with a game on (or about to start) are checked this often
+IDLE_POLL_SECONDS = 30  # the others this often
+SOON_SECONDS = 15 * 60  # "about to start"
 MIN_POLL_SECONDS = 5
 # Older installers wrote POLL_INTERVAL=30 into the server's settings; treat that
 # as "use the default" so those servers speed up too.
@@ -187,6 +189,7 @@ class SportsBot(discord.Client):
         self.health: dict[str, LeagueHealth] = {}
         self.version = code_version()
         self._team_lists: dict[str, tuple[float, list[tuple[str, str]]]] = {}
+        self._polled: dict[str, float] = {}  # league -> when it was last checked
 
     async def week_games(self, key: str) -> list:
         """The league's games that haven't started, over the next week, soonest first (cached for 10 minutes,
@@ -287,8 +290,13 @@ class SportsBot(discord.Client):
             if key not in active:
                 self.tracker.forget(key)
                 self.latest.pop(key, None)
+        # Leagues with nothing on are checked less often, so following many leagues doesn't slow the live ones.
+        now = time.monotonic()
+        due = [key for key in active if self._busy(key) or now - self._polled.get(key, -1e9) >= IDLE_POLL_SECONDS]
+        for key in due:
+            self._polled[key] = now
         # Every league and every step is isolated: one failure is logged, never fatal to the loop.
-        await asyncio.gather(*(self._guarded(f"{key} update", self._poll_league(key)) for key in active))
+        await asyncio.gather(*(self._guarded(f"{key} update", self._poll_league(key)) for key in due))
         await self._guarded("scoreboards", self._refresh_boards())
         if time.monotonic() - self._last_settle >= SETTLE_SECONDS:
             self._last_settle = time.monotonic()
@@ -301,6 +309,15 @@ class SportsBot(discord.Client):
         if time.monotonic() - self._last_prune >= PRUNE_SECONDS:
             self._last_prune = time.monotonic()
             self._prune_state()
+
+    def _busy(self, key: str) -> bool:
+        """A game in the league is on or starts within SOON_SECONDS."""
+        games = self.latest.get(key)
+        if not games:
+            return False
+        soon = time.time() + SOON_SECONDS
+        return any(g.state == "in" or g.state == "pre" and (st := start_time(g)) is not None and st.timestamp() <= soon
+                   for g in games)
 
     def _prune_state(self) -> None:
         """Drops old entries so state.json stays small however long the bot runs."""
@@ -380,6 +397,9 @@ class SportsBot(discord.Client):
                 continue
             plain = update_embed(update)
             with_odds = self._with_odds(update)
+            if update.provisional and update.edit:  # the score posted at once: now the play (or a newer score)
+                await self._resolve_provisional(update, plain, with_odds)
+                continue
             if update.edit:  # ESPN filled in or corrected a play already posted: edit those posts
                 await self._edit_play(update, plain, with_odds)
                 continue
@@ -397,6 +417,29 @@ class SportsBot(discord.Client):
                 await message.edit(embed=embed)
             except discord.HTTPException:
                 log.warning("Couldn't edit the post for %s", _post_key(update), exc_info=True)
+
+    async def _resolve_provisional(self, update, plain, with_odds) -> None:
+        """Edits the posts of a score that went out before ESPN described it: into the play, into the newer score,
+        or away when the change belonged to a play already posted."""
+        key = (update.game.id, update.provisional)
+        posts = self.play_posts.get(key, [])
+        if update.drop:
+            self.play_posts.pop(key, None)
+            for _, _, message in posts:
+                try:
+                    await message.delete()
+                except discord.HTTPException:
+                    pass
+            return
+        for _, channel_id, message in posts:
+            embed = with_odds if with_odds and self.settings.get(channel_id).odds else plain
+            try:
+                await message.edit(embed=embed)
+            except discord.HTTPException:
+                log.warning("Couldn't edit the score post for %s", update.provisional, exc_info=True)
+        if update.play is not None:  # from now on it's the play's post: ESPN's later corrections edit it too
+            self.play_posts.pop(key, None)
+            self.play_posts.setdefault((update.game.id, _post_key(update)), []).extend(posts)
 
     def _prune_play_posts(self) -> None:
         cutoff = time.time() - PLAY_POST_SECONDS
@@ -749,6 +792,8 @@ def _post_key(update) -> str:
         return ""
     if update.play is not None:
         return f"play:{update.play.id}"
+    if update.provisional:
+        return update.provisional
     return "goals:" + ",".join(f"{g.minute}|{g.scorer}" for g in update.new_goals) if update.new_goals else ""
 
 

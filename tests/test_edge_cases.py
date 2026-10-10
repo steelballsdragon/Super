@@ -68,12 +68,13 @@ def test_walk_off_play_is_posted_before_the_final():
     step = lambda g: asyncio.run(r.resolve(g, t.update("mlb", g)))
     nyy = lambda s, x=None: ("NYY", "New York Yankees", s if x is None else (s, x))
     step(game("mlb", "in", "STATUS_IN_PROGRESS", "Bot 9th", nyy(2), ("BOS", "Boston Red Sox", 2)))
-    # The game ends on the home run, but ESPN hasn't published the play yet.
-    assert step(game("mlb", "post", "STATUS_FINAL", "Final", nyy(3, {"winner": True}), ("BOS", "Boston Red Sox", 2))) == []
+    # The game ends on the home run, but ESPN hasn't published the play yet: the score goes out first, then the final.
+    first = step(game("mlb", "post", "STATUS_FINAL", "Final", nyy(3, {"winner": True}), ("BOS", "Boston Red Sox", 2)))
+    assert [(u.kind, u.play) for u in first] == [(SCORE, None), (FINAL, None)] and first[0].provisional
     plays.append(mlb_play(2, 3))
-    ups = step(game("mlb", "post", "STATUS_FINAL", "Final", nyy(3, {"winner": True}), ("BOS", "Boston Red Sox", 2)))
-    assert [u.kind for u in ups] == [SCORE, FINAL]
-    assert update_embed(ups[0]).title == "⚾ HOME RUN — New York Yankees"
+    [u] = step(game("mlb", "post", "STATUS_FINAL", "Final", nyy(3, {"winner": True}), ("BOS", "Boston Red Sox", 2)))
+    assert u.edit and u.provisional == first[0].provisional  # the score post becomes the home run
+    assert update_embed(u).title == "⚾ HOME RUN — New York Yankees"
 
 
 def test_final_is_not_held_forever_if_the_play_never_appears():
@@ -86,10 +87,10 @@ def test_final_is_not_held_forever_if_the_play_never_appears():
     step = lambda g: asyncio.run(r.resolve(g, t.update("nfl", g)))
     step(game("nfl", "in", "STATUS_IN_PROGRESS", "Q4 0:03", ("KC", "Kansas City Chiefs", 20), ("BUF", "Buffalo Bills", 21)))
     final = game("nfl", "post", "STATUS_FINAL", "Final", ("KC", "Kansas City Chiefs", (23, {"winner": True})), ("BUF", "Buffalo Bills", 21))
-    assert step(final) == []
+    score, u = step(final)  # nothing is held: the field goal's score, then the final
+    assert score.kind == SCORE and u.kind == FINAL and "Kansas City Chiefs win" in update_embed(u).description
     now[0] = FINAL_HOLD_SECONDS
-    [u] = step(final)
-    assert u.kind == FINAL and "Kansas City Chiefs win" in update_embed(u).description
+    assert step(final) == []
 
 
 def test_nfl_end_of_quarter():
