@@ -1,0 +1,71 @@
+{
+ "Eid": "1810714",
+ "Incs-s": {
+  "1": [],
+  "2": [
+   {
+    "Min": 62,
+    "Nm": 1,
+    "Sc": [
+     1,
+     0
+    ],
+    "Sor": 4,
+    "Incs": [
+     {
+      "Min": 62,
+      "Nm": 1,
+      "PosA": 3,
+      "Aid": "102183",
+      "ID": "102183",
+      "Fn": "Yan",
+      "Ln": "Diomande",
+      "Pnt": "yan-diomande",
+      "Pnum": 25,
+      "Pn": "Yan Diomande",
+      "IT": 36,
+      "Sc": [
+       1,
+       0
+      ],
+      "Sor": 4
+     },
+     {
+      "Min": 62,
+      "Nm": 1,
+      "PosA": 3,
+      "Aid": "18774",
+      "ID": "18774",
+      "Fn": "Federico",
+      "Ln": "Valverde",
+      "Pnt": "federico-valverde",
+      "Pnum": 8,
+      "Pn": "Federico Valverde",
+      "IT": 63,
+      "Sc": [
+       1,
+       0
+      ],
+      "Sor": 4
+     }
+    ]
+   },
+   {
+    "Min": 74,
+    "Nm": 1,
+    "PosA": 5,
+    "Aid": "18776",
+    "ID": "18776",
+    "Ln": "Vinicius Junior",
+    "Snm": "Vinicius Junior",
+    "Pnt": "vinicius-junior",
+    "Pnum": 7,
+    "Pn": "Vinicius Junior",
+    "IT": 45,
+    "NoP": false,
+    "IR": "VAR:allowed",
+    "Sor": 1
+   }
+  ]
+ }
+}

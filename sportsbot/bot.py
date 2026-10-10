@@ -8,7 +8,7 @@ import math
 import os
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -24,6 +24,7 @@ from .espn import EASTERN, ESPNClient, is_youth
 from .espn import start_time
 from .formatting import ball_messages, board_embed, reminder_text, schedule_embed, scoreboard_embed, update_embed
 from .leagues import LEAGUES
+from .livescore import FastGoals
 from .limits import MESSAGE, clip, fit_embed
 from .odds import OddsBook, grade_text, line_text
 from .cricket_props import CricketHistory
@@ -149,6 +150,7 @@ class SportsBot(discord.Client):
         self.leans = LeanBook(self.records)
         self._boards_shown: dict[int, dict] = {}
         self.espn = ESPNClient()
+        self.fast = FastGoals(self.espn._get_session)  # soccer goals from LiveScore, often minutes before ESPN
         self.props = PropsClient(self.espn)
         # Recorded cricket scorecards get their own file: they're big, and state.json is rewritten often.
         self.cricket = CricketHistory(self.props, StateStore(self.state.path.with_name("cricket.json")))
@@ -370,6 +372,11 @@ class SportsBot(discord.Client):
             health.error, health.error_at = f"{type(exc).__name__}: {exc}"[:200], time.time()
             return
         games = await self._with_vanished_games(LEAGUES[key], games)
+        if LEAGUES[key].sport == "soccer":
+            try:
+                games = await self.fast.overlay(games)
+            except Exception:
+                log.exception("LiveScore overlay failed for %s; using ESPN's scores", key)
         health.checked_at, health.live_games = time.time(), sum(g.state == "in" for g in games)
         self.latest[key] = games
         self.odds.remember(games)
@@ -437,9 +444,10 @@ class SportsBot(discord.Client):
                 await message.edit(embed=embed)
             except discord.HTTPException:
                 log.warning("Couldn't edit the score post for %s", update.provisional, exc_info=True)
-        if update.play is not None:  # from now on it's the play's post: ESPN's later corrections edit it too
+        final = _post_key(replace(update, provisional=""))
+        if final:  # from now on it's the play's (or goals') post: ESPN's later corrections and assists edit it too
             self.play_posts.pop(key, None)
-            self.play_posts.setdefault((update.game.id, _post_key(update)), []).extend(posts)
+            self.play_posts.setdefault((update.game.id, final), []).extend(posts)
 
     def _prune_play_posts(self) -> None:
         cutoff = time.time() - PLAY_POST_SECONDS
@@ -1721,6 +1729,8 @@ def register_commands(bot: SportsBot) -> None:
             if h.error and (h.checked_at is None or (h.error_at or 0) > h.checked_at):
                 line += f"\n  ⚠️ Last check failed {_ago(h.error_at)}: `{h.error}`"
             lines.append(line)
+        if any(LEAGUES[k].sport == "soccer" for k in active):
+            lines.append(f"⚡ **Fast soccer goals (LiveScore)**: {bot.fast.status()}")
         embed = discord.Embed(
             title="ScoreBot status",
             description="\n".join(lines) or "No channel follows anything yet. Use `/follow`.",

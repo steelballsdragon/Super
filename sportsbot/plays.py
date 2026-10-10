@@ -190,6 +190,14 @@ def _waiting(goal: Goal) -> bool:
 
 
 @dataclass
+class _Missing:
+    update: Update  # posted at once, without (all of) its goals
+    base: int  # goals the game had listed before them
+    expected: int  # goals it will list once ESPN catches up
+    since: float
+
+
+@dataclass
 class _Watched:
     update: Update  # as last posted
     since: float
@@ -210,11 +218,22 @@ class AssistResolver:
         self._fetch = fetch
         self._clock = clock
         self._watching: list[_Watched] = []
+        self._missing: list[_Missing] = []
+        self._seq = 0
 
     async def resolve(self, games: list[Game], updates: list[Update]) -> list[Update]:
         now, out = self._clock(), []
-        edits = await self._recheck(now)
+        edits = await self._recheck(now) + await self._fill_missing(games, now)
         for u in updates:
+            scored = u.game.home.score + u.game.away.score - u.prev_total
+            if u.kind == SCORE and not u.score_decreased and len(u.new_goals) < scored:
+                # ESPN moved the score before listing the goal: post the score now, add the scorer when it's listed.
+                self._seq += 1
+                u = replace(u, provisional=f"pending:{u.game.id}:goal{self._seq}")
+                base = len(u.game.goals) - len(u.new_goals)
+                self._missing.append(_Missing(u, base, base + scored, now))
+                out.append(u)
+                continue
             if u.kind == SCORE and u.new_goals:
                 goals = await self._with_assists(u.game.id, u.new_goals)
                 u = replace(u, new_goals=goals)
@@ -222,6 +241,24 @@ class AssistResolver:
                     self._watching.append(_Watched(u, now, now))
             out.append(u)
         return edits + out
+
+    async def _fill_missing(self, games: list[Game], now: float) -> list[Update]:
+        """Edits for goals posted before ESPN named the scorer, once it does."""
+        by_id, edits = {g.id: g for g in games}, []
+        for m in list(self._missing):
+            game = by_id.get(m.update.game.id)
+            if game is None or now - m.since > WATCH_SECONDS:
+                self._missing.remove(m)
+                continue
+            if len(game.goals) < m.expected:
+                continue
+            self._missing.remove(m)
+            goals = await self._with_assists(game.id, game.goals[m.base:m.expected])
+            done = replace(m.update, game=replace(m.update.game, goals=game.goals), new_goals=goals, edit=True)
+            edits.append(done)
+            if any(_waiting(g) for g in goals):  # and the assist when it's out, as for any goal
+                self._watching.append(_Watched(replace(done, provisional="", edit=False), now, now))
+        return edits
 
     async def _recheck(self, now: float) -> list[Update]:
         edits = []
