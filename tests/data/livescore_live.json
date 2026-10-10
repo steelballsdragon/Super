@@ -1,0 +1,46 @@
+{
+ "Stages": [
+  {
+   "Snm": "LaLiga",
+   "Events": [
+    {
+     "Eid": "1810714",
+     "T1": [
+      {
+       "Nm": "Real Madrid"
+      }
+     ],
+     "T2": [
+      {
+       "Nm": "Villarreal"
+      }
+     ],
+     "Tr1": "1",
+     "Tr2": "0",
+     "Eps": "79'"
+    }
+   ]
+  },
+  {
+   "Snm": "MLS",
+   "Events": [
+    {
+     "Eid": "1696709",
+     "T1": [
+      {
+       "Nm": "Chicago Fire"
+      }
+     ],
+     "T2": [
+      {
+       "Nm": "New York City FC"
+      }
+     ],
+     "Tr1": "2",
+     "Tr2": "1",
+     "Eps": "90+7'"
+    }
+   ]
+  }
+ ]
+}

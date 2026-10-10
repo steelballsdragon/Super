@@ -1,0 +1,137 @@
+{
+ "Eid": "1810719",
+ "Incs-s": {
+  "1": [
+   {
+    "Min": 33,
+    "Nm": 2,
+    "Sc": [
+     0,
+     1
+    ],
+    "Sor": 3,
+    "Incs": [
+     {
+      "Min": 33,
+      "Nm": 2,
+      "PosA": 2,
+      "Aid": "21370",
+      "ID": "21370",
+      "Fn": "\u00c1lex",
+      "Ln": "Grimaldo",
+      "Pnt": "alex-grimaldo",
+      "Pnum": 22,
+      "Pn": "Alejandro Grimaldo",
+      "IT": 36,
+      "Sc": [
+       0,
+       1
+      ],
+      "Sor": 3
+     },
+     {
+      "Min": 33,
+      "Nm": 2,
+      "PosA": 4,
+      "Aid": "2107",
+      "ID": "2107",
+      "Fn": "Jonathan",
+      "Ln": "David",
+      "Pnt": "jonathan-david",
+      "Pnum": 15,
+      "Pn": "Jonathan David",
+      "IT": 63,
+      "Sc": [
+       0,
+       1
+      ],
+      "Sor": 3
+     }
+    ]
+   },
+   {
+    "MinEx": 6,
+    "Min": 45,
+    "Nm": 1,
+    "PosA": 4,
+    "Aid": "19028",
+    "ID": "19028",
+    "Fn": "Lucas",
+    "Ln": "Boy\u00e9",
+    "Pnt": "lucas-boye",
+    "Pnum": 15,
+    "Pn": "Lucas Boye",
+    "IT": 37,
+    "IR": "VAR",
+    "Sc": [
+     1,
+     1
+    ],
+    "Sor": 9
+   }
+  ],
+  "2": [
+   {
+    "Min": 61,
+    "Nm": 1,
+    "Aid": "99378",
+    "ID": "99378",
+    "Fn": "Angel",
+    "Ln": "Hidalgo",
+    "Pnt": "angel-hidalgo",
+    "Pn": "Angel Perez",
+    "IT": 45,
+    "NoP": false,
+    "IR": "VAR:changed_to_red",
+    "Sor": 1
+   },
+   {
+    "Min": 87,
+    "Nm": 2,
+    "Sc": [
+     1,
+     2
+    ],
+    "Sor": 3,
+    "Incs": [
+     {
+      "Min": 87,
+      "Nm": 2,
+      "PosA": 2,
+      "Aid": "26063",
+      "ID": "26063",
+      "Fn": "Cristian",
+      "Ln": "Romero",
+      "Pnt": "cristian-romero",
+      "Pnum": 21,
+      "Pn": "Cristian Romero",
+      "IT": 36,
+      "Sc": [
+       1,
+       2
+      ],
+      "Sor": 3
+     },
+     {
+      "Min": 87,
+      "Nm": 2,
+      "PosA": 5,
+      "Aid": "12112",
+      "ID": "12112",
+      "Fn": "\u00c1lex",
+      "Ln": "Baena",
+      "Pnt": "alex-baena",
+      "Pnum": 10,
+      "Pn": "Alejandro Baena",
+      "IT": 63,
+      "Sc": [
+       1,
+       2
+      ],
+      "Sor": 3
+     }
+    ]
+   }
+  ]
+ }
+}
