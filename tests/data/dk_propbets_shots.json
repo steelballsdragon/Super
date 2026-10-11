@@ -1,0 +1,189 @@
+{
+ "count": 8,
+ "items": [
+  {
+   "athlete": {
+    "$ref": "http://sports.core.api.espn.com/v2/sports/soccer/leagues/esp.1/seasons/2026/athletes/21990?lang=en&region=us"
+   },
+   "type": {
+    "id": "266",
+    "name": "Shots Milestones"
+   },
+   "current": {
+    "over": {
+     "value": 26.0,
+     "displayValue": "25/1",
+     "alternateDisplayValue": "+2500",
+     "decimal": 26.0,
+     "fraction": "25/1",
+     "american": "+2500"
+    },
+    "target": {
+     "value": 3.0,
+     "displayValue": "3+"
+    }
+   }
+  },
+  {
+   "athlete": {
+    "$ref": "http://sports.core.api.espn.com/v2/sports/soccer/leagues/esp.1/seasons/2026/athletes/21990?lang=en&region=us"
+   },
+   "type": {
+    "id": "266",
+    "name": "Shots Milestones"
+   },
+   "current": {
+    "over": {
+     "value": 2.05,
+     "displayValue": "21/20",
+     "alternateDisplayValue": "+105",
+     "decimal": 2.05,
+     "fraction": "21/20",
+     "american": "+105"
+    },
+    "target": {
+     "value": 1.0,
+     "displayValue": "1+"
+    }
+   }
+  },
+  {
+   "athlete": {
+    "$ref": "http://sports.core.api.espn.com/v2/sports/soccer/leagues/esp.1/seasons/2026/athletes/21990?lang=en&region=us"
+   },
+   "type": {
+    "id": "266",
+    "name": "Shots Milestones"
+   },
+   "current": {
+    "over": {
+     "value": 6.5,
+     "displayValue": "11/2",
+     "alternateDisplayValue": "+550",
+     "decimal": 6.5,
+     "fraction": "11/2",
+     "american": "+550"
+    },
+    "target": {
+     "value": 2.0,
+     "displayValue": "2+"
+    }
+   }
+  },
+  {
+   "athlete": {
+    "$ref": "http://sports.core.api.espn.com/v2/sports/soccer/leagues/esp.1/seasons/2026/athletes/92800?lang=en&region=us"
+   },
+   "type": {
+    "id": "266",
+    "name": "Shots Milestones"
+   },
+   "current": {
+    "over": {
+     "value": 2.2,
+     "displayValue": "6/5",
+     "alternateDisplayValue": "+120",
+     "decimal": 2.2,
+     "fraction": "6/5",
+     "american": "+120"
+    },
+    "target": {
+     "value": 3.0,
+     "displayValue": "3+"
+    }
+   }
+  },
+  {
+   "athlete": {
+    "$ref": "http://sports.core.api.espn.com/v2/sports/soccer/leagues/esp.1/seasons/2026/athletes/92800?lang=en&region=us"
+   },
+   "type": {
+    "id": "266",
+    "name": "Shots Milestones"
+   },
+   "current": {
+    "over": {
+     "value": 4.1,
+     "displayValue": "31/10",
+     "alternateDisplayValue": "+310",
+     "decimal": 4.1,
+     "fraction": "31/10",
+     "american": "+310"
+    },
+    "target": {
+     "value": 4.0,
+     "displayValue": "4+"
+    }
+   }
+  },
+  {
+   "athlete": {
+    "$ref": "http://sports.core.api.espn.com/v2/sports/soccer/leagues/esp.1/seasons/2026/athletes/92800?lang=en&region=us"
+   },
+   "type": {
+    "id": "266",
+    "name": "Shots Milestones"
+   },
+   "current": {
+    "over": {
+     "value": 8.5,
+     "displayValue": "15/2",
+     "alternateDisplayValue": "+750",
+     "decimal": 8.5,
+     "fraction": "15/2",
+     "american": "+750"
+    },
+    "target": {
+     "value": 5.0,
+     "displayValue": "5+"
+    }
+   }
+  },
+  {
+   "athlete": {
+    "$ref": "http://sports.core.api.espn.com/v2/sports/soccer/leagues/esp.1/seasons/2026/athletes/21990?lang=en&region=us"
+   },
+   "type": {
+    "id": "267",
+    "name": "Shots on Target Milestones"
+   },
+   "current": {
+    "over": {
+     "value": 6.0,
+     "displayValue": "5/1",
+     "alternateDisplayValue": "+500",
+     "decimal": 6.0,
+     "fraction": "5/1",
+     "american": "+500"
+    },
+    "target": {
+     "value": 1.0,
+     "displayValue": "1+"
+    }
+   }
+  },
+  {
+   "athlete": {
+    "$ref": "http://sports.core.api.espn.com/v2/sports/soccer/leagues/esp.1/seasons/2026/athletes/92800?lang=en&region=us"
+   },
+   "type": {
+    "id": "267",
+    "name": "Shots on Target Milestones"
+   },
+   "current": {
+    "over": {
+     "value": 1.71,
+     "displayValue": "5/7",
+     "alternateDisplayValue": "-140",
+     "decimal": 1.71,
+     "fraction": "5/7",
+     "american": "-140"
+    },
+    "target": {
+     "value": 1.0,
+     "displayValue": "1+"
+    }
+   }
+  }
+ ]
+}

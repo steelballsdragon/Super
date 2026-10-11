@@ -61,6 +61,8 @@ When a game ends on a score, such as a walk-off home run, the winning play is po
 | **🎯-picks** | Every morning at 7:00: each league's strongest leans and a **safe parlay** (around +100), graded here after the games |
 | **🎰-lottos** | Every morning at 7:00: for each league with games today, a **Lotto parlay** (4-10 legs, +3000 to +20000), a **goalscorer slate lotto** on big soccer days and **anytime TD scorers** on NFL days, each with a slip to copy and an **I placed it** button, graded here after the games |
 
+| **🚨-red-alerts** | Every morning at 7:00: soccer **total shots** props (not just on target) that **DraftKings prices long** for players who keep hitting them. Each priced player's record (last 10 games, this season and last) is compared with DK's price, and the biggest edges go out as **singles**, a **parlay** (one leg per game) and, on big days, a **lotto**, each with DK's prices, a slip to copy and an **I placed it** button, graded here after the games. Small samples (early season) are flagged. `/redalerts [league]` runs it any time |
+
 Running `/setup` again only adds what's missing. Times are Toronto time; `/daily timezone:` in a channel changes
 it. `/lottos` and `/picks` turn the morning posts on or off in any channel, and `/follow`, `/scoreboard`,
 `/threads`, `/odds` and `/reminders` fine-tune the score channels.
