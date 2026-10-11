@@ -56,12 +56,12 @@ When a game ends on a score, such as a walk-off home run, the winning play is po
 | Channel | What it gets |
 |---|---|
 | **🏈-nfl**, **🏀-nba**, **⚾-mlb**, **🏒-nhl** | Live scores and scoring plays, the betting line at each game's start and how bets settled at the final, a pinned live scoreboard, and today's games every morning at 9:00 |
-| **⚽-soccer** | The same for the Premier League, La Liga, Serie A, Bundesliga, Ligue 1, MLS, the Champions League, the Europa League and the World Cup |
+| **⚽-soccer** | The same for the Premier League, La Liga, Serie A, Bundesliga, Ligue 1, MLS, Brazil's Brasileirão Série A, the Champions League, the Europa League and the World Cup |
 | **🏏-cricket** | IPL and international cricket |
 | **🎯-picks** | Every morning at 7:00: each league's strongest leans and a **safe parlay** (around +100), graded here after the games |
 | **🎰-lottos** | Every morning at 7:00: for each league with games today, a **Lotto parlay** (4-10 legs, +3000 to +20000), a **goalscorer slate lotto** on big soccer days and **anytime TD scorers** on NFL days, each with a slip to copy and an **I placed it** button, graded here after the games |
 
-| **🚨-red-alerts** | Every morning at 7:00: soccer **total shots** props (not just on target) that **DraftKings prices long** for players who keep hitting them. Each priced player's record (last 10 games, this season and last) is compared with DK's price, and the biggest edges go out as **singles**, a **parlay** (one leg per game) and, on big days, a **lotto**, each with DK's prices, a slip to copy and an **I placed it** button, graded here after the games. Small samples (early season) are flagged. `/redalerts [league]` runs it any time |
+| **🚨-red-alerts** | Every morning at 7:00, and at 2:00 PM for the later games (new alerts only; DraftKings fills in props through the day): soccer **total shots** props (not just on target) that **DraftKings prices long** for players who keep hitting them. Each priced player's record (last 10 games, this season and last) is compared with DK's price, and the biggest edges go out as **singles**, a **parlay** (one leg per game) and, on big days, a **lotto**, each with DK's prices, a slip to copy and an **I placed it** button, graded here after the games. Small samples (early season) are flagged. `/redalerts [league]` runs it any time (after the day's games it looks at the next day's). Covers every soccer league the bot follows, including Brazil's Brasileirão Série A |
 
 Running `/setup` again only adds what's missing. Times are Toronto time; `/daily timezone:` in a channel changes
 it. `/lottos` and `/picks` turn the morning posts on or off in any channel, and `/follow`, `/scoreboard`,

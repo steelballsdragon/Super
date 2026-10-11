@@ -163,6 +163,11 @@ def test_the_morning_posts_go_out_once_a_day_at_seven(tmp_path):
     assert calls == [(5, "picks"), (5, "lottos")]
     asyncio.run(run(datetime(2026, 10, 11, 7, 0, tzinfo=toronto)))
     assert len(calls) == 4
+    bot.settings.update(5, redalerts=True)
+    asyncio.run(run(datetime(2026, 10, 12, 7, 0, tzinfo=toronto)))
+    asyncio.run(run(datetime(2026, 10, 12, 14, 30, tzinfo=toronto)))
+    asyncio.run(run(datetime(2026, 10, 12, 15, 0, tzinfo=toronto)))
+    assert calls[4:] == [(5, "picks"), (5, "lottos"), (5, "redalerts"), (5, "redalerts-late")]
     asyncio.run(bot.espn.close())
 
 
@@ -187,3 +192,16 @@ def test_railway_defaults(monkeypatch):
     assert B.default_data_file() == "subscriptions.json"
     monkeypatch.setenv("RAILWAY_GIT_COMMIT_SHA", "abcdef1234")
     assert B.code_version() == "abcdef1"
+
+
+def test_setup_again_follows_a_newly_added_league_quietly(tmp_path):
+    bot = make_bot(tmp_path)
+    guild = Guild()
+    setup = bot.tree.get_command("setup").callback
+    asyncio.run(setup(Inter(guild), category="🎰 ScoreBot"))
+    soccer = next(c for c in guild.categories[0].text_channels if c.name == "⚽-soccer")
+    bot.store.remove(soccer.id, "brasileirao")  # as if set up before Brazil's Série A was added
+    posts = len(bot.sent)
+    asyncio.run(setup(Inter(guild), category="🎰 ScoreBot"))
+    assert "brasileirao" in {s.league for s in bot.store.for_channel(soccer.id)} and len(bot.sent) == posts
+    asyncio.run(bot.espn.close())

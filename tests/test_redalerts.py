@@ -102,7 +102,8 @@ def test_morning_red_alerts_post_singles_parlay_and_lotto(tmp_path, monkeypatch)
     assert all(leg["stat"] == "totalShots" for p in styles.values() for leg in p["legs"])
     assert all(cid == 9 for cid, *_ in sent)
 
-    sent.clear()
+    sent.clear()  # the afternoon look only posts what's new
+    assert asyncio.run(bot.auto_post(9, "redalerts-late", tz)) == 0 and sent == []
     bot.week_games = lambda key: asyncio.sleep(0, result=[])
     assert asyncio.run(bot.auto_post(9, "redalerts", tz)) == 0 and sent == []  # nothing today: quiet
     asyncio.run(bot.espn.close())
