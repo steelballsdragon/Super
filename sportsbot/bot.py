@@ -77,15 +77,17 @@ LOOP_RESTART_SECONDS = 5
 DAILY_WINDOW_HOURS = 2
 BETS_HOUR = 7  # lotto and picks channels get the day's posts at this hour (local), before the first kickoffs
 RED_MAX_GAMES = 30  # soccer games looked at for red alerts in a day
+RED_LATE_HOUR = 14  # a second look in the afternoon: DraftKings fills in props through the day (Brazil plays late)
 BETS_MAX_POSTS = 8  # at most this many lottos (or leagues' picks) a day per channel
-SOCCER = ("epl", "laliga", "seriea", "bundesliga", "ligue1", "mls", "ucl", "uel", "worldcup")
+SOCCER = ("epl", "laliga", "seriea", "bundesliga", "ligue1", "mls", "brasileirao", "ucl", "uel", "worldcup")
 # What /setup makes: (channel name, leagues it follows, what else it gets, topic)
 SETUP_CHANNELS = (
     ("🏈-nfl", ("nfl",), "", "NFL: live scoring plays, the betting line and how bets settled, today's games"),
     ("🏀-nba", ("nba",), "", "NBA: live scores, lines and results, today's games"),
     ("⚾-mlb", ("mlb",), "", "MLB: scoring plays, lines and results, today's games"),
     ("🏒-nhl", ("nhl",), "", "NHL: goals with assists, lines and results, today's games"),
-    ("⚽-soccer", SOCCER, "", "Premier League, La Liga, Serie A, Bundesliga, Ligue 1, MLS, Champions and Europa League"),
+    ("⚽-soccer", SOCCER, "", "Premier League, La Liga, Serie A, Bundesliga, Ligue 1, MLS, Brasileirão, Champions and "
+                            "Europa League"),
     ("🏏-cricket", ("ipl", "cricket"), "", "IPL and international cricket"),
     ("🎯-picks", (), "picks", "Every morning: each league's strongest leans and a safe parlay, graded after the games"),
     ("🎰-lottos", (), "lottos", "Every morning: today's lottos (+3000 to +20000), goalscorer and TD slates, graded"),
@@ -100,11 +102,12 @@ INTROS = {
     "picks": "Every morning at 7:00 I post **today's picks** here: each league's strongest leans (where ESPN's model or "
              "the form disagrees with the line) and a **safe parlay** around +100. They're graded here after the "
              "games; `/record` shows how they've done.",
-    "redalerts": "Every morning at 7:00 I post **red alerts** here: soccer **total shots** props (not just on target) "
-                 "where a player has kept hitting the line but **DraftKings prices it long**. I compare each priced "
-                 "player's record (last 10 games, this season and last) with DK's price and post the biggest edges "
-                 "as **singles**, a **parlay** and a **lotto**, graded here after the games. `/redalerts` runs it "
-                 "any time.",
+    "redalerts": "Every morning at 7:00, and again at 2:00 PM for the later games (DraftKings fills in props "
+                 "through the day; Brazil plays late), I post **red alerts** here: soccer **total shots** props (not "
+                 "just on target) where a player has kept hitting the line but **DraftKings prices it long**. I "
+                 "compare each priced player's record (last 10 games, this season and last) with DK's price and post "
+                 "the biggest edges as **singles**, a **parlay** and a **lotto**, graded here after the games. "
+                 "`/redalerts` runs it any time (late at night it looks at the next day's games).",
 }
 
 
@@ -350,6 +353,10 @@ class SportsBot(discord.Client):
         self.odds.prune()
         now = time.time()
         self.result_lookups = {k: t for k, t in self.result_lookups.items() if t > now}
+        old_day = (datetime.now(timezone.utc) - timedelta(days=3)).date().isoformat()
+        for key, _ in self.state.items("red_seen"):
+            if key.rsplit(":", 1)[-1] < old_day:
+                self.state.delete("red_seen", key)
         cutoff = now - 14 * 86400
         for key, at in self.state.items("finals"):
             if at < cutoff:
@@ -783,6 +790,16 @@ class SportsBot(discord.Client):
                     continue
                 self.state.set(kind, str(channel_id), local.date().isoformat())
                 self._background(self._guarded(f"{kind} for {channel_id}", poster(channel_id, kind, tz)))
+        for channel_id, settings in self.settings.channels_with(lambda s: s.redalerts):
+            tz = self._zone(settings)
+            local = (now or datetime.now(timezone.utc)).astimezone(tz)
+            if not RED_LATE_HOUR <= local.hour < RED_LATE_HOUR + DAILY_WINDOW_HOURS:
+                continue
+            if self.state.get("redalerts-late", str(channel_id)) == local.date().isoformat():
+                continue
+            self.state.set("redalerts-late", str(channel_id), local.date().isoformat())
+            self._background(self._guarded(f"afternoon red alerts for {channel_id}",
+                                           poster(channel_id, "redalerts-late", tz)))
 
     # ----- live scoreboards -----
 
@@ -1509,8 +1526,8 @@ def register_commands(bot: SportsBot) -> None:
         """The morning's posts for a lotto or picks channel: for each league with games today, a Lotto parlay (plus a
         goalscorer or TD slate on a big soccer or NFL day), or the league's best picks. Returns how many went out."""
         day = datetime.now(tz).date()
-        if kind == "redalerts":
-            return await red_post(ChannelPoster(bot, channel_id), day, tz)
+        if kind in ("redalerts", "redalerts-late"):
+            return await red_post(ChannelPoster(bot, channel_id), day, tz, later=kind == "redalerts-late")
         title = "🎰 Today's lottos" if kind == "lottos" else "🎯 Today's picks"
         header = discord.Embed(title=f"{title} · {day:%A %B} {day.day}", color=discord.Color.gold(), description=(
             "Long shots built to pay +3000 to +20000: small stakes only. Every leg is graded here after the games."
@@ -1544,15 +1561,25 @@ def register_commands(bot: SportsBot) -> None:
 
     red = RedAlerts(bot.espn, bot.props, bot._availability)
 
-    async def red_post(out, day, tz, keys=None, quiet=True) -> int:
-        """Today's red alerts: the biggest edges as singles, a parlay and a lotto. Returns how many posts went out."""
-        games = []
+    async def red_post(out, day, tz, keys=None, quiet=True, later=False) -> int:
+        """Today's red alerts: the biggest edges as singles, a parlay and a lotto. Returns how many posts went out.
+        Asked for (quiet=False) once the day's games have all started, it looks at the next day's instead."""
+        week = []
         for key in keys or [k for k in LEAGUES if LEAGUES[k].sport == "soccer"]:
             try:
-                games += [g for g in await _week(LEAGUES[key])
-                          if (st := start_time(g)) and st.astimezone(tz).date() == day]
+                week += await _week(LEAGUES[key])
             except Exception:
                 log.warning("Red alerts: no %s schedule", key, exc_info=True)
+
+        def on(d):
+            return [g for g in week if (st := start_time(g)) and st.astimezone(tz).date() == d]
+        games = on(day)
+        if not games and not quiet:
+            day += timedelta(days=1)
+            games = on(day)
+        if later:  # the afternoon look: games that haven't started an hour from now
+            soon = datetime.now(timezone.utc) + timedelta(hours=1)
+            games = [g for g in games if (st := start_time(g)) and st > soon]
         games = sorted(games, key=lambda g: g.start)[:RED_MAX_GAMES]
         limit = asyncio.Semaphore(3)
 
@@ -1568,12 +1595,16 @@ def register_commands(bot: SportsBot) -> None:
                             key=lambda a: a.edge, reverse=True)
         finally:
             release_memory()
+        seen_key = f"{out.channel_id}:{day.isoformat()}"
+        seen = set(bot.state.get("red_seen", seen_key) or [])
+        alerts = [a for a in alerts if f"{a.game.id}:{a.player_id}" not in seen]  # posted earlier today
         if not alerts:
             if not quiet:
-                await out.followup.send(f"No red alerts in today's {len(games)} soccer games: DraftKings' shot prices "
-                                        "match the players' records (or the props aren't up yet).")
+                await out.followup.send(f"No red alerts in {day:%A}'s {len(games)} game{'s' if len(games) != 1 else ''}: "
+                                        "DraftKings' shot prices match the players' records (or its props aren't up "
+                                        "yet; they fill in through the day).")
             return 0
-        label = f"{day:%A %B} {day.day}"
+        label = f"{day:%A %B} {day.day}" + (" (afternoon)" if later else "")
         posted = 0
         singles = spread(alerts, RED_SINGLES, per_game=2)
         groups = [(singles, None)]
@@ -1598,6 +1629,8 @@ def register_commands(bot: SportsBot) -> None:
             await out.followup.send(f"📋 Copy for DraftKings:\n{slip}{note}\n{how} Tap **I placed it** to log your "
                                     "stake and prices; I'll grade it here after the games.", view=placed_view(pid))
             posted += 1
+            seen |= {f"{a.game.id}:{a.player_id}" for a in legs}
+        bot.state.set("red_seen", seen_key, sorted(seen))
         return posted
 
     @tree.command(name="redalerts", description="Soccer shot props DraftKings prices long for players who keep hitting them")
@@ -1648,9 +1681,13 @@ def register_commands(bot: SportsBot) -> None:
             made.append(channel)
             cid = channel.id
             settings = bot.settings.get(cid)
-            if leagues and {s.league for s in bot.store.for_channel(cid)} >= set(leagues) or \
-                    extra and getattr(settings, extra):
+            followed = {s.league for s in bot.store.for_channel(cid)}
+            if leagues and followed >= set(leagues) or extra and getattr(settings, extra):
                 continue  # already set up: running /setup again only adds what's missing
+            if leagues and followed:  # set up before: just follow what's been added since (e.g. a new league)
+                for key in leagues:
+                    bot.store.add(cid, key)
+                continue
             for key in leagues:
                 bot.store.add(cid, key)
             if extra:
