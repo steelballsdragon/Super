@@ -19,6 +19,7 @@ class ChannelSettings:
     reminders: bool = False  # post a heads-up 15 minutes before followed games
     lottos: bool = False  # post the day's lottos here every morning
     picks: bool = False  # post the day's best picks and a safe parlay here every morning
+    redalerts: bool = False  # post the day's red alerts (shot props DraftKings prices long) here every morning
 
 
 class SettingsStore:

@@ -32,6 +32,8 @@ from .parlays import ParlayBook, record_field, settle
 from .props import (LONGSHOTS, MAX_LEGS, SLATE_MAX_LEGS, SLATES, MAX_LEGS_PER_GAME, TARGETS, PropsClient, apply_matchup, build_to_target,
                     chance_at_least, combined, availability, expected_goals, moneyline_leg, parlay_embed, pick_round_robin, pick_slate, round_robin_embed, slate_embed,
                     scorer_lines, trend_legs, trends_embed)
+from .redalerts import (LOTTO_LEGS as RED_LOTTO, PARLAY_LEGS as RED_PARLAY, SINGLES as RED_SINGLES, RedAlerts,
+                        combo_embed, singles_embed, spread)
 from .research import LeanBook, leans, market_chances, parse_research, picks_embed, record_embed, report_embed
 from .schedule import COMMON_TIMEZONES, games_on, today
 from .plays import AssistResolver, PlayResolver
@@ -74,6 +76,7 @@ LOOP_RESTART_SECONDS = 5
 # two hours if the bot was restarting right then.
 DAILY_WINDOW_HOURS = 2
 BETS_HOUR = 7  # lotto and picks channels get the day's posts at this hour (local), before the first kickoffs
+RED_MAX_GAMES = 30  # soccer games looked at for red alerts in a day
 BETS_MAX_POSTS = 8  # at most this many lottos (or leagues' picks) a day per channel
 SOCCER = ("epl", "laliga", "seriea", "bundesliga", "ligue1", "mls", "ucl", "uel", "worldcup")
 # What /setup makes: (channel name, leagues it follows, what else it gets, topic)
@@ -86,7 +89,23 @@ SETUP_CHANNELS = (
     ("🏏-cricket", ("ipl", "cricket"), "", "IPL and international cricket"),
     ("🎯-picks", (), "picks", "Every morning: each league's strongest leans and a safe parlay, graded after the games"),
     ("🎰-lottos", (), "lottos", "Every morning: today's lottos (+3000 to +20000), goalscorer and TD slates, graded"),
+    ("🚨-red-alerts", (), "redalerts", "Every morning: soccer shot props DraftKings prices long for players who keep "
+                                     "hitting them: singles, a parlay and a lotto"),
 )
+INTROS = {
+    "lottos": "Every morning at 7:00 I post **today's lottos** here: for each league with games today, a Lotto parlay "
+              "(4-10 legs, +3000 to +20000), a **goalscorer slate lotto** on big soccer days and **anytime TD "
+              "scorers** on NFL days. Each comes with a slip to copy and an **I placed it** button for /bankroll, and "
+              "every leg is graded here after the games.",
+    "picks": "Every morning at 7:00 I post **today's picks** here: each league's strongest leans (where ESPN's model or "
+             "the form disagrees with the line) and a **safe parlay** around +100. They're graded here after the "
+             "games; `/record` shows how they've done.",
+    "redalerts": "Every morning at 7:00 I post **red alerts** here: soccer **total shots** props (not just on target) "
+                 "where a player has kept hitting the line but **DraftKings prices it long**. I compare each priced "
+                 "player's record (last 10 games, this season and last) with DK's price and post the biggest edges "
+                 "as **singles**, a **parlay** and a **lotto**, graded here after the games. `/redalerts` runs it "
+                 "any time.",
+}
 
 
 @dataclass
@@ -754,12 +773,12 @@ class SportsBot(discord.Client):
         poster = getattr(self, "auto_post", None)
         if poster is None:
             return
-        for channel_id, settings in self.settings.channels_with(lambda s: s.lottos or s.picks):
+        for channel_id, settings in self.settings.channels_with(lambda s: s.lottos or s.picks or s.redalerts):
             tz = self._zone(settings)
             local = (now or datetime.now(timezone.utc)).astimezone(tz)
             if not BETS_HOUR <= local.hour < BETS_HOUR + DAILY_WINDOW_HOURS:
                 continue
-            for kind in ("picks", "lottos"):
+            for kind in ("picks", "lottos", "redalerts"):
                 if not getattr(settings, kind) or self.state.get(kind, str(channel_id)) == local.date().isoformat():
                     continue
                 self.state.set(kind, str(channel_id), local.date().isoformat())
@@ -1490,6 +1509,8 @@ def register_commands(bot: SportsBot) -> None:
         """The morning's posts for a lotto or picks channel: for each league with games today, a Lotto parlay (plus a
         goalscorer or TD slate on a big soccer or NFL day), or the league's best picks. Returns how many went out."""
         day = datetime.now(tz).date()
+        if kind == "redalerts":
+            return await red_post(ChannelPoster(bot, channel_id), day, tz)
         title = "🎰 Today's lottos" if kind == "lottos" else "🎯 Today's picks"
         header = discord.Embed(title=f"{title} · {day:%A %B} {day.day}", color=discord.Color.gold(), description=(
             "Long shots built to pay +3000 to +20000: small stakes only. Every leg is graded here after the games."
@@ -1520,6 +1541,76 @@ def register_commands(bot: SportsBot) -> None:
         return out.posted
 
     bot.auto_post = auto_post
+
+    red = RedAlerts(bot.espn, bot.props, bot._availability)
+
+    async def red_post(out, day, tz, keys=None, quiet=True) -> int:
+        """Today's red alerts: the biggest edges as singles, a parlay and a lotto. Returns how many posts went out."""
+        games = []
+        for key in keys or [k for k in LEAGUES if LEAGUES[k].sport == "soccer"]:
+            try:
+                games += [g for g in await _week(LEAGUES[key])
+                          if (st := start_time(g)) and st.astimezone(tz).date() == day]
+            except Exception:
+                log.warning("Red alerts: no %s schedule", key, exc_info=True)
+        games = sorted(games, key=lambda g: g.start)[:RED_MAX_GAMES]
+        limit = asyncio.Semaphore(3)
+
+        async def one(g):
+            async with limit:
+                try:
+                    return await red.game_alerts(g)
+                except Exception:
+                    log.warning("Red alerts failed for %s", g.id, exc_info=True)
+                    return []
+        try:
+            alerts = sorted((a for found in await asyncio.gather(*(one(g) for g in games)) for a in found),
+                            key=lambda a: a.edge, reverse=True)
+        finally:
+            release_memory()
+        if not alerts:
+            if not quiet:
+                await out.followup.send(f"No red alerts in today's {len(games)} soccer games: DraftKings' shot prices "
+                                        "match the players' records (or the props aren't up yet).")
+            return 0
+        label = f"{day:%A %B} {day.day}"
+        posted = 0
+        singles = spread(alerts, RED_SINGLES, per_game=2)
+        groups = [(singles, None)]
+        parlay = spread(alerts, RED_PARLAY, per_game=1)
+        if len(parlay) >= 2:
+            groups.append((parlay, False))
+        lotto = spread(alerts, RED_LOTTO[1], per_game=1)
+        if len(lotto) >= RED_LOTTO[0] and len(lotto) > len(parlay):
+            groups.append((lotto, True))
+        for legs, lotto_kind in groups:
+            if lotto_kind is None:
+                embed, slip = singles_embed(legs, label)
+                style, rr = "Red alert singles", 1
+            else:
+                embed, slip = combo_embed(legs, lotto_kind)
+                style, rr = ("Red alert lotto" if lotto_kind else "Red alert parlay"), None
+            pid = bot.parlays.record(out.channel_id, legs[0].game.league_key, style, [a.leg() for a in legs],
+                                     round_robin=rr)
+            await out.followup.send(embed=embed)
+            note = await _lineup_note([a.leg() for a in legs])
+            how = ("Bet each one on its own." if rr else "One bet, every leg must hit.")
+            await out.followup.send(f"📋 Copy for DraftKings:\n{slip}{note}\n{how} Tap **I placed it** to log your "
+                                    "stake and prices; I'll grade it here after the games.", view=placed_view(pid))
+            posted += 1
+        return posted
+
+    @tree.command(name="redalerts", description="Soccer shot props DraftKings prices long for players who keep hitting them")
+    @app_commands.describe(league="One soccer league (leave out for all of today's)")
+    @app_commands.choices(league=[c for c in LEAGUE_CHOICES if LEAGUES[c.value].sport == "soccer"])
+    async def redalerts(interaction: discord.Interaction, league: app_commands.Choice[str] | None = None):
+        await interaction.response.defer(thinking=True)
+        tz = bot._zone(bot.settings.get(interaction.channel_id))
+        try:
+            await red_post(interaction, datetime.now(tz).date(), tz, [league.value] if league else None, quiet=False)
+        except Exception:
+            log.exception("Red alerts failed")
+            await interaction.followup.send("Couldn't load DraftKings' props or the players' records, try again shortly.")
 
     async def _post_board(cid: int) -> bool:
         """Posts and pins a live scoreboard in the channel (the loop keeps it up to date)."""
@@ -1564,14 +1655,7 @@ def register_commands(bot: SportsBot) -> None:
                 bot.store.add(cid, key)
             if extra:
                 bot.settings.update(cid, **{extra: True})
-                intro = ("Every morning at 7:00 I post **today's lottos** here: for each league with games today, a "
-                         "Lotto parlay (4-10 legs, +3000 to +20000), a **goalscorer slate lotto** on big soccer days "
-                         "and **anytime TD scorers** on NFL Sundays. Each comes with a slip to copy and an **I placed "
-                         "it** button for /bankroll, and every leg is graded here after the games."
-                         if extra == "lottos" else
-                         "Every morning at 7:00 I post **today's picks** here: each league's strongest leans (where "
-                         "ESPN's model or the form disagrees with the line) and a **safe parlay** around +100. "
-                         "They're graded here after the games; `/record` shows how they've done.")
+                intro = INTROS[extra]
             else:
                 if settings.daily_hour is None:
                     bot.settings.update(cid, daily_hour=9)
