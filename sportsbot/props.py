@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 
 from .espn import Game
@@ -131,6 +131,7 @@ class PlayerGame:
     opponent: str  # abbreviation
     stats: dict[str, float]
     event_id: str = ""
+    home: bool | None = None  # played at home (None when the game log doesn't say)
 
 
 def _computed(stats: dict[str, float]) -> dict[str, float]:
@@ -140,6 +141,9 @@ def _computed(stats: dict[str, float]) -> dict[str, float]:
     s["totalBases"] = s.get("hits", 0) + s.get("doubles", 0) + 2 * s.get("triples", 0) + 3 * s.get("homeRuns", 0)
     s["goalOrAssist"] = s.get("totalGoals", 0) + s.get("goalAssists", 0)
     return s
+
+
+VENUE = {"vs": True, "@": False}  # a game log's "atVs": home or away
 
 
 def parse_gamelog(data: dict) -> tuple[list[PlayerGame], bool]:
@@ -162,7 +166,7 @@ def parse_gamelog(data: dict) -> tuple[list[PlayerGame], bool]:
                 stats = {raw[n]: _f(v) for n, v in zip(names, ev.get("stats") or [])}
                 games.append(PlayerGame(meta.get("gameDate", ""), season,
                                         (meta.get("opponent") or {}).get("abbreviation", ""), _computed(stats),
-                                        str(ev.get("eventId", ""))))
+                                        str(ev.get("eventId", "")), VENUE.get(meta.get("atVs"))))
     games.sort(key=lambda g: g.when, reverse=True)
     return games, "innings" in names
 
@@ -718,8 +722,7 @@ def _slim(parsed: tuple[list[PlayerGame], bool], path_or_url: str) -> tuple[list
     if sport is None:
         return parsed
     keep = {p.stat for p in PROPS[sport]}
-    return [PlayerGame(g.when, g.season, g.opponent, {k: v for k, v in g.stats.items() if k in keep}, g.event_id)
-            for g in games], pitcher
+    return [replace(g, stats={k: v for k, v in g.stats.items() if k in keep}) for g in games], pitcher
 
 
 def injured_names(summary: dict) -> set[str]:

@@ -1,0 +1,238 @@
+{
+ "season": {
+  "year": 2026,
+  "type": 13907,
+  "name": "2026 Brasileiro Serie A ",
+  "displayName": "2026 Futebol Brasileiro",
+  "half": 1
+ },
+ "requestedSeason": {
+  "year": 2026,
+  "type": 13907,
+  "name": "2026 Brasileiro Serie A ",
+  "displayName": "2026 Futebol Brasileiro"
+ },
+ "team": {
+  "id": "3457",
+  "abbreviation": "VIT",
+  "displayName": "Vitória"
+ },
+ "events": [
+  {
+   "id": "401841250",
+   "date": "2026-10-07T23:00Z",
+   "name": "Chapecoense at Vitória",
+   "competitions": [
+    {
+     "date": "2026-10-07T23:00Z",
+     "status": {
+      "type": {
+       "name": "STATUS_FULL_TIME",
+       "state": "post",
+       "completed": true
+      }
+     },
+     "competitors": [
+      {
+       "id": "3457",
+       "homeAway": "home"
+      },
+      {
+       "id": "9318",
+       "homeAway": "away"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "401841242",
+   "date": "2026-09-20T19:00Z",
+   "name": "Cruzeiro at Vitória",
+   "competitions": [
+    {
+     "date": "2026-09-20T19:00Z",
+     "status": {
+      "type": {
+       "name": "STATUS_FULL_TIME",
+       "state": "post",
+       "completed": true
+      }
+     },
+     "competitors": [
+      {
+       "id": "3457",
+       "homeAway": "home"
+      },
+      {
+       "id": "2022",
+       "homeAway": "away"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "401841235",
+   "date": "2026-09-13T19:00Z",
+   "name": "Vitória at Mirassol",
+   "competitions": [
+    {
+     "date": "2026-09-13T19:00Z",
+     "status": {
+      "type": {
+       "name": "STATUS_FULL_TIME",
+       "state": "post",
+       "completed": true
+      }
+     },
+     "competitors": [
+      {
+       "id": "9169",
+       "homeAway": "home"
+      },
+      {
+       "id": "3457",
+       "homeAway": "away"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "401841222",
+   "date": "2026-09-07T23:00Z",
+   "name": "Grêmio at Vitória",
+   "competitions": [
+    {
+     "date": "2026-09-07T23:00Z",
+     "status": {
+      "type": {
+       "name": "STATUS_FULL_TIME",
+       "state": "post",
+       "completed": true
+      }
+     },
+     "competitors": [
+      {
+       "id": "3457",
+       "homeAway": "home"
+      },
+      {
+       "id": "6273",
+       "homeAway": "away"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "401841216",
+   "date": "2026-08-29T21:30Z",
+   "name": "Vitória at Atlético-MG",
+   "competitions": [
+    {
+     "date": "2026-08-29T21:30Z",
+     "status": {
+      "type": {
+       "name": "STATUS_FULL_TIME",
+       "state": "post",
+       "completed": true
+      }
+     },
+     "competitors": [
+      {
+       "id": "7632",
+       "homeAway": "home"
+      },
+      {
+       "id": "3457",
+       "homeAway": "away"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "401841200",
+   "date": "2026-08-23T19:00Z",
+   "name": "Bahia at Vitória",
+   "competitions": [
+    {
+     "date": "2026-08-23T19:00Z",
+     "status": {
+      "type": {
+       "name": "STATUS_FULL_TIME",
+       "state": "post",
+       "completed": true
+      }
+     },
+     "competitors": [
+      {
+       "id": "3457",
+       "homeAway": "home"
+      },
+      {
+       "id": "9967",
+       "homeAway": "away"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "401841197",
+   "date": "2026-08-16T21:30Z",
+   "name": "Botafogo at Vitória",
+   "competitions": [
+    {
+     "date": "2026-08-16T21:30Z",
+     "status": {
+      "type": {
+       "name": "STATUS_FULL_TIME",
+       "state": "post",
+       "completed": true
+      }
+     },
+     "competitors": [
+      {
+       "id": "3457",
+       "homeAway": "home"
+      },
+      {
+       "id": "6086",
+       "homeAway": "away"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "401841187",
+   "date": "2026-08-09T22:30Z",
+   "name": "Vitória at Flamengo",
+   "competitions": [
+    {
+     "date": "2026-08-09T22:30Z",
+     "status": {
+      "type": {
+       "name": "STATUS_FULL_TIME",
+       "state": "post",
+       "completed": true
+      }
+     },
+     "competitors": [
+      {
+       "id": "819",
+       "homeAway": "home"
+      },
+      {
+       "id": "3457",
+       "homeAway": "away"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

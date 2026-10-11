@@ -1,0 +1,236 @@
+{
+ "filters": [
+  {
+   "displayName": "Season",
+   "name": "season",
+   "value": "2026",
+   "options": [
+    {
+     "value": "2026",
+     "displayValue": "2026"
+    },
+    {
+     "value": "2025",
+     "displayValue": "2025"
+    }
+   ]
+  }
+ ],
+ "names": [
+  "totalGoals",
+  "goalAssists",
+  "totalShots",
+  "shotsOnTarget",
+  "foulsCommitted",
+  "foulsSuffered",
+  "offsides",
+  "yellowCards",
+  "redCards"
+ ],
+ "events": {
+  "401841250": {
+   "id": "401841250",
+   "atVs": "vs",
+   "gameDate": "2026-10-07T23:00:00.000+00:00",
+   "score": "4-0",
+   "homeTeamId": "3457",
+   "awayTeamId": "9318",
+   "gameResult": "W",
+   "opponent": {
+    "id": "9318",
+    "abbreviation": "CHA",
+    "displayName": "Chapecoense"
+   },
+   "team": {
+    "id": "3457",
+    "abbreviation": "VIT"
+   }
+  },
+  "401841242": {
+   "id": "401841242",
+   "atVs": "vs",
+   "gameDate": "2026-09-20T19:00:00.000+00:00",
+   "score": "3-1",
+   "homeTeamId": "3457",
+   "awayTeamId": "2022",
+   "gameResult": "L",
+   "opponent": {
+    "id": "2022",
+    "abbreviation": "CRU",
+    "displayName": "Cruzeiro"
+   },
+   "team": {
+    "id": "3457",
+    "abbreviation": "VIT"
+   }
+  },
+  "401841235": {
+   "id": "401841235",
+   "atVs": "@",
+   "gameDate": "2026-09-13T19:00:00.000+00:00",
+   "score": "2-2",
+   "homeTeamId": "9169",
+   "awayTeamId": "3457",
+   "gameResult": "D",
+   "opponent": {
+    "id": "9169",
+    "abbreviation": "MIR",
+    "displayName": "Mirassol"
+   },
+   "team": {
+    "id": "3457",
+    "abbreviation": "VIT"
+   }
+  },
+  "401841222": {
+   "id": "401841222",
+   "atVs": "vs",
+   "gameDate": "2026-09-07T23:00:00.000+00:00",
+   "score": "1-0",
+   "homeTeamId": "3457",
+   "awayTeamId": "6273",
+   "gameResult": "W",
+   "opponent": {
+    "id": "6273",
+    "abbreviation": "GRE",
+    "displayName": "Grêmio"
+   },
+   "team": {
+    "id": "3457",
+    "abbreviation": "VIT"
+   }
+  },
+  "401841216": {
+   "id": "401841216",
+   "atVs": "@",
+   "gameDate": "2026-08-29T21:30:00.000+00:00",
+   "score": "2-1",
+   "homeTeamId": "7632",
+   "awayTeamId": "3457",
+   "gameResult": "L",
+   "opponent": {
+    "id": "7632",
+    "abbreviation": "CAM",
+    "displayName": "Atlético-MG"
+   },
+   "team": {
+    "id": "3457",
+    "abbreviation": "VIT"
+   }
+  },
+  "401841200": {
+   "id": "401841200",
+   "atVs": "vs",
+   "gameDate": "2026-08-23T19:00:00.000+00:00",
+   "score": "2-0",
+   "homeTeamId": "3457",
+   "awayTeamId": "9967",
+   "gameResult": "L",
+   "opponent": {
+    "id": "9967",
+    "abbreviation": "BAH",
+    "displayName": "Bahia"
+   },
+   "team": {
+    "id": "3457",
+    "abbreviation": "VIT"
+   }
+  }
+ },
+ "seasonTypes": [
+  {
+   "displayName": "2026 Brasileiro Serie A ",
+   "categories": [
+    {
+     "type": "event",
+     "events": [
+      {
+       "eventId": "401841250",
+       "stats": [
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0"
+       ]
+      },
+      {
+       "eventId": "401841242",
+       "stats": [
+        "0",
+        "0",
+        "1",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0"
+       ]
+      },
+      {
+       "eventId": "401841235",
+       "stats": [
+        "0",
+        "0",
+        "0",
+        "0",
+        "1",
+        "1",
+        "0",
+        "0",
+        "0"
+       ]
+      },
+      {
+       "eventId": "401841222",
+       "stats": [
+        "0",
+        "0",
+        "1",
+        "1",
+        "2",
+        "0",
+        "0",
+        "0",
+        "0"
+       ]
+      },
+      {
+       "eventId": "401841216",
+       "stats": [
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0"
+       ]
+      },
+      {
+       "eventId": "401841200",
+       "stats": [
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        "0"
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

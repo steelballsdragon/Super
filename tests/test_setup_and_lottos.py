@@ -16,6 +16,14 @@ def make_bot(tmp_path):
     register_commands(bot)
     bot.sent = []
 
+    async def no_games(key):  # the notification panel lists the week's games: none here, and no network
+        return []
+    bot.week_games = no_games
+
+    async def no_lineups(league, game_id, path=""):  # slips' lineup notes ask ESPN: not in a test
+        raise RuntimeError("offline")
+    bot._availability = no_lineups
+
     async def send(channel_id, embed=None, content=None, view=None):
         bot.sent.append((channel_id, embed, content, view))
 
