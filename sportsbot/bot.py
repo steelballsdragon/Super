@@ -25,6 +25,7 @@ from .espn import start_time
 from .formatting import ball_messages, board_embed, reminder_text, schedule_embed, scoreboard_embed, update_embed
 from .leagues import LEAGUES
 from .livescore import FastGoals
+from .notify import NotifyDesk, ensure_role, role_mention
 from .limits import MESSAGE, clip, fit_embed
 from .odds import OddsBook, grade_text, line_text
 from .cricket_props import CricketHistory
@@ -33,7 +34,9 @@ from .props import (LONGSHOTS, MAX_LEGS, SLATE_MAX_LEGS, SLATES, MAX_LEGS_PER_GA
                     chance_at_least, combined, availability, expected_goals, moneyline_leg, parlay_embed, pick_round_robin, pick_slate, round_robin_embed, slate_embed,
                     scorer_lines, trend_legs, trends_embed)
 from .redalerts import (LOTTO_LEGS as RED_LOTTO, PARLAY_LEGS as RED_PARLAY, SINGLES as RED_SINGLES, RedAlerts,
-                        combo_embed, singles_embed, spread)
+                        combo_embed, post_style, report_embed as red_report_embed, singles_embed, spread,
+                        strong_line, tuned_edges)
+from .shotmodel import MatchHistory
 from .research import LeanBook, leans, market_chances, parse_research, picks_embed, record_embed, report_embed
 from .schedule import COMMON_TIMEZONES, games_on, today
 from .plays import AssistResolver, PlayResolver
@@ -77,6 +80,10 @@ LOOP_RESTART_SECONDS = 5
 DAILY_WINDOW_HOURS = 2
 BETS_HOUR = 7  # lotto and picks channels get the day's posts at this hour (local), before the first kickoffs
 RED_MAX_GAMES = 30  # soccer games looked at for red alerts in a day
+RED_CONFIRM_WINDOW = (10 * 60, 75 * 60)  # lineup-confirmed alerts: games starting between 10 and 75 minutes from now
+RED_CONFIRM_SECONDS = 5 * 60  # how often to look for newly announced lineups
+RED_REPORT = (0, 9)  # the weekly red alerts report: Monday at 9:00 (local)
+PANEL_SECONDS = 120  # notification panels are re-rendered at most this often
 RED_LATE_HOUR = 14  # a second look in the afternoon: DraftKings fills in props through the day (Brazil plays late)
 BETS_MAX_POSTS = 8  # at most this many lottos (or leagues' picks) a day per channel
 SOCCER = ("epl", "laliga", "seriea", "bundesliga", "ligue1", "mls", "brasileirao", "ucl", "uel", "worldcup")
@@ -91,10 +98,16 @@ SETUP_CHANNELS = (
     ("🏏-cricket", ("ipl", "cricket"), "", "IPL and international cricket"),
     ("🎯-picks", (), "picks", "Every morning: each league's strongest leans and a safe parlay, graded after the games"),
     ("🎰-lottos", (), "lottos", "Every morning: today's lottos (+3000 to +20000), goalscorer and TD slates, graded"),
+    ("🔔-notifications", (), "notify", "Pick the games you want pings for: kickoff, every score, halftime and the "
+                                     "final, by DM or here"),
     ("🚨-red-alerts", (), "redalerts", "Every morning: soccer shot props DraftKings prices long for players who keep "
                                      "hitting them: singles, a parlay and a lotto"),
 )
 INTROS = {
+    "notify": "Pick the games you want to hear about in the menus below: I'll message you at **kickoff, every score, "
+              "halftime and the final** (and lineup-confirmed red alerts for those games). DMs by default; **Ping me "
+              "here** switches to mentions in this channel. **🚨 Red alert pings** gives you the Red Alert role, "
+              "pinged for the strongest red alerts. `/notify` opens the same picker anywhere.",
     "lottos": "Every morning at 7:00 I post **today's lottos** here: for each league with games today, a Lotto parlay "
               "(4-10 legs, +3000 to +20000), a **goalscorer slate lotto** on big soccer days and **anytime TD "
               "scorers** on NFL days. Each comes with a slip to copy and an **I placed it** button for /bankroll, and "
@@ -173,6 +186,12 @@ class SportsBot(discord.Client):
         self._boards_shown: dict[int, dict] = {}
         self.espn = ESPNClient()
         self.fast = FastGoals(self.espn._get_session)  # soccer goals from LiveScore, often minutes before ESPN
+        # Who started past matches and how many shots teams allowed, for the red alerts (kept on disk: it never changes).
+        self.match_history = MatchHistory(self.espn, Path(store.path).with_name("match_history.json"))
+        # People's own game notifications (the 🔔 tab and /notify).
+        self.notify = NotifyDesk(self, Path(store.path).with_name("notify.json"), self.notify_games)
+        self._red_edges: tuple[float, dict[str, float]] = (0.0, {})
+        self._panels_at = self._red_checked_at = 0.0
         self.props = PropsClient(self.espn)
         # Recorded cricket scorecards get their own file: they're big, and state.json is rewritten often.
         self.cricket = CricketHistory(self.props, StateStore(self.state.path.with_name("cricket.json")))
@@ -250,11 +269,26 @@ class SportsBot(discord.Client):
     def _goals_fetcher(self, league):
         return lambda event_id: self.espn.goal_details(league, event_id)
 
+    async def notify_games(self) -> list:
+        """Live and upcoming games in the leagues the bot checks, for the notification pickers."""
+        keys = [k for k in LEAGUES if k in self.store.leagues() | self.notify.store.leagues()]
+        live = [g for k in keys for g in self.latest.get(k, []) if g.state == "in"]
+        weeks = await gather_within(6, *(self.week_games(k) for k in keys))
+        return live + [g for week in weeks if isinstance(week, list) for g in week]
+
+    def red_edges(self) -> dict[str, float]:
+        """Each league's edge bar for red alerts, tuned from how its alerts have done (worked out at most hourly)."""
+        at, edges = self._red_edges
+        if time.monotonic() - at > 3600:
+            edges = tuned_edges([p for _, p in self.records.items("parlays")], time.time())
+            self._red_edges = (time.monotonic(), edges)
+        return edges
+
     async def setup_hook(self) -> None:
         self._prune_state()
         register_commands(self)
         # "I placed it" and "Player stats" buttons keep working after restarts.
-        self.add_dynamic_items(PlacedButton, StatsButton)
+        self.add_dynamic_items(PlacedButton, StatsButton, *self.notify.dynamic_items())
         self.poll.start()
         try:
             if self.dev_guild:
@@ -309,7 +343,8 @@ class SportsBot(discord.Client):
 
     async def _poll_cycle(self) -> None:
         # Leagues with research leans or parlay legs still to grade are checked even if no channel follows them.
-        active = (self.store.leagues() | self.leans.pending_leagues() | self.parlays.pending_leagues()) & LEAGUES.keys()
+        active = (self.store.leagues() | self.leans.pending_leagues() | self.parlays.pending_leagues()
+                  | self.notify.store.leagues()) & LEAGUES.keys()
         for key in list(LEAGUES):
             if key not in active:
                 self.tracker.forget(key)
@@ -330,6 +365,13 @@ class SportsBot(discord.Client):
         await self._guarded("lineup checks", self._check_lineups())
         await self._guarded("daily schedules", self._post_daily_schedules())
         await self._guarded("daily lottos and picks", self._post_daily_bets())
+        if time.monotonic() - self._panels_at >= PANEL_SECONDS:
+            self._panels_at = time.monotonic()
+            await self._guarded("notification panels", self.notify.refresh_panels())
+        if time.monotonic() - self._red_checked_at >= RED_CONFIRM_SECONDS and getattr(self, "red_confirmed", None):
+            self._red_checked_at = time.monotonic()
+            self._background(self._guarded("lineup-confirmed red alerts", self.red_confirmed()))
+        await self._guarded("weekly red alerts report", self._post_red_report())
         if time.monotonic() - self._last_prune >= PRUNE_SECONDS:
             self._last_prune = time.monotonic()
             self._prune_state()
@@ -353,6 +395,9 @@ class SportsBot(discord.Client):
         self.odds.prune()
         now = time.time()
         self.result_lookups = {k: t for k, t in self.result_lookups.items() if t > now}
+        for key, at in self.state.items("red_confirmed"):
+            if at < time.time() - 2 * 86400:
+                self.state.delete("red_confirmed", key)
         old_day = (datetime.now(timezone.utc) - timedelta(days=3)).date().isoformat()
         for key, _ in self.state.items("red_seen"):
             if key.rsplit(":", 1)[-1] < old_day:
@@ -426,15 +471,21 @@ class SportsBot(discord.Client):
                 # Ball-by-ball channels already see every wicket and over.
                 and not (s.ball_by_ball and update.kind in (WICKET, OVERS))
             }
-            if not channels:
-                continue
             plain = update_embed(update)
             with_odds = self._with_odds(update)
+            # Edits reach every copy: the channels' posts and people's notifications.
             if update.provisional and update.edit:  # the score posted at once: now the play (or a newer score)
                 await self._resolve_provisional(update, plain, with_odds)
                 continue
             if update.edit:  # ESPN filled in or corrected a play already posted: edit those posts
                 await self._edit_play(update, plain, with_odds)
+                continue
+            # People who picked this game in the 🔔 tab or /notify, whether or not a channel follows its league.
+            sent = await self.notify.notify(update, plain, stats_view(update.game) if update.kind in (HALFTIME, FINAL)
+                                            else None)
+            if sent and (key := _post_key(update)):
+                self.play_posts.setdefault((update.game.id, key), []).extend((time.time(), cid, m) for cid, m in sent)
+            if not channels:
                 continue
             view = stats_view(update.game) if update.kind in (HALFTIME, FINAL) else None  # 📊 Player stats
             for channel_id in channels:
@@ -800,6 +851,20 @@ class SportsBot(discord.Client):
             self.state.set("redalerts-late", str(channel_id), local.date().isoformat())
             self._background(self._guarded(f"afternoon red alerts for {channel_id}",
                                            poster(channel_id, "redalerts-late", tz)))
+
+    async def _post_red_report(self, now: datetime | None = None) -> None:
+        """Monday morning: how last week's red alerts did, in every red alerts channel."""
+        for channel_id, settings in self.settings.channels_with(lambda s: s.redalerts):
+            local = (now or datetime.now(timezone.utc)).astimezone(self._zone(settings))
+            if (local.weekday(), local.hour) != RED_REPORT:
+                continue
+            week = f"{local.isocalendar()[0]}-W{local.isocalendar()[1]}"
+            if self.state.get("red_report", str(channel_id)) == week:
+                continue
+            self.state.set("red_report", str(channel_id), week)
+            self._red_edges = (0.0, {})  # re-tune now, so the report's tuning line is what takes effect
+            parlays = [p for _, p in self.records.items("parlays")]
+            await self._send(channel_id, red_report_embed(parlays, local - timedelta(days=7), local))
 
     # ----- live scoreboards -----
 
@@ -1558,10 +1623,12 @@ def register_commands(bot: SportsBot) -> None:
         return out.posted
 
     bot.auto_post = auto_post
+    bot.notify.register(tree)
 
-    red = RedAlerts(bot.espn, bot.props, bot._availability)
+    red = RedAlerts(bot.espn, bot.props, bot._availability, history=bot.match_history,
+                    edges=lambda key: bot.red_edges().get(key))
 
-    async def red_post(out, day, tz, keys=None, quiet=True, later=False) -> int:
+    async def red_post(out, day, tz, keys=None, quiet=True, later=False, games_only=None, confirmed=False) -> int:
         """Today's red alerts: the biggest edges as singles, a parlay and a lotto. Returns how many posts went out.
         Asked for (quiet=False) once the day's games have all started, it looks at the next day's instead."""
         week = []
@@ -1577,6 +1644,8 @@ def register_commands(bot: SportsBot) -> None:
         if not games and not quiet:
             day += timedelta(days=1)
             games = on(day)
+        if games_only is not None:  # the lineup-confirmed look: just these games
+            games = games_only
         if later:  # the afternoon look: games that haven't started an hour from now
             soon = datetime.now(timezone.utc) + timedelta(hours=1)
             games = [g for g in games if (st := start_time(g)) and st > soon]
@@ -1586,7 +1655,7 @@ def register_commands(bot: SportsBot) -> None:
         async def one(g):
             async with limit:
                 try:
-                    return await red.game_alerts(g)
+                    return await red.game_alerts(g, confirmed_only=confirmed)
                 except Exception:
                     log.warning("Red alerts failed for %s", g.id, exc_info=True)
                     return []
@@ -1597,6 +1666,17 @@ def register_commands(bot: SportsBot) -> None:
             release_memory()
         seen_key = f"{out.channel_id}:{day.isoformat()}"
         seen = set(bot.state.get("red_seen", seen_key) or [])
+        async def say(text: str) -> None:  # a plain message (the morning poster only passes on embeds and slips)
+            if isinstance(out, ChannelPoster):
+                await bot._send(out.channel_id, content=text)
+            else:
+                await out.followup.send(text)
+
+        if confirmed and (starting := [a for a in alerts if f"{a.game.id}:{a.player_id}" in seen]):
+            g = starting[0].game
+            await say(f"✅ Lineups are out for **{g.away.name} @ {g.home.name}**: "
+                      + ", ".join(f"**{a.pick}**" for a in starting) + " from today's red alerts start, and "
+                      "DraftKings still prices them long.")
         alerts = [a for a in alerts if f"{a.game.id}:{a.player_id}" not in seen]  # posted earlier today
         if not alerts:
             if not quiet:
@@ -1616,11 +1696,11 @@ def register_commands(bot: SportsBot) -> None:
             groups.append((lotto, True))
         for legs, lotto_kind in groups:
             if lotto_kind is None:
-                embed, slip = singles_embed(legs, label)
-                style, rr = "Red alert singles", 1
+                embed, slip = singles_embed(legs, label, confirmed=confirmed)
+                style, rr = post_style("singles", confirmed=confirmed), 1
             else:
                 embed, slip = combo_embed(legs, lotto_kind)
-                style, rr = ("Red alert lotto" if lotto_kind else "Red alert parlay"), None
+                style, rr = post_style("lotto" if lotto_kind else "parlay", confirmed=confirmed), None
             pid = bot.parlays.record(out.channel_id, legs[0].game.league_key, style, [a.leg() for a in legs],
                                      round_robin=rr)
             await out.followup.send(embed=embed)
@@ -1631,7 +1711,55 @@ def register_commands(bot: SportsBot) -> None:
             posted += 1
             seen |= {f"{a.game.id}:{a.player_id}" for a in legs}
         bot.state.set("red_seen", seen_key, sorted(seen))
+        if text := strong_line(singles):  # the best of them: ping whoever took the Red Alert role
+            try:
+                mention = role_mention(getattr(await bot._channel(out.channel_id), "guild", None))
+            except Exception:
+                mention = ""
+            await say(f"{mention} {text}".strip())
         return posted
+
+    async def red_confirmed() -> None:
+        """Lineup-confirmed red alerts: for soccer games starting soon, once both starting XIs are out (looked at every
+        few minutes), the starters DraftKings still prices long: in every red alerts channel, and to the people
+        following that game."""
+        channels = bot.settings.channels_with(lambda s: s.redalerts)
+        if not channels and not bot.notify.store.counts()[1]:
+            return  # nobody to tell
+        now = time.time()
+        soon = []
+        for key in [k for k in LEAGUES if LEAGUES[k].sport == "soccer"]:
+            try:
+                week = await bot.week_games(key)
+            except Exception:
+                continue
+            for g in week:
+                st = start_time(g)
+                if st and RED_CONFIRM_WINDOW[0] <= st.timestamp() - now <= RED_CONFIRM_WINDOW[1] \
+                        and not bot.state.get("red_confirmed", g.id):
+                    soon.append(g)
+        for g in soon:
+            followers = bot.notify.store.followers(g.league_key, g.id)
+            if not channels and not followers:
+                continue
+            try:
+                av = await bot._availability(g.league_key, g.id, g.path)
+            except Exception:
+                continue
+            if not (av.announced(g.home.abbrev) and av.announced(g.away.abbrev)):
+                continue  # not out yet: look again in a few minutes
+            bot.state.set("red_confirmed", g.id, now)
+            for cid, settings in channels:
+                tz = bot._zone(settings)
+                await red_post(ChannelPoster(bot, cid), datetime.now(tz).date(), tz, games_only=[g], confirmed=True)
+            if followers:
+                alerts = sorted(await red.game_alerts(g, confirmed_only=True), key=lambda a: a.edge, reverse=True)
+                if alerts:
+                    start = start_time(g).astimezone(EASTERN)
+                    embed, _ = singles_embed(alerts[:RED_SINGLES], f"{start:%A %B} {start.day}", confirmed=True)
+                    await bot.notify.notify_game(g.league_key, g.id, embed=embed)
+
+    bot.red_confirmed = red_confirmed
 
     @tree.command(name="redalerts", description="Soccer shot props DraftKings prices long for players who keep hitting them")
     @app_commands.describe(league="One soccer league (leave out for all of today's)")
@@ -1680,6 +1808,16 @@ def register_commands(bot: SportsBot) -> None:
                 channel = await guild.create_text_channel(name, category=cat, topic=topic)
             made.append(channel)
             cid = channel.id
+            if extra == "notify":  # the 🔔 tab: an intro and the game picker, once
+                if cid not in bot.notify.store.panels():
+                    await bot._send(cid, discord.Embed(title=channel.name, description=INTROS["notify"],
+                                                       color=discord.Color.blue()))
+                    await bot.notify.post_panel(cid)
+                try:
+                    await ensure_role(guild)
+                except Exception:
+                    log.warning("Couldn't set up the Red Alert role", exc_info=True)
+                continue
             settings = bot.settings.get(cid)
             followed = {s.league for s in bot.store.for_channel(cid)}
             if leagues and followed >= set(leagues) or extra and getattr(settings, extra):
@@ -1852,6 +1990,7 @@ def register_commands(bot: SportsBot) -> None:
             lines.append(line)
         if any(LEAGUES[k].sport == "soccer" for k in active):
             lines.append(f"⚡ **Fast soccer goals (LiveScore)**: {bot.fast.status()}")
+        lines.append(f"🔔 **Notifications**: {bot.notify.status()}")
         embed = discord.Embed(
             title="ScoreBot status",
             description="\n".join(lines) or "No channel follows anything yet. Use `/follow`.",

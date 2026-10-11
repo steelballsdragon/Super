@@ -1,0 +1,472 @@
+{
+ "header": {
+  "id": "401840993",
+  "competitions": [
+   {
+    "id": "401840993",
+    "date": "2026-02-11T00:30Z",
+    "status": {
+     "type": {
+      "name": "STATUS_FULL_TIME",
+      "state": "post",
+      "completed": true
+     }
+    },
+    "competitors": [
+     {
+      "id": "3457",
+      "homeAway": "home",
+      "score": "1",
+      "team": {
+       "id": "3457",
+       "abbreviation": "VIT",
+       "displayName": "Vitória"
+      }
+     },
+     {
+      "id": "819",
+      "homeAway": "away",
+      "score": "2",
+      "team": {
+       "id": "819",
+       "abbreviation": "FLA",
+       "displayName": "Flamengo"
+      }
+     }
+    ]
+   }
+  ]
+ },
+ "boxscore": {
+  "teams": [
+   {
+    "team": {
+     "id": "3457",
+     "abbreviation": "VIT",
+     "displayName": "Vitória"
+    },
+    "statistics": [
+     {
+      "name": "totalShots",
+      "displayValue": "10",
+      "label": "SHOTS"
+     },
+     {
+      "name": "shotsOnTarget",
+      "displayValue": "3",
+      "label": "ON GOAL"
+     }
+    ]
+   },
+   {
+    "team": {
+     "id": "819",
+     "abbreviation": "FLA",
+     "displayName": "Flamengo"
+    },
+    "statistics": [
+     {
+      "name": "totalShots",
+      "displayValue": "6",
+      "label": "SHOTS"
+     },
+     {
+      "name": "shotsOnTarget",
+      "displayValue": "2",
+      "label": "ON GOAL"
+     }
+    ]
+   }
+  ]
+ },
+ "rosters": [
+  {
+   "homeAway": "home",
+   "team": {
+    "id": "3457",
+    "abbreviation": "VIT",
+    "displayName": "Vitória"
+   },
+   "roster": [
+    {
+     "athlete": {
+      "id": "155156",
+      "displayName": "Gabriel"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "272576",
+      "displayName": "Camutanga"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "266676",
+      "displayName": "Luan Cândido"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "252315",
+      "displayName": "Caique"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "269915",
+      "displayName": "Ramon"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "318174",
+      "displayName": "Nathan"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "339115",
+      "displayName": "Dudu"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "269852",
+      "displayName": "Gabriel Baralhas"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "218972",
+      "displayName": "Matheus"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "256044",
+      "displayName": "Erick"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "227314",
+      "displayName": "Renato Kayzer"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "203887",
+      "displayName": "Neris"
+     },
+     "starter": false,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "198392",
+      "displayName": "Marinho"
+     },
+     "starter": false,
+     "subbedIn": true
+    },
+    {
+     "athlete": {
+      "id": "218649",
+      "displayName": "Emmanuel Martínez"
+     },
+     "starter": false,
+     "subbedIn": true
+    },
+    {
+     "athlete": {
+      "id": "315766",
+      "displayName": "Matheusinho"
+     },
+     "starter": false,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "229392",
+      "displayName": "Aitor Cantalapiedra"
+     },
+     "starter": false,
+     "subbedIn": true
+    },
+    {
+     "athlete": {
+      "id": "141626",
+      "displayName": "Osvaldo"
+     },
+     "starter": false,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "402426",
+      "displayName": "Edenilson"
+     },
+     "starter": false,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "253009",
+      "displayName": "Lucas"
+     },
+     "starter": false,
+     "subbedIn": true
+    },
+    {
+     "athlete": {
+      "id": "287941",
+      "displayName": "Lucas Arcanjo"
+     },
+     "starter": false,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "285395",
+      "displayName": "Fabrício Santos"
+     },
+     "starter": false,
+     "subbedIn": true
+    },
+    {
+     "athlete": {
+      "id": "253276",
+      "displayName": "Ronald"
+     },
+     "starter": false,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "228400",
+      "displayName": "Ze Marcos"
+     },
+     "starter": false,
+     "subbedIn": false
+    }
+   ]
+  },
+  {
+   "homeAway": "away",
+   "team": {
+    "id": "819",
+    "abbreviation": "FLA",
+    "displayName": "Flamengo"
+   },
+   "roster": [
+    {
+     "athlete": {
+      "id": "215388",
+      "displayName": "Agustín Rossi"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "145405",
+      "displayName": "Léo Pereira"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "252316",
+      "displayName": "Léo Ortiz"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "125514",
+      "displayName": "Alex Sandro"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "246844",
+      "displayName": "Emerson Royal"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "179767",
+      "displayName": "Giorgian de Arrascaeta"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "334752",
+      "displayName": "Evertton"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "202533",
+      "displayName": "Erick Pulgar"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "235017",
+      "displayName": "Pedro"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "198940",
+      "displayName": "Everton"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "234715",
+      "displayName": "Lucas Paquetá"
+     },
+     "starter": true,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "398646",
+      "displayName": "Pablo Lucio"
+     },
+     "starter": false,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "254145",
+      "displayName": "Vitão"
+     },
+     "starter": false,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "358167",
+      "displayName": "Wallace Yan"
+     },
+     "starter": false,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "253937",
+      "displayName": "Samuel Lino"
+     },
+     "starter": false,
+     "subbedIn": true
+    },
+    {
+     "athlete": {
+      "id": "278802",
+      "displayName": "Andrew"
+     },
+     "starter": false,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "277352",
+      "displayName": "Gonzalo Plata"
+     },
+     "starter": false,
+     "subbedIn": true
+    },
+    {
+     "athlete": {
+      "id": "357115",
+      "displayName": "Daniel Sales"
+     },
+     "starter": false,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "201683",
+      "displayName": "Bruno Henrique"
+     },
+     "starter": false,
+     "subbedIn": true
+    },
+    {
+     "athlete": {
+      "id": "170369",
+      "displayName": "Danilo"
+     },
+     "starter": false,
+     "subbedIn": false
+    },
+    {
+     "athlete": {
+      "id": "251889",
+      "displayName": "Nicolás de la Cruz"
+     },
+     "starter": false,
+     "subbedIn": true
+    },
+    {
+     "athlete": {
+      "id": "208700",
+      "displayName": "Jorge Carrascal"
+     },
+     "starter": false,
+     "subbedIn": true
+    },
+    {
+     "athlete": {
+      "id": "203077",
+      "displayName": "Ayrton Lucas"
+     },
+     "starter": false,
+     "subbedIn": false
+    }
+   ]
+  }
+ ]
+}
